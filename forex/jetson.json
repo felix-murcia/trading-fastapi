@@ -1,0 +1,492 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "// ============================================\n// AGENTE TÉCNICO - Versión Final Optimizada\n// ============================================\n\nconst context = $input.all()[0].json;\nconst marketData = context.market_data;\n\nconst technicalData = {\n    symbol: marketData.best_pair || \"EURUSD\",\n    price: marketData.technical?.current_price || 0,\n    rsi: marketData.technical?.rsi || 50,\n    trend: marketData.technical?.trend || \"neutral\",\n    support: marketData.technical?.support || 0,\n    resistance: marketData.technical?.resistance || 0,\n    score: marketData.best_score || 0\n};\n\nconst rsiStatus = technicalData.rsi < 30 ? \"oversold\" : (technicalData.rsi > 70 ? \"overbought\" : \"neutral\");\nconst rangeLow = (technicalData.price - 0.001).toFixed(5);\nconst rangeHigh = (technicalData.price + 0.001).toFixed(5);\nconst stopLow = (technicalData.price - 0.003).toFixed(5);\nconst stopHigh = (technicalData.price - 0.002).toFixed(5);\n\n// Prompt optimizado (~180 tokens)\nconst prompt = `[INST] Tech analysis ${technicalData.symbol}. P:${technicalData.price} RSI:${technicalData.rsi}(${rsiStatus}) Tr:${technicalData.trend} Sup:${technicalData.support} Res:${technicalData.resistance}. Return JSON: signal(buy/sell/neutral), confidence(0-100), analysis, structure(bullish/bearish/range), momentum(strong/moderate/weak), entry_zone[${rangeLow},${rangeHigh}], stop_zone[${stopLow},${stopHigh}] [/INST]`;\n\nconsole.log(\"📈 Agente Técnico - Prompt length:\", prompt.length);\nconsole.log(`   RSI: ${technicalData.rsi} (${rsiStatus})`);\nconsole.log(`   Entry zone: ${rangeLow} - ${rangeHigh}`);\n\nreturn [{\n    json: {\n        agent: \"technical\",\n        context: context,\n        technical_data: technicalData,\n        prompt: prompt,\n        status: \"ready\"\n    }\n}];"
+      },
+      "id": "5fc5138e-33bb-453b-815b-b76b64249002",
+      "name": "Agente Técnico",
+      "type": "n8n-nodes-base.code",
+      "position": [
+        -176,
+        32
+      ],
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================\n// AGENTE FUNDAMENTAL - Versión Máximamente Optimizada\n// ============================================\n\nconst context = $input.all()[0].json;\nconst marketData = context.market_data;\n\nconst fd = {\n    s: marketData.best_pair || \"EURUSD\",\n    n: marketData.fundamental?.news_count || 0,\n    hi: marketData.fundamental?.high_impact_events || 0\n};\n\n// Determinar riesgo e impacto\nlet risk = \"low\";\nlet dir = \"neutral\";\nif (fd.hi > 2) { risk = \"high\"; dir = \"volatile\"; }\nelse if (fd.hi > 0) risk = \"medium\";\n\n// Prompt ultra corto (~100 tokens)\nconst prompt = `[INST] Fundamental ${fd.s}. N:${fd.n} HI:${fd.hi} R:${risk}. Return JSON: recommendation(act/wait/avoid), confidence(0-100), analysis, impact_direction(bullish/bearish/neutral/volatile), sentiment_score(-100 to 100) [/INST]`;\n\nconsole.log(\"📰 Agente Fundamental - Prompt length:\", prompt.length);\n\nreturn [{\n    json: {\n        agent: \"fundamental\",\n        context: context,\n        fundamental_data: fd,\n        prompt: prompt,\n        status: \"ready\"\n    }\n}];"
+      },
+      "id": "410d0e5e-c66d-435c-964e-cd96af95b646",
+      "name": "Agente Fundamental",
+      "type": "n8n-nodes-base.code",
+      "position": [
+        -176,
+        192
+      ],
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================\n// AGENTE SENTIMIENTO - Versión Máximamente Optimizada\n// ============================================\n\nconst context = $input.all()[0].json;\nconst marketData = context.market_data;\n\n// Datos de posiciones\nconst pos = marketData.positions?.details || [];\nlet long = 0, short = 0;\nfor (const p of pos) {\n    const v = Math.abs(p.volume || 0);\n    if (p.type === \"buy\" || p.type === \"long\" || p.type === \"BUY\") long += v;\n    else if (p.type === \"sell\" || p.type === \"short\" || p.type === \"SELL\") short += v;\n}\n\n// Datos de pendientes\nconst pend = marketData.pending_orders?.details || [];\nlet plong = 0, pshort = 0;\nfor (const p of pend) {\n    const v = Math.abs(p.volume || 0);\n    if (p.type && (p.type.includes(\"BUY\") || p.type === \"buy\")) plong += v;\n    if (p.type && (p.type.includes(\"SELL\") || p.type === \"sell\")) pshort += v;\n}\n\n// Ratio combinado\nconst totalLong = long + plong;\nconst totalShort = short + pshort;\nconst total = totalLong + totalShort;\nlet ratio = 0;\nif (total > 0) ratio = ((totalLong - totalShort) / total) * 100;\n\n// Señal contraria\nlet cs = \"none\";\nif (ratio > 60) cs = \"sell\";\nelse if (ratio < -60) cs = \"buy\";\n\n// Prompt ultra corto (~100 tokens)\nconst prompt = `[INST] Sentiment ${marketData.best_pair || \"EURUSD\"}. L:${totalLong.toFixed(1)} S:${totalShort.toFixed(1)} R:${ratio.toFixed(0)}. Return JSON: sentiment(bullish/bearish/neutral), confidence(0-100), analysis, contrary_signal(buy/sell/none), sentiment_score(-100 to 100) [/INST]`;\n\nconsole.log(`💭 Sentimiento - L:${totalLong.toFixed(1)} S:${totalShort.toFixed(1)} R:${ratio.toFixed(0)}% CS:${cs}`);\n\nreturn [{\n    json: {\n        agent: \"sentiment\",\n        context: context,\n        prompt: prompt,\n        status: \"ready\"\n    }\n}];"
+      },
+      "id": "9a0287ac-0ffd-4898-a70f-e956c91b3adf",
+      "name": "Agente Sentimiento",
+      "type": "n8n-nodes-base.code",
+      "position": [
+        -176,
+        336
+      ],
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================\n// AGENTE ESTADÍSTICO - Versión Máximamente Optimizada\n// ============================================\n\nconst context = $input.all()[0].json;\nconst marketData = context.market_data;\nconst mem = context.memory || {};\nconst gm = mem.global_metrics || {};\n\nconst sd = {\n    s: marketData.best_pair || \"EURUSD\",\n    p: marketData.technical?.current_price || 0,\n    r: marketData.technical?.rsi || 50,\n    t: marketData.technical?.trend || \"neutral\",\n    sc: marketData.best_score || 0\n};\n\nconst wr = gm.winrate || 0;\nconst tt = gm.total_trades || 0;\n\n// Prompt ultra corto (~60-80 tokens)\nconst prompt = `[INST] Stats ${sd.s}. R:${sd.r} T:${sd.t} Sc:${sd.sc} WR:${wr.toFixed(0)}% Tr:${tt}. Return JSON: volatility, volume_adjustment, probability, confidence [/INST]`;\n\nconsole.log(\"📊 Agente Estadístico - Prompt length:\", prompt.length);\n\nreturn [{\n    json: {\n        agent: \"statistical\",\n        context: context,\n        statistical_data: sd,\n        prompt: prompt,\n        status: \"ready\"\n    }\n}];"
+      },
+      "id": "99c8cdae-8c4f-4fde-ba72-7b6bf1d66f94",
+      "name": "Agente Estadístico",
+      "type": "n8n-nodes-base.code",
+      "position": [
+        -176,
+        496
+      ],
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://192.168.0.105:9000/v1/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"prompt\": {{ JSON.stringify($json.prompt) }},\n  \"max_tokens\": 200,\n  \"temperature\": 0.3\n}",
+        "options": {}
+      },
+      "id": "68203048-3015-4a5a-933b-88131fa335f9",
+      "name": "Mistral - Técnico",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        128,
+        32
+      ],
+      "typeVersion": 4.4
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://192.168.0.105:9000/v1/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"prompt\": {{ JSON.stringify($json.prompt) }},\n  \"max_tokens\": 200,\n  \"temperature\": 0.4\n}",
+        "options": {}
+      },
+      "id": "af8ab2bd-a8c4-4864-a534-ab01da28302f",
+      "name": "Mistral - Fundamental",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        128,
+        192
+      ],
+      "typeVersion": 4.4
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://192.168.0.105:9000/v1/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"prompt\": {{ JSON.stringify($json.prompt) }},\n  \"max_tokens\": 200,\n  \"temperature\": 0.4\n}",
+        "options": {}
+      },
+      "id": "3d7a830a-09f0-4a9e-a74a-6e7e38216ef9",
+      "name": "Mistral - Sentimiento",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        128,
+        336
+      ],
+      "typeVersion": 4.4
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://192.168.0.105:9000/v1/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"prompt\": {{ JSON.stringify($json.prompt) }},\n  \"max_tokens\": 200,\n  \"temperature\": 0.4\n}",
+        "options": {}
+      },
+      "id": "ce49ef6c-4d5e-4c52-a8a3-7581ce0449d6",
+      "name": "Mistral - Estadístico",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        128,
+        496
+      ],
+      "typeVersion": 4.4
+    },
+    {
+      "parameters": {
+        "functionCode": "// Nodo: \"Parse Técnico\"\nconst response = $json.choices[0].text.trim();\nconst agentData = $node[\"Agente Técnico\"].json;\n\ntry {\n    const jsonMatch = response.match(/\\{[\\s\\S]*\\}/);\n    if (!jsonMatch) throw new Error(\"No JSON found\");\n    \n    const analysis = JSON.parse(jsonMatch[0]);\n    \n    const normalized = {\n        señal: analysis.signal || \"neutral\",\n        confianza: analysis.confidence || 0,\n        analisis: analysis.analysis || \"\",\n        estructura: analysis.structure || \"neutral\",\n        momento: analysis.momentum || \"moderate\",\n        entry_zona: analysis.entry_zone || [0, 0],\n        stop_zona: analysis.stop_zone || [0, 0]\n    };\n    \n    return [{\n        json: {\n            agent: \"technical\",\n            analysis: normalized,\n            raw_response: response,\n            context: agentData.context\n        }\n    }];\n} catch (error) {\n    return [{\n        json: {\n            agent: \"technical\",\n            analysis: {\n                señal: \"neutral\",\n                confianza: 0,\n                analisis: \"Error\",\n                estructura: \"neutral\",\n                momento: \"moderate\",\n                entry_zona: [0, 0],\n                stop_zona: [0, 0]\n            },\n            error: error.message,\n            context: agentData.context\n        }\n    }];\n}"
+      },
+      "id": "0f7dc078-721f-416c-afa9-e281b8d851c6",
+      "name": "Parse Técnico",
+      "type": "n8n-nodes-base.function",
+      "position": [
+        432,
+        32
+      ],
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "functionCode": "// Nodo: \"Parse Fundamental\"\nconst response = $json.choices[0].text.trim();\nconst agentData = $node[\"Agente Fundamental\"].json;\n\ntry {\n    const jsonMatch = response.match(/\\{[\\s\\S]*\\}/);\n    if (!jsonMatch) throw new Error(\"No JSON found\");\n    \n    const analysis = JSON.parse(jsonMatch[0]);\n    \n    const normalized = {\n        analisis: analysis.analysis || \"\",\n        eventos_clave: analysis.key_events || [],\n        impacto_esperado: analysis.impact_direction || analysis.impacto_esperado || \"neutral\",\n        direccion_impacto: analysis.impact_direction || \"neutral\",\n        riesgo_noticioso: analysis.news_risk || analysis.riesgo_noticioso || \"low\",\n        confianza: analysis.confidence || 50,\n        recomendacion: analysis.recommendation || \"wait\",\n        sentimiento: analysis.sentiment_score || 0\n    };\n    \n    return [{\n        json: {\n            agent: \"fundamental\",\n            analysis: normalized,\n            raw_response: response,\n            context: agentData.context\n        }\n    }];\n} catch (error) {\n    return [{\n        json: {\n            agent: \"fundamental\",\n            analysis: {\n                analisis: \"Error\",\n                eventos_clave: [],\n                impacto_esperado: \"neutral\",\n                direccion_impacto: \"neutral\",\n                riesgo_noticioso: \"low\",\n                confianza: 40,\n                recomendacion: \"wait\",\n                sentimiento: 0\n            },\n            error: error.message,\n            context: agentData.context\n        }\n    }];\n}"
+      },
+      "id": "275089e6-3640-4128-82d8-5b18eca4777e",
+      "name": "Parse Fundamental",
+      "type": "n8n-nodes-base.function",
+      "position": [
+        432,
+        192
+      ],
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "functionCode": "// Nodo: \"Parse Sentimiento\"\nconst response = $json.choices[0].text.trim();\nconst agentData = $node[\"Agente Sentimiento\"].json;\n\ntry {\n    const jsonMatch = response.match(/\\{[\\s\\S]*\\}/);\n    if (!jsonMatch) throw new Error(\"No JSON found\");\n    \n    const analysis = JSON.parse(jsonMatch[0]);\n    \n    const normalized = {\n        analisis: analysis.analysis || \"\",\n        sentimiento: analysis.sentiment || \"neutral\",\n        puntuacion: analysis.sentiment_score || 0,\n        divergencia: analysis.contrary_signal !== \"none\",\n        señal_contraria: analysis.contrary_signal || \"none\",\n        confianza: analysis.confidence || 50\n    };\n    \n    return [{\n        json: {\n            agent: \"sentiment\",\n            analysis: normalized,\n            raw_response: response,\n            context: agentData.context\n        }\n    }];\n} catch (error) {\n    return [{\n        json: {\n            agent: \"sentiment\",\n            analysis: {\n                analisis: \"Error\",\n                sentimiento: \"neutral\",\n                puntuacion: 0,\n                divergencia: false,\n                señal_contraria: \"none\",\n                confianza: 0\n            },\n            error: error.message,\n            context: agentData.context\n        }\n    }];\n}"
+      },
+      "id": "fb9103d5-e442-4978-9f89-76e4049efbbe",
+      "name": "Parse Sentimiento",
+      "type": "n8n-nodes-base.function",
+      "position": [
+        432,
+        336
+      ],
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "functionCode": "// Nodo: \"Parse Estadístico\"\nconst response = $json.choices[0].text.trim();\nconst agentData = $node[\"Agente Estadístico\"].json;\n\ntry {\n    const jsonMatch = response.match(/\\{[\\s\\S]*\\}/);\n    if (!jsonMatch) throw new Error(\"No JSON found\");\n    \n    const analysis = JSON.parse(jsonMatch[0]);\n    \n    const normalized = {\n        volatilidad_estado: analysis.volatility || \"normal\",\n        ajuste_volumen: analysis.volume_adjustment || 1.0,\n        probabilidad_continuacion: analysis.probability || 50,\n        confianza: analysis.confidence || 50,\n        analisis: \"Calculated\"\n    };\n    \n    return [{\n        json: {\n            agent: \"statistical\",\n            analysis: normalized,\n            raw_response: response,\n            context: agentData.context\n        }\n    }];\n} catch (error) {\n    return [{\n        json: {\n            agent: \"statistical\",\n            analysis: {\n                volatilidad_estado: \"normal\",\n                ajuste_volumen: 1.0,\n                probabilidad_continuacion: 50,\n                confianza: 0,\n                analisis: \"Error\"\n            },\n            error: error.message,\n            context: agentData.context\n        }\n    }];\n}"
+      },
+      "id": "795bea7e-97e7-4bdc-b545-0192e496e99f",
+      "name": "Parse Estadístico",
+      "type": "n8n-nodes-base.function",
+      "position": [
+        432,
+        496
+      ],
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -608,
+        272
+      ],
+      "id": "d5754310-c860-4099-86cd-7d34b31baada",
+      "name": "When Executed by Another Workflow"
+    },
+    {
+      "parameters": {
+        "numberInputs": 4
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        896,
+        240
+      ],
+      "id": "678e3099-5c28-4f99-9642-3f8d7536ca02",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================\n// AGENTE ESTRATEGA - Versión Corregida\n// ============================================\n\nconst allAgents = $input.all();\n\n// Inicializar con valores por defecto seguros\nlet technical = { s: \"neutral\", c: 0 };\nlet fundamental = { r: \"wait\", c: 0, d: \"neutral\" };\nlet sentiment = { s: \"neutral\", c: 0, cs: \"none\" };\nlet statistical = { c: 0 };\nlet marketData = {};\nlet agentWeights = { t: 0.35, f: 0.25, se: 0.25, st: 0.15 };\n\n// Extraer datos de agentes\nfor (const item of allAgents) {\n    const data = item.json;\n    const a = data.analysis;\n    \n    if (data.agent === \"technical\" && a) {\n        technical = { \n            s: a.señal || a.signal || \"neutral\", \n            c: typeof a.confianza === 'number' ? a.confianza : 0 \n        };\n    }\n    if (data.agent === \"fundamental\" && a) {\n        fundamental = { \n            r: a.recomendacion || a.recommendation || \"wait\", \n            c: typeof a.confianza === 'number' ? a.confianza : 0,\n            d: a.direccion_impacto || a.impact_direction || \"neutral\" \n        };\n    }\n    if (data.agent === \"sentiment\" && a) {\n        sentiment = { \n            s: a.sentimiento || a.sentiment || \"neutral\", \n            c: typeof a.confianza === 'number' ? a.confianza : 0,\n            cs: a.señal_contraria || a.contrary_signal || \"none\" \n        };\n    }\n    if (data.agent === \"statistical\" && a) {\n        statistical = { c: typeof a.confianza === 'number' ? a.confianza : 0 };\n    }\n    if (data.context) {\n        marketData = data.context.market_data || {};\n        if (data.context.memory?.agent_weights) {\n            agentWeights = data.context.memory.agent_weights;\n        }\n    }\n}\n\nconst price = marketData.technical?.current_price || 0;\nconst accountBalance = marketData.risk?.account_balance || 100000;\n\n// Calcular score con validación\nconst tScore = (technical.c / 100) * (agentWeights.t || 0.35);\nconst fScore = (fundamental.c / 100) * (agentWeights.f || 0.25);\nconst seScore = (sentiment.c / 100) * (agentWeights.se || 0.25);\nconst stScore = (statistical.c / 100) * (agentWeights.st || 0.15);\nconst totalScore = (tScore + fScore + seScore + stScore) * 100;\n\n// Asegurar que no sea NaN\nconst finalScore = isNaN(totalScore) ? 0 : Math.min(100, Math.max(0, totalScore));\n\n// Contar señales (usando inglés consistentemente)\nlet buy = 0, sell = 0;\nif (technical.s === \"buy\") buy++;\nif (technical.s === \"sell\") sell++;\nif (fundamental.r === \"act\" && fundamental.d === \"bullish\") buy++;\nif (fundamental.r === \"act\" && fundamental.d === \"bearish\") sell++;\nif (sentiment.cs === \"buy\") buy++;\nif (sentiment.cs === \"sell\") sell++;\n\n// Decisión\nlet decision = \"hold\";\nif (finalScore >= 45 && buy > sell && buy >= 1) decision = \"buy\";\nelse if (finalScore >= 45 && sell > buy && sell >= 1) decision = \"sell\";\n\n// ============================================\n// CÁLCULO DE VOLUMEN SEGURO\n// ============================================\n\nconst stopLossPips = 50;\nconst pipValue = 10;\nconst riskPercent = 0.02;\nconst maxRiskAmount = accountBalance * riskPercent;\nconst calculatedVolume = maxRiskAmount / (stopLossPips * pipValue);\nconst MAX_VOLUME = 0.25;\nconst MIN_VOLUME = 0.01;\n\nlet volume = Math.min(calculatedVolume, MAX_VOLUME);\nvolume = Math.max(volume, MIN_VOLUME);\nvolume = Math.round(volume * 100) / 100;\n\nconsole.log(`💰 Volumen: ${volume} lotes | Riesgo: $${(volume * stopLossPips * pipValue).toFixed(2)} (${((volume * stopLossPips * pipValue) / accountBalance * 100).toFixed(2)}%)`);\n\n// Niveles de stop y take profit\nlet sl = 0, tp1 = 0, tp2 = 0;\nif (decision === \"buy\") {\n    sl = Math.round((price - 0.003) * 100000) / 100000;\n    tp1 = Math.round((price + 0.003) * 100000) / 100000;\n    tp2 = Math.round((price + 0.005) * 100000) / 100000;\n} else if (decision === \"sell\") {\n    sl = Math.round((price + 0.003) * 100000) / 100000;\n    tp1 = Math.round((price - 0.003) * 100000) / 100000;\n    tp2 = Math.round((price - 0.005) * 100000) / 100000;\n}\n\n// Prompt simplificado\nconst prompt = `[INST] T:${technical.s}(${technical.c}%) F:${fundamental.r}(${fundamental.c}%) Se:${sentiment.s}(${sentiment.c}%) St:${statistical.c}% P:${price} B:${accountBalance} Bs:${buy} Ss:${sell} Sc:${Math.round(finalScore)}. Return JSON: decision(buy/sell/hold), confidence(0-100), reasoning, entry_price, stop_loss, take_profit, volume [/INST]`;\n\nconsole.log(`🎯 Decisión: ${decision}, Score: ${finalScore}%, Buy:${buy} Sell:${sell}`);\n\nreturn [{\n    json: {\n        decision: decision,\n        confianza: finalScore,\n        razonamiento: `T:${technical.c}% F:${fundamental.c}% Se:${sentiment.c}% St:${statistical.c}%`,\n        entrada: { precio: price, tolerancia: 0.0005 },\n        stop_loss: { precio: sl, pips: 30 },\n        take_profit: { objetivo1: tp1, objetivo2: tp2 },\n        volumen: volume,\n        prompt: prompt\n    }\n}];"
+      },
+      "id": "dd08df60-8bcf-4708-9c2c-f3b0af0d1d9c",
+      "name": "Agente Estratega",
+      "type": "n8n-nodes-base.code",
+      "position": [
+        1216,
+        272
+      ],
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://192.168.0.105:9000/v1/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"prompt\": {{ JSON.stringify($json.prompt) }},\n  \"max_tokens\": 250,\n  \"temperature\": 0.3\n}",
+        "options": {}
+      },
+      "id": "693dbb91-d7ca-40f4-946a-bf2b883baf52",
+      "name": "Mistral - Estratega",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        1520,
+        272
+      ],
+      "typeVersion": 4.4
+    },
+    {
+      "parameters": {
+        "functionCode": "// Nodo: \"Parse Estratega\"\nconst response = $json.choices[0].text.trim();\nconst strategistData = $node[\"Agente Estratega\"].json;\n\nconsole.log(\"Respuesta raw:\", response);\n\ntry {\n    // Buscar JSON en la respuesta (puede estar en markdown o texto plano)\n    let jsonMatch = null;\n    \n    // Buscar JSON dentro de bloque de código ```json ... ```\n    const codeBlockMatch = response.match(/```json\\s*([\\s\\S]*?)\\s*```/);\n    if (codeBlockMatch) {\n        jsonMatch = codeBlockMatch[1];\n    }\n    \n    // Si no, buscar cualquier {...}\n    if (!jsonMatch) {\n        const braceMatch = response.match(/\\{[\\s\\S]*\\}/);\n        if (braceMatch) {\n            jsonMatch = braceMatch[0];\n        }\n    }\n    \n    let decisionFromAI = null;\n    if (jsonMatch) {\n        try {\n            // Limpiar el JSON antes de parsear\n            let cleanJson = jsonMatch\n                .replace(/,\\s*}/g, '}')\n                .replace(/,\\s*]/g, ']')\n                .replace(/(['\"])?([a-zA-Z0-9_]+)(['\"])?\\s*:/g, '\"$2\":');\n            decisionFromAI = JSON.parse(cleanJson);\n            console.log(\"✅ JSON parseado:\", decisionFromAI);\n        } catch(e) {\n            console.log(\"Error parseando JSON:\", e.message);\n        }\n    }\n    \n    // Combinar: priorizar AI, fallback a local\n    const finalDecision = {\n        decision: decisionFromAI?.decision || strategistData.decision,\n        confianza: decisionFromAI?.confidence || strategistData.confianza,\n        razonamiento: decisionFromAI?.reasoning || strategistData.razonamiento,\n        entrada: strategistData.entrada,\n        stop_loss: strategistData.stop_loss,\n        take_profit: strategistData.take_profit,\n        volumen: decisionFromAI?.volume || strategistData.volumen\n    };\n    \n    console.log(\"🎯 Decisión final:\", finalDecision.decision, \"confianza:\", finalDecision.confianza);\n    \n    return [{ json: finalDecision }];\n    \n} catch (error) {\n    console.error(\"Error en Parse Estratega:\", error.message);\n    return [{\n        json: {\n            decision: strategistData.decision,\n            confianza: strategistData.confianza,\n            razonamiento: strategistData.razonamiento,\n            entrada: strategistData.entrada,\n            stop_loss: strategistData.stop_loss,\n            take_profit: strategistData.take_profit,\n            volumen: strategistData.volumen\n        }\n    }];\n}"
+      },
+      "id": "21af10a4-e742-4c27-9e57-c225face9526",
+      "name": "Parse Estratega",
+      "type": "n8n-nodes-base.function",
+      "position": [
+        1824,
+        272
+      ],
+      "typeVersion": 1
+    }
+  ],
+  "connections": {
+    "Agente Técnico": {
+      "main": [
+        [
+          {
+            "node": "Mistral - Técnico",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Agente Fundamental": {
+      "main": [
+        [
+          {
+            "node": "Mistral - Fundamental",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Agente Sentimiento": {
+      "main": [
+        [
+          {
+            "node": "Mistral - Sentimiento",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Agente Estadístico": {
+      "main": [
+        [
+          {
+            "node": "Mistral - Estadístico",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mistral - Técnico": {
+      "main": [
+        [
+          {
+            "node": "Parse Técnico",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mistral - Fundamental": {
+      "main": [
+        [
+          {
+            "node": "Parse Fundamental",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mistral - Sentimiento": {
+      "main": [
+        [
+          {
+            "node": "Parse Sentimiento",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mistral - Estadístico": {
+      "main": [
+        [
+          {
+            "node": "Parse Estadístico",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Técnico": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Fundamental": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Parse Sentimiento": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Parse Estadístico": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 3
+          }
+        ]
+      ]
+    },
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Agente Técnico",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Agente Fundamental",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Agente Sentimiento",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Agente Estadístico",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Agente Estratega",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Agente Estratega": {
+      "main": [
+        [
+          {
+            "node": "Mistral - Estratega",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mistral - Estratega": {
+      "main": [
+        [
+          {
+            "node": "Parse Estratega",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "515fdd51c531b5de47935866fd08e3e0aa440d6aebc162f95b77585a19af3727"
+  }
+}

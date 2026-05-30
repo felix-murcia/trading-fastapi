@@ -1,0 +1,562 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "triggerTimes": {
+          "item": [
+            {
+              "mode": "everyX",
+              "value": 20,
+              "unit": "minutes"
+            }
+          ]
+        }
+      },
+      "id": "6007f100-5ace-4865-9944-fc86b668eede",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.cron",
+      "position": [-1840, 288],
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================\n// ANALIZAR PARES - VERSIÓN CORREGIDA Y OPTIMIZADA v2.0\n// ============================================\n// CORRECCIONES:\n// 1. Usa EXCLUSIVAMENTE globalRates para precios (fuente de verdad)\n// 2. Validación de rangos por símbolo con fallback seguro\n// 3. Logging detallado de origen de precios\n// 4. Corrección de best_score y best_pair\n// ============================================\n\nconst allItems = $input.all();\nconsole.log(`📊 Recibidos ${allItems.length} items para analizar`);\n\n// ============================================\n// ESTRUCTURAS DE DATOS\n// ============================================\nconst pairsAnalysis = {};\nlet bestPair = null;\nlet bestScore = 0; // Inicializar en 0, no -1\n\n// Datos globales\nlet globalAccountData = {};\nlet globalNews = [];\nlet globalCalendar = [];\nlet globalPositions = [];\nlet globalPendingOrders = [];\nlet currencyStrength = null;\nlet globalRates = null;\n\n// ============================================\n// PRECIOS POR DEFECTO ACTUALIZADOS Y VALIDADOS\n// ============================================\nconst DEFAULT_PRICES = {\n    EURUSD: 1.1689,\n    GBPUSD: 1.3570,\n    USDJPY: 159.88,\n    USDCHF: 0.7996\n};\n\n// RANGOS VÁLIDOS POR SÍMBOLO (para validación)\nconst VALID_RANGES = {\n    EURUSD: { min: 1.05, max: 1.20 },\n    GBPUSD: { min: 1.25, max: 1.40 },\n    USDJPY: { min: 140.0, max: 170.0 },\n    USDCHF: { min: 0.85, max: 1.00 }\n};\n\n// ============================================\n// FUNCIÓN: Validar precio contra rango esperado\n// ============================================\nfunction validatePrice(symbol, price, source) {\n    if (price === null || price === undefined || isNaN(price)) {\n        console.log(`   ⚠️ ${symbol}: Precio inválido (${price}) de ${source}, usando default`);\n        return { valid: false, price: DEFAULT_PRICES[symbol] };\n    }\n    \n    const range = VALID_RANGES[symbol];\n    if (price < range.min || price > range.max) {\n        console.log(`   ⚠️ ${symbol}: Precio ${price} FUERA DE RANGO [${range.min}-${range.max}] desde ${source}, usando default`);\n        return { valid: false, price: DEFAULT_PRICES[symbol] };\n    }\n    \n    console.log(`   ✅ ${symbol}: Precio ${price} válido desde ${source}`);\n    return { valid: true, price: price };\n}\n\n// ============================================\n// PROCESAR ITEMS ENTRANTES\n// ============================================\nfor (const item of allItems) {\n    const data = item.json;\n    \n    // Extraer noticias globales\n    if (data.news && Array.isArray(data.news) && data.news.length > 0) {\n        globalNews = data.news;\n        console.log(`📰 Noticias: ${globalNews.length} items`);\n    }\n    \n    // Extraer calendario global\n    if (data.calendar && Array.isArray(data.calendar) && data.calendar.length > 0) {\n        globalCalendar = data.calendar;\n        console.log(`📅 Calendario: ${globalCalendar.length} eventos`);\n    }\n    \n    // Extraer datos de cuenta\n    if (data.balance !== undefined && Object.keys(globalAccountData).length === 0) {\n        globalAccountData = {\n            balance: data.balance,\n            equity: data.equity,\n            profit: data.profit,\n            free_margin: data.free_margin,\n            leverage: data.leverage,\n            currency: data.currency\n        };\n        console.log(`💰 Cuenta: balance ${data.balance}`);\n    }\n    \n    // Extraer posiciones\n    if (Array.isArray(data) && data.length > 0 && data[0]?.symbol !== undefined) {\n        globalPositions = data;\n    }\n    if (data.positions && Array.isArray(data.positions)) {\n        globalPositions = data.positions;\n    }\n    \n    // Extraer órdenes pendientes\n    if (Array.isArray(data) && data.length > 0 && data[0]?.state === \"PLACED\") {\n        globalPendingOrders = data;\n    }\n    if (data.pendings && Array.isArray(data.pendings)) {\n        globalPendingOrders = data.pendings;\n    }\n    if (data.id && data.state === \"PLACED\" && !Array.isArray(data)) {\n        globalPendingOrders.push(data);\n    }\n    \n    // EXTRAER RATES CON PRECIOS REALES (FUENTE DE VERDAD)\n    if (data.rates && data.strength && data.sentiment) {\n        currencyStrength = {\n            rates: data.rates,\n            strength: data.strength,\n            sentiment: data.sentiment,\n            timestamp: data.timestamp\n        };\n        globalRates = data.rates;\n        console.log(`💹 Fortaleza de divisas cargada con precios reales`);\n    }\n    \n    // EXTRAER PRECIOS DIRECTOS DE CADA DATA FETCHER (bid/ask por símbolo)\n    if (data.symbol && (data.bid !== undefined || data.ask !== undefined)) {\n        const sym = data.symbol;\n        const price = data.bid || data.ask;\n        \n        if (!globalRates) globalRates = {};\n        \n        const validation = validatePrice(sym, price, `bid/ask directo (${sym})`);\n        if (validation.valid) {\n            globalRates[sym] = validation.price;\n            console.log(`💵 ${sym}: Precio actualizado a ${validation.price} desde data fetcher`);\n        }\n    }\n}\n\n// ============================================\n// ASEGURAR PRECIOS PARA TODOS LOS PARES\n// ============================================\nif (!globalRates) {\n    console.log(\"⚠️ No se encontraron rates, usando valores por defecto\");\n    globalRates = { ...DEFAULT_PRICES };\n} else {\n    // Validar y completar cada par\n    for (const [symbol, defaultPrice] of Object.entries(DEFAULT_PRICES)) {\n        if (!globalRates[symbol]) {\n            console.log(`⚠️ ${symbol}: No encontrado en rates, usando default ${defaultPrice}`);\n            globalRates[symbol] = defaultPrice;\n        } else {\n            const validation = validatePrice(symbol, globalRates[symbol], 'rates existente');\n            if (!validation.valid) {\n                globalRates[symbol] = validation.price;\n            }\n        }\n    }\n}\n\nconsole.log(\"\\n💰 PRECIOS REALES CONFIRMADOS (fuente de verdad):\");\nfor (const [symbol, price] of Object.entries(globalRates)) {\n    if (DEFAULT_PRICES[symbol] !== undefined) {\n        console.log(`   ${symbol}: ${price}`);\n    }\n}\n\n// ============================================\n// FUNCIONES DE ANÁLISIS TÉCNICO\n// ============================================\nfunction calculateRSI(candles, period = 14) {\n    if (!candles || candles.length < period + 1) return 50;\n    try {\n        let gains = 0, losses = 0;\n        for (let i = candles.length - period; i < candles.length; i++) {\n            if (i === 0) continue;\n            const change = (candles[i].close || 0) - (candles[i-1].close || 0);\n            if (change >= 0) gains += change;\n            else losses -= change;\n        }\n        if (losses === 0) return 100;\n        const rs = gains / losses;\n        return Number((100 - (100 / (1 + rs))).toFixed(2));\n    } catch (error) { return 50; }\n}\n\nfunction determineTrend(candles) {\n    if (!candles || candles.length < 20) return \"neutral\";\n    try {\n        const closes20 = candles.slice(-20).map(c => c.close || 0);\n        const sma20 = closes20.reduce((a, b) => a + b, 0) / 20;\n        const closes50 = candles.slice(-50).map(c => c.close || 0);\n        const sma50 = closes50.reduce((a, b) => a + b, 0) / 50;\n        if (sma20 > sma50 * 1.002) return \"bullish\";\n        if (sma20 < sma50 * 0.998) return \"bearish\";\n        return \"neutral\";\n    } catch (error) { return \"neutral\"; }\n}\n\nfunction findSupportResistance(candles, currentPrice) {\n    if (!candles || candles.length === 0) {\n        return { support: currentPrice * 0.995, resistance: currentPrice * 1.005 };\n    }\n    try {\n        const recentCandles = candles.slice(-20);\n        const highs = recentCandles.map(c => c.high || c.close || 0);\n        const lows = recentCandles.map(c => c.low || c.close || 0);\n        let support = Math.min(...lows);\n        let resistance = Math.max(...highs);\n        if (support === resistance || recentCandles.length === 1) {\n            support = currentPrice * 0.995;\n            resistance = currentPrice * 1.005;\n        }\n        return { support, resistance };\n    } catch (error) {\n        return { support: currentPrice * 0.995, resistance: currentPrice * 1.005 };\n    }\n}\n\n// ============================================\n// PROCESAR CADA PAR DE DIVISAS\n// ============================================\nconst symbols = [\"EURUSD\", \"GBPUSD\", \"USDJPY\", \"USDCHF\"];\n\nfor (const symbol of symbols) {\n    console.log(`\\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);\n    console.log(`📊 Procesando par: ${symbol}`);\n    \n    // FORZAR uso de globalRates como fuente de verdad\n    let currentPrice = globalRates[symbol];\n    console.log(`   ✅ Precio desde globalRates: ${currentPrice}`);\n    \n    // Buscar velas para este símbolo\n    let candlesData = [];\n    for (const item of allItems) {\n        const data = item.json;\n        if (data.symbol === symbol && data.candles && Array.isArray(data.candles)) {\n            candlesData = data.candles;\n            console.log(`   ✅ Velas encontradas: ${candlesData.length} candles`);\n            break;\n        }\n    }\n    \n    if (candlesData.length === 0) {\n        console.log(`   ⚠️ No se encontraron velas para ${symbol}`);\n    }\n    \n    // Calcular indicadores técnicos\n    const rsi = calculateRSI(candlesData);\n    const trend = determineTrend(candlesData);\n    const sr = findSupportResistance(candlesData, currentPrice);\n    \n    // Ajustar según fortaleza de divisas si no hay velas\n    let finalRsi = rsi;\n    let finalTrend = trend;\n    \n    if (candlesData.length === 0 && currencyStrength) {\n        const baseCurrency = symbol.substring(0, 3);\n        const quoteCurrency = symbol.substring(3, 6);\n        const baseStrength = currencyStrength.strength[baseCurrency] || \"neutral\";\n        const quoteStrength = currencyStrength.strength[quoteCurrency] || \"neutral\";\n        \n        if (baseStrength === \"bullish\" && quoteStrength === \"bearish\") {\n            finalTrend = \"bullish\";\n            finalRsi = 65;\n        } else if (baseStrength === \"bearish\" && quoteStrength === \"bullish\") {\n            finalTrend = \"bearish\";\n            finalRsi = 35;\n        }\n        console.log(`   📊 Ajustado por fortaleza: ${finalTrend}, RSI: ${finalRsi}`);\n    }\n    \n    // Calcular score\n    let score = 50;\n    if (finalRsi < 35) score += 25;\n    if (finalRsi > 65) score += 25;\n    if (finalTrend === \"bullish\") score += 20;\n    if (finalTrend === \"bearish\") score += 20;\n    \n    let finalScore = Math.max(0, Math.min(100, score));\n    \n    // Filtrar noticias y eventos relevantes\n    let relevantCurrencies = [];\n    if (symbol === \"EURUSD\") relevantCurrencies = [\"EUR\", \"USD\"];\n    else if (symbol === \"GBPUSD\") relevantCurrencies = [\"GBP\", \"USD\"];\n    else if (symbol === \"USDJPY\") relevantCurrencies = [\"USD\", \"JPY\"];\n    else if (symbol === \"USDCHF\") relevantCurrencies = [\"USD\", \"CHF\"];\n    \n    const relevantNews = globalNews.filter(news => \n        news.currency && relevantCurrencies.includes(news.currency)\n    );\n    \n    const relevantEvents = globalCalendar.filter(event => \n        event.currency && relevantCurrencies.includes(event.currency)\n    );\n    \n    const highImpactEvents = relevantEvents.filter(e => e.impact === \"high\");\n    \n    // Filtrar posiciones y pendientes del símbolo\n    const symbolPositions = globalPositions.filter(p => p.symbol === symbol);\n    const symbolPendingOrders = globalPendingOrders.filter(p => p.symbol === symbol);\n    \n    // Almacenar análisis\n    pairsAnalysis[symbol] = {\n        symbol: symbol,\n        score: finalScore,\n        technical: {\n            current_price: currentPrice,\n            rsi: finalRsi,\n            trend: finalTrend,\n            support: sr.support,\n            resistance: sr.resistance\n        },\n        fundamental: {\n            news_count: relevantNews.length,\n            high_impact_events: highImpactEvents.length,\n            events: highImpactEvents.map(e => e.event).slice(0, 3),\n            relevant_news: relevantNews.slice(0, 5),\n            calendar_events: relevantEvents.slice(0, 5)\n        },\n        positions: {\n            count: symbolPositions.length,\n            exposure: symbolPositions.reduce((sum, p) => sum + Math.abs(p.volume || 0), 0),\n            details: symbolPositions\n        },\n        pending_orders: {\n            count: symbolPendingOrders.length,\n            exposure: symbolPendingOrders.reduce((sum, p) => sum + Math.abs(p.volume || 0), 0),\n            details: symbolPendingOrders\n        }\n    };\n    \n    console.log(`   ✅ Score: ${finalScore} | RSI: ${finalRsi} | Trend: ${finalTrend} | Price: ${currentPrice}`);\n    \n    // Actualizar mejor par (solo si score > bestScore)\n    if (finalScore > bestScore) {\n        bestScore = finalScore;\n        bestPair = symbol;\n        console.log(`   🏆 Nuevo mejor par: ${symbol} con score ${bestScore}`);\n    }\n}\n\n// Fallback: si no se encontró ningún par válido\nif (!bestPair) {\n    bestPair = \"EURUSD\";\n    bestScore = 50;\n    console.log(\"⚠️ No se encontraron pares válidos, usando EURUSD por defecto\");\n}\n\n// Asegurar que bestAnalysis existe y tiene precio válido\nconst bestAnalysis = pairsAnalysis[bestPair];\nif (!bestAnalysis || !bestAnalysis.technical?.current_price) {\n    console.log(`⚠️ bestAnalysis inválido para ${bestPair}, recreando`);\n    pairsAnalysis[bestPair] = {\n        symbol: bestPair,\n        score: bestScore,\n        technical: {\n            current_price: globalRates[bestPair] || DEFAULT_PRICES[bestPair],\n            rsi: 50,\n            trend: \"neutral\",\n            support: 0,\n            resistance: 0\n        },\n        fundamental: { news_count: 0, high_impact_events: 0, events: [], relevant_news: [], calendar_events: [] },\n        positions: { count: 0, exposure: 0, details: [] },\n        pending_orders: { count: 0, exposure: 0, details: [] }\n    };\n}\n\n// ============================================\n// CÁLCULO DE RIESGO\n// ============================================\nconst accountBalance = globalAccountData.balance || 100000;\nconst totalPositionsExposure = globalPositions.reduce((sum, p) => sum + Math.abs(p.volume || 0), 0);\nconst totalPendingExposure = globalPendingOrders.reduce((sum, p) => sum + Math.abs(p.volume || 0), 0);\n\nconst riskAmount = accountBalance * 0.02;\nconst stopLossPips = 50;\nconst pipValue = 10;\nlet recommendedVolume = riskAmount / (stopLossPips * pipValue);\nrecommendedVolume = Math.min(recommendedVolume, 0.05); // MAX 0.05 lots\nrecommendedVolume = Math.max(recommendedVolume, 0.01);\nrecommendedVolume = Math.round(recommendedVolume * 100) / 100;\n\nconst finalAnalysis = pairsAnalysis[bestPair];\nconst promptText = `Best Pair: ${bestPair}, Score: ${bestScore}, Price: ${finalAnalysis.technical.current_price}, RSI: ${finalAnalysis.technical.rsi}`;\n\nconsole.log(\"\\n========================================\");\nconsole.log(\"🏆 MEJOR PAR:\", bestPair);\nconsole.log(`   Score: ${bestScore}`);\nconsole.log(`   Precio: ${finalAnalysis.technical.current_price}`);\nconsole.log(`   RSI: ${finalAnalysis.technical.rsi}`);\nconsole.log(`   Tendencia: ${finalAnalysis.technical.trend}`);\nconsole.log(\"========================================\");\n\n// ============================================\n// RESULTADO FINAL\n// ============================================\nreturn [{\n    json: {\n        best_pair: bestPair,\n        best_score: bestScore,\n        all_pairs: pairsAnalysis,\n        currency_strength: currencyStrength || {\n            rates: globalRates,\n            strength: { EUR: \"neutral\", USD: \"neutral\", GBP: \"neutral\", JPY: \"neutral\", CHF: \"neutral\" },\n            sentiment: { score: 0, overall: \"neutral\", market_mood: \"calm\" }\n        },\n        technical: finalAnalysis.technical,\n        fundamental: finalAnalysis.fundamental,\n        positions: {\n            count: globalPositions.length,\n            exposure: totalPositionsExposure,\n            details: globalPositions\n        },\n        pending_orders: {\n            count: globalPendingOrders.length,\n            exposure: totalPendingExposure,\n            details: globalPendingOrders\n        },\n        risk: {\n            account_balance: accountBalance,\n            risk_amount: riskAmount,\n            recommended_volume: recommendedVolume,\n            current_exposure: totalPositionsExposure,\n            pending_exposure: totalPendingExposure\n        },\n        global_news: globalNews.slice(0, 5),\n        global_calendar: globalCalendar.slice(0, 5),\n        prompt_text: promptText,\n        timestamp: new Date().toISOString()\n    }\n}];"
+      },
+      "id": "f87c862e-68ab-40d6-a8c0-63982180725f",
+      "name": "Analizar Pares",
+      "type": "n8n-nodes-base.code",
+      "position": [-768, 272],
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================\n// MEMORY MANAGER - Versión Optimizada v2.0\n// ============================================\n\nconst marketData = $input.all()[0].json;\n\n// Inicializar estructura de memoria si no existe\nif (!global.tradingMemory) {\n    global.tradingMemory = {\n        last_analysis: {},\n        recent_decisions: [],\n        trades: [],\n        agent_weights: {\n            technical: 0.35,\n            fundamental: 0.25,\n            sentiment: 0.25,\n            statistical: 0.15\n        },\n        performance: {\n            technical: { wins: 0, losses: 0, total: 0, winrate: 0, last_confidence: [] },\n            fundamental: { wins: 0, losses: 0, total: 0, winrate: 0, last_confidence: [] },\n            sentiment: { wins: 0, losses: 0, total: 0, winrate: 0, last_confidence: [] },\n            statistical: { wins: 0, losses: 0, total: 0, winrate: 0, last_confidence: [] }\n        },\n        global_metrics: {\n            total_trades: 0,\n            winning_trades: 0,\n            losing_trades: 0,\n            total_pips: 0,\n            avg_confidence: 0,\n            sharpe_ratio: 0\n        },\n        preferences: {\n            risk_tolerance: 0.02,\n            max_positions: 3,\n            max_volume: 0.05,\n            min_confidence: 45\n        },\n        last_update: new Date().toISOString(),\n        weight_history: []\n    };\n}\n\n// Calcular métricas derivadas\nif (global.tradingMemory.trades.length > 0) {\n    const lastTrades = global.tradingMemory.trades.slice(-20);\n    const wins = lastTrades.filter(t => t.order?.status === \"executed\" && t.result === \"win\").length;\n    const losses = lastTrades.filter(t => t.order?.status === \"executed\" && t.result === \"loss\").length;\n    \n    if (wins + losses > 0) {\n        global.tradingMemory.global_metrics.winning_trades = wins;\n        global.tradingMemory.global_metrics.losing_trades = losses;\n        global.tradingMemory.global_metrics.total_trades = wins + losses;\n    }\n}\n\n// Ajustar umbral de confianza dinámicamente\nconst totalTrades = global.tradingMemory.global_metrics.total_trades;\nconst winrate = totalTrades > 0 ? \n    (global.tradingMemory.global_metrics.winning_trades / totalTrades) * 100 : 50;\n\nif (winrate > 60 && global.tradingMemory.preferences.min_confidence > 40) {\n    global.tradingMemory.preferences.min_confidence = Math.max(40, global.tradingMemory.preferences.min_confidence - 2);\n    console.log(`📈 Winrate alto (${winrate.toFixed(1)}%), bajando umbral a ${global.tradingMemory.preferences.min_confidence}%`);\n} else if (winrate < 45 && winrate > 0 && global.tradingMemory.preferences.min_confidence < 55) {\n    global.tradingMemory.preferences.min_confidence = Math.min(55, global.tradingMemory.preferences.min_confidence + 2);\n    console.log(`📉 Winrate bajo (${winrate.toFixed(1)}%), subiendo umbral a ${global.tradingMemory.preferences.min_confidence}%`);\n}\n\nconst context = {\n    timestamp: new Date().toISOString(),\n    market_data: marketData,\n    memory: global.tradingMemory,\n    recent_decisions: global.tradingMemory.recent_decisions.slice(-10),\n    recent_trades: global.tradingMemory.trades.slice(-5),\n    agent_performance: global.tradingMemory.performance,\n    global_metrics: global.tradingMemory.global_metrics,\n    preferences: global.tradingMemory.preferences\n};\n\nconsole.log(\"📚 Memory Manager: Contexto cargado\");\nconsole.log(`   - Mejor par: ${marketData.best_pair} | Score: ${marketData.best_score}`);\nconsole.log(`   - Trades: ${global.tradingMemory.global_metrics.total_trades} | Winrate: ${winrate.toFixed(1)}%`);\n\nreturn [{ json: context }];"
+      },
+      "id": "bf092613-11cf-41a6-a599-b9fcc221a3c7",
+      "name": "Memory Manager",
+      "type": "n8n-nodes-base.code",
+      "position": [-112, 272],
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "action_check",
+              "leftValue": "={{ $json.decision }}",
+              "rightValue": "hold",
+              "operator": { "type": "string", "operation": "notEquals" }
+            },
+            {
+              "id": "confidence_check",
+              "leftValue": "={{ $json.confianza }}",
+              "rightValue": 45,
+              "operator": { "type": "number", "operation": "gte" }
+            },
+            {
+              "id": "d0a81e9a-0ea3-4789-b739-2b7b6df9c09f",
+              "leftValue": "={{ $json.decision }}",
+              "rightValue": "neutral",
+              "operator": { "type": "string", "operation": "notEquals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "f23cba25-ab2d-456b-9362-9c57fe8634bb",
+      "name": "Check Action",
+      "type": "n8n-nodes-base.if",
+      "position": [816, 272],
+      "typeVersion": 2.3
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================\n// PREPARAR ORDEN - Versión Corregida v2.0\n// ============================================\n// CORRECCIONES:\n// 1. Retorna [] (array vacío) para duplicados, no objeto con should_execute: false\n// 2. Valida precio vs símbolo antes de ejecutar\n// 3. Límite de volumen reducido a 0.05 lots\n// ============================================\n\nconst decision = $input.all()[0].json;\n\n// Obtener marketData de forma segura (puede venir de Memory Manager o directamente)\nlet marketData = null;\ntry {\n    if ($node[\"Memory Manager\"] && $node[\"Memory Manager\"].json) {\n        marketData = $node[\"Memory Manager\"].json.market_data;\n    }\n} catch(e) {\n    console.log(\"⚠️ No se pudo obtener marketData de Memory Manager\");\n}\n\n// Fallback: si decision tiene market_data directo\nif (!marketData && decision.market_data) {\n    marketData = decision.market_data;\n}\n\n// Validar HOLD/ESPERAR\nif (decision.decision === \"esperar\" || decision.decision === \"hold\" || decision.decision === \"wait\") {\n    console.log(\"⏸️ Decisión: ESPERAR/HOLD - No se ejecuta orden\");\n    return []; // Array vacío para prevenir ejecución\n}\n\n// Determinar tipo de orden\nlet orderType = \"BUY\";\nif (decision.decision === \"vender\" || decision.decision === \"sell\") {\n    orderType = \"SELL\";\n}\n\n// Obtener símbolo y precio\nconst symbol = marketData?.best_pair || decision.symbol || \"EURUSD\";\n\n// PRECIO: Usar el precio del símbolo correcto\nlet entryPrice = 0;\n\n// Primero intentar del decision (si viene del agente estratega)\nif (decision.entrada?.precio) {\n    entryPrice = decision.entrada.precio;\n}\n// Luego del market data técnico\nelse if (marketData?.technical?.current_price) {\n    entryPrice = marketData.technical.current_price;\n}\n// Fallback: usar el precio del par específico desde all_pairs\nelse if (marketData?.all_pairs?.[symbol]?.technical?.current_price) {\n    entryPrice = marketData.all_pairs[symbol].technical.current_price;\n}\n\n// Validar que el precio corresponde al símbolo\nconst VALID_RANGES = {\n    EURUSD: { min: 1.05, max: 1.20 },\n    GBPUSD: { min: 1.25, max: 1.40 },\n    USDJPY: { min: 140.0, max: 170.0 },\n    USDCHF: { min: 0.85, max: 1.00 }\n};\n\nconst DEFAULT_PRICES = {\n    EURUSD: 1.1689, GBPUSD: 1.3570, USDJPY: 159.88, USDCHF: 0.7996\n};\n\nconst range = VALID_RANGES[symbol];\nif (range && (entryPrice < range.min || entryPrice > range.max)) {\n    console.log(`⚠️ Precio ${entryPrice} fuera de rango para ${symbol}, usando default`);\n    entryPrice = DEFAULT_PRICES[symbol];\n}\n\nif (entryPrice === 0) {\n    console.log(`⚠️ Precio es 0, usando default para ${symbol}`);\n    entryPrice = DEFAULT_PRICES[symbol];\n}\n\nlet stopLoss = decision.stop_loss?.precio || 0;\nlet takeProfit = decision.take_profit?.objetivo1 || 0;\nlet volume = decision.volumen || marketData?.risk?.recommended_volume || 0.05;\n\n// ============================================\n// VALIDAR DUPLICADOS\n// ============================================\nconst pendingOrders = marketData?.pending_orders?.details || [];\n\nconst existingOrder = pendingOrders.find(order => \n    order.symbol === symbol && \n    Math.abs(parseFloat(order.open || 0) - entryPrice) < 0.0002\n);\n\nif (existingOrder) {\n    console.log(`⚠️ ORDEN DUPLICADA DETECTADA: ${orderType} ${symbol} @ ${entryPrice}`);\n    console.log(`   Orden existente ID: ${existingOrder.id}`);\n    console.log(`   ✅ Retornando array vacío para prevenir ejecución`);\n    return []; // IMPORTANTE: array vacío, no objeto\n}\n\n// ============================================\n// CALCULAR STOP LOSS Y TAKE PROFIT\n// ============================================\nif (stopLoss === 0) {\n    const stopPips = symbol.includes(\"JPY\") ? 30 : 0.0030;\n    stopLoss = orderType === \"BUY\" ? entryPrice - stopPips : entryPrice + stopPips;\n}\n\nif (takeProfit === 0) {\n    const tpPips = symbol.includes(\"JPY\") ? 50 : 0.0050;\n    takeProfit = orderType === \"BUY\" ? entryPrice + tpPips : entryPrice - tpPips;\n}\n\n// Validar lógica de SL/TP\nif (orderType === \"BUY\") {\n    if (stopLoss >= entryPrice) stopLoss = entryPrice - (symbol.includes(\"JPY\") ? 30 : 0.0030);\n    if (takeProfit <= entryPrice) takeProfit = entryPrice + (symbol.includes(\"JPY\") ? 50 : 0.0050);\n} else {\n    if (stopLoss <= entryPrice) stopLoss = entryPrice + (symbol.includes(\"JPY\") ? 30 : 0.0030);\n    if (takeProfit >= entryPrice) takeProfit = entryPrice - (symbol.includes(\"JPY\") ? 50 : 0.0050);\n}\n\n// Limitar volumen (MAX 0.05 lots)\nconst MAX_VOLUME = 0.05;\nconst MIN_VOLUME = 0.01;\nvolume = Math.min(volume, MAX_VOLUME);\nvolume = Math.max(volume, MIN_VOLUME);\nvolume = Math.round(volume * 100) / 100;\n\n// Redondear precios según el par\nconst decimals = symbol.includes(\"JPY\") ? 1000 : 100000;\nentryPrice = Math.round(entryPrice * decimals) / decimals;\nstopLoss = Math.round(stopLoss * decimals) / decimals;\ntakeProfit = Math.round(takeProfit * decimals) / decimals;\n\nconsole.log(`🚀 Orden preparada: ${orderType} ${symbol} ${volume} lotes @ ${entryPrice}`);\nconsole.log(`   SL: ${stopLoss} | TP: ${takeProfit}`);\n\nreturn [{\n    json: {\n        should_execute: true,\n        symbol: symbol,\n        volume: volume.toString(),\n        type: orderType,\n        price: entryPrice.toString(),\n        stop_loss: stopLoss.toString(),\n        take_profit: takeProfit.toString(),\n        decision: decision.decision,\n        confidence: decision.confianza,\n        reasoning: decision.razonamiento || \"\"\n    }\n}];"
+      },
+      "id": "025769a9-0091-4d83-bec9-c617e5581d13",
+      "name": "Preparar Orden",
+      "type": "n8n-nodes-base.code",
+      "position": [1168, 48],
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://192.168.0.100:8000/api/v1/order/pending",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [{ "name": "Content-Type", "value": "application/json" }]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"symbol\": \"{{ $json.symbol }}\",\n  \"volume\": \"{{ $json.volume }}\",\n  \"type\": \"{{ $json.type }}\",\n  \"price\": \"{{ $json.price }}\",\n  \"stop_loss\": \"{{ $json.stop_loss }}\",\n  \"take_profit\": \"{{ $json.take_profit }}\"\n}",
+        "options": {}
+      },
+      "id": "93c0f4b9-951b-4f5d-903a-c4af3871fac8",
+      "name": "Execute Order",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [1840, 32],
+      "typeVersion": 4.4
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================\n// LOG RESULT - Versión Corregida v2.0\n// ============================================\n// CORRECCIONES:\n// 1. Elimina referencia a nodo eliminado \"Parse Estratega\"\n// 2. Usa fuentes de datos flexibles con try-catch\n// 3. Valores por defecto si algo falla\n// ============================================\n\nconst orderResult = $input.all()[0].json;\n\nlet decision = {};\nlet orderData = {};\n\n// ============================================\n// OBTENER DATOS DE DECISIÓN (FLEXIBLE)\n// ============================================\ntry {\n    // Intentar desde input directo (Preparar Orden pasa datos)\n    if (orderResult.decision) {\n        decision = orderResult;\n        console.log(\"✅ Datos de decisión desde input directo\");\n    }\n    // Intentar desde Agente Estratega\n    else if ($node[\"Agente Estratega\"] && $node[\"Agente Estratega\"].json) {\n        decision = $node[\"Agente Estratega\"].json;\n        console.log(\"✅ Datos de decisión desde Agente Estratega\");\n    }\n    // Intentar desde Parse Unificado (openrouter-una)\n    else if ($node[\"Parse Unificado\"] && $node[\"Parse Unificado\"].json) {\n        const parsed = $node[\"Parse Unificado\"].json;\n        decision = {\n            decision: parsed._extracted?.decision || parsed.state?.tecnico?.señal || \"unknown\",\n            confianza: parsed._extracted?.confidence || parsed.state?.tecnico?.confianza || 0,\n            razonamiento: \"AI analysis from Parse Unificado\"\n        };\n        console.log(\"✅ Datos de decisión desde Parse Unificado\");\n    }\n} catch(e) {\n    console.log(\"⚠️ Error obteniendo datos de decisión:\", e.message);\n}\n\n// ============================================\n// OBTENER DATOS DE ORDEN\n// ============================================\ntry {\n    if ($node[\"Preparar Orden\"] && $node[\"Preparar Orden\"].json) {\n        orderData = $node[\"Preparar Orden\"].json;\n        console.log(\"✅ Datos de orden desde Preparar Orden\");\n    } else {\n        orderData = orderResult;\n    }\n} catch(e) {\n    console.log(\"⚠️ Error obteniendo datos de orden:\", e.message);\n    orderData = orderResult;\n}\n\n// Verificar ejecución\nconst orderSuccess = orderResult.error === false || orderResult.success !== false;\nconst orderId = orderResult.data?.[2] || orderResult.order_id || orderResult.id || null;\n\n// Extraer información\nlet orderPrice = parseFloat(orderData?.price || 0);\nlet orderVolume = parseFloat(orderData?.volume || 0);\nlet orderType = orderData?.type || \"unknown\";\nlet symbol = orderData?.symbol || \"unknown\";\n\n// Si hay datos en el array de respuesta de MT5\nif (orderResult.data && Array.isArray(orderResult.data) && orderResult.data[10]) {\n    const orderDetails = orderResult.data[10];\n    if (orderDetails[3]) orderType = orderDetails[3];\n    if (orderDetails[4]) orderVolume = parseFloat(orderDetails[4]) || orderVolume;\n    if (orderDetails[5]) orderPrice = parseFloat(orderDetails[5]) || orderPrice;\n}\n\n// Log entry\nconst logEntry = {\n    timestamp: new Date().toISOString(),\n    decision: decision.decision || orderResult.decision || \"unknown\",\n    confidence: decision.confianza || orderResult.confidence || orderResult.confianza || 0,\n    reasoning: decision.razonamiento || orderResult.razonamiento || \"\",\n    convergence: decision.convergence || orderResult.convergence || {},\n    order: {\n        symbol: symbol,\n        volume: orderVolume,\n        type: orderType,\n        price: orderPrice,\n        stop_loss: parseFloat(orderData?.stop_loss || 0),\n        take_profit: parseFloat(orderData?.take_profit || 0),\n        status: orderSuccess ? \"executed\" : \"failed\",\n        order_id: orderId,\n        message: orderResult.message || \"\"\n    },\n    agents: decision.agents_analysis || {},\n    weights_used: decision.weights_used || {}\n};\n\n// Guardar en memoria global\nif (typeof global !== 'undefined') {\n    if (!global.tradingMemory) {\n        global.tradingMemory = {\n            trades: [],\n            recent_decisions: [],\n            global_metrics: { total_trades: 0, winning_trades: 0, losing_trades: 0 }\n        };\n    }\n    \n    if (!global.tradingMemory.trades) global.tradingMemory.trades = [];\n    \n    global.tradingMemory.trades.push(logEntry);\n    \n    if (orderSuccess) {\n        global.tradingMemory.global_metrics.total_trades = (global.tradingMemory.global_metrics.total_trades || 0) + 1;\n    }\n    \n    if (global.tradingMemory.trades.length > 100) {\n        global.tradingMemory.trades = global.tradingMemory.trades.slice(-100);\n    }\n    \n    console.log(\"📝 Memoria actualizada:\");\n    console.log(`   Total trades: ${global.tradingMemory.global_metrics.total_trades}`);\n}\n\nconsole.log(\"========================================\");\nconsole.log(\"✅ LOG RESULTADO - ORDEN EJECUTADA\");\nconsole.log(\"========================================\");\nconsole.log(`📊 Decisión: ${logEntry.decision} (${logEntry.confidence}%)`);\nconsole.log(`💰 Orden: ${logEntry.order.type} ${logEntry.order.symbol} ${logEntry.order.volume} lots @ ${logEntry.order.price}`);\nconsole.log(`🆔 Order ID: ${logEntry.order.order_id}`);\nconsole.log(\"========================================\");\n\nconst sendToTelegram = orderSuccess && logEntry.order.volume > 0;\n\nreturn [{\n    json: {\n        ...logEntry,\n        send_telegram: sendToTelegram,\n        order_error: orderResult.error ? orderResult.message : null\n    }\n}];"
+      },
+      "id": "1e300d15-c7e7-4e6e-a23d-99a3d3eb0def",
+      "name": "Log Result",
+      "type": "n8n-nodes-base.code",
+      "position": [2208, 32],
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================\n// FORMAT TELEGRAM MESSAGE - Optimizado v2.0\n// ============================================\n\nconst data = $input.all()[0].json;\n\nconst decisionEmoji = {\n    \"comprar\": \"📈\",\n    \"vender\": \"📉\",\n    \"buy\": \"📈\",\n    \"sell\": \"📉\",\n    \"esperar\": \"⏸️\",\n    \"hold\": \"⏸️\"\n}[data.decision] || \"🤖\";\n\nlet message = `🤖 *SISTEMA MULTI-AGENTE v2.0*\\n`;\nmessage += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\n\\n`;\n\nmessage += `📊 *DECISIÓN FINAL*\\n`;\nmessage += `────────────────────────────────\\n`;\nmessage += `${decisionEmoji} Acción: ${(data.decision || \"N/A\").toUpperCase()}\\n`;\nmessage += `🎯 Confianza: ${data.confidence || data.confianza || 0}%\\n`;\nmessage += `💭 Razón: ${data.reasoning || data.razonamiento || \"N/A\"}\\n\\n`;\n\nif (data.order && data.order.type) {\n    message += `💰 *ORDEN EJECUTADA*\\n`;\n    message += `────────────────────────────────\\n`;\n    message += `Par: ${data.order.symbol}\\n`;\n    message += `Tipo: ${data.order.type.toUpperCase()}\\n`;\n    message += `Volumen: ${data.order.volume} lotes\\n`;\n    message += `Entrada: ${data.order.price}\\n`;\n    message += `Stop Loss: ${data.order.stop_loss}\\n`;\n    message += `Take Profit: ${data.order.take_profit}\\n\\n`;\n}\n\nif (data.convergence) {\n    message += `🔄 *CONVERGENCIA*\\n`;\n    message += `────────────────────────────────\\n`;\n    message += `Nivel: ${(data.convergence.level || data.convergence.nivel || \"N/A\").toUpperCase()}\\n`;\n    if (data.convergence.agentes_alineados?.length) {\n        message += `Alineados: ${data.convergence.agentes_alineados.join(\", \")}\\n`;\n    }\n    message += `\\n`;\n}\n\nmessage += `🕐 *Hora:* ${data.timestamp?.replace(\"T\", \" \").substring(0, 19) || new Date().toISOString().substring(0, 19)}`;\n\nif (data.order?.order_id) {\n    message += `\\n🆔 *Order ID:* ${data.order.order_id}`;\n}\n\nconsole.log(\"📤 Mensaje Telegram generado\");\n\nreturn [{\n    json: {\n        chat_id: \"6231139143\",\n        text: message,\n        parse_mode: \"Markdown\"\n    }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2496, 32],
+      "id": "0c173e2f-b012-4b97-9b21-6300bc18f1b8",
+      "name": "Format Telegram Message"
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chat_id }}",
+        "text": "={{ $json.text }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [2784, 32],
+      "id": "76846f5e-2ec1-4478-896a-bf811df6572a",
+      "name": "Telegram",
+      "webhookId": "2077d2c9-95a7-44ea-a34c-affd90b08463",
+      "credentials": {
+        "telegramApi": {
+          "id": "S0L9JXxUjOuC66zv",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================\n// LOG DECISIÓN SKIP - Versión Unificada v2.0\n// ============================================\n\nconst inputData = $input.all()[0].json;\n\n// Obtener marketData de forma segura\nlet marketData = null;\ntry {\n    if ($node[\"Memory Manager\"] && $node[\"Memory Manager\"].json) {\n        marketData = $node[\"Memory Manager\"].json.market_data;\n    }\n} catch(e) {\n    console.log(\"⚠️ No se pudo obtener marketData\");\n}\n\nlet skipReason = \"\";\nlet decisionAction = \"unknown\";\nlet decisionConfidence = 0;\nlet decisionReasoning = \"\";\n\n// Caso 1: Viene de Preparar Orden (tiene reason)\nif (inputData.reason) {\n    skipReason = inputData.reason;\n    if (inputData.existing_order_id) {\n        skipReason += ` (Order ID: ${inputData.existing_order_id})`;\n    }\n    decisionAction = inputData.decision || \"unknown\";\n    decisionConfidence = inputData.confidence || inputData.confianza || 0;\n    decisionReasoning = inputData.reasoning || \"\";\n} \n// Caso 2: Viene de Check Action directamente\nelse {\n    decisionAction = inputData.decision || \"unknown\";\n    decisionConfidence = inputData.confianza || 0;\n    decisionReasoning = inputData.razonamiento || \"\";\n    \n    if ([\"esperar\", \"hold\", \"wait\"].includes(decisionAction)) {\n        skipReason = \"AI recommended HOLD/Wait\";\n    } else if (decisionConfidence <= 45) {\n        skipReason = `Low confidence (${decisionConfidence}% ≤ 45%)`;\n    } else {\n        skipReason = \"Conditions not met\";\n    }\n}\n\nreturn [{\n    json: {\n        timestamp: new Date().toISOString(),\n        status: \"SKIPPED\",\n        reason: skipReason,\n        best_pair: marketData?.best_pair || \"EURUSD\",\n        decision: {\n            action: decisionAction,\n            confidence: decisionConfidence,\n            reasoning: decisionReasoning\n        },\n        market_context: {\n            price: marketData?.technical?.current_price || 0,\n            rsi: marketData?.technical?.rsi || 50,\n            trend: marketData?.technical?.trend || \"neutral\"\n        }\n    }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1840, 288],
+      "id": "1d328c65-0ae6-4f34-8c68-2b008c59031f",
+      "name": "Log Decisión Skip"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================\n// SAVE LOG - Usando variable global\n// ============================================\n\nconst logData = $input.all()[0].json;\n\nif (!global.tradingLogs) global.tradingLogs = [];\n\nlogData.timestamp = logData.timestamp || new Date().toISOString();\nglobal.tradingLogs.push(logData);\n\n// Mantener solo últimos 500 logs\nif (global.tradingLogs.length > 500) {\n    global.tradingLogs = global.tradingLogs.slice(-500);\n}\n\nconsole.log(`📝 Log guardado: ${logData.status} - Total: ${global.tradingLogs.length}`);\n\nreturn [{\n    json: {\n        logged: true,\n        total_logs: global.tradingLogs.length,\n        log_entry: logData\n    }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2208, 288],
+      "id": "b2aa7f21-d906-430c-9f99-e0c6bb3e5162",
+      "name": "Save Log"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================\n// EXTRACT PENDING IDs\n// ============================================\n\nconst inputData = $input.all()[0].json;\nconst pendingIds = inputData.pending_orders_to_cancel || [];\n\nconsole.log(`📋 IDs a cancelar: ${pendingIds.length}`);\n\nif (pendingIds.length === 0) {\n    console.log(\"✅ No hay órdenes para cancelar\");\n    return [];\n}\n\nreturn pendingIds.map(id => ({ json: { order_id: id } }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [176, -208],
+      "id": "b022df8b-ec15-4c1b-a5e4-607d4c40b359",
+      "name": "Extract Pending IDs",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "amount": 4
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [-416, 272],
+      "id": "92926c29-e3dd-4857-8554-b624dab54fa5",
+      "name": "Wait",
+      "webhookId": "4949bf44-301c-41c6-9161-8791ad006862"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================\n// LOG CANCEL RESULTS\n// ============================================\n\nconsole.log(`📝 Resultado cancelación:`, $json);\n\nif ($json.error === false) {\n    console.log(`✅ Orden cancelada correctamente`);\n} else {\n    console.log(`❌ Error: ${$json.message}`);\n}\n\nreturn [{ json: { cancelled: true, result: $json } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [816, -208],
+      "id": "5d2ef18f-f0c0-45c7-a825-cb886dbf863a",
+      "name": "Log Cancel Results"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "c6dc597c-466c-4137-a37e-a8459ceae580",
+              "leftValue": "={{ $json.result.message }}",
+              "rightValue": "=Cancel 0 pending orders success",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [1168, -208],
+      "id": "62d46701-c30a-427e-9d9d-36a8ef65d74a",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================\n// FORMAT TELEGRAM CANCEL\n// ============================================\n\nconst data = $input.all()[0].json;\nconst cancelled = data.result?.error === false;\nconst message = data.result?.message || \"\";\n\nconst match = message.match(/Cancel (\\d+) pending orders/);\nconst count = match ? parseInt(match[1]) : 0;\n\nif (!cancelled || count === 0) {\n    console.log(\"No se cancelaron órdenes, no se envía Telegram\");\n    return [];\n}\n\nlet telegramMessage = `🗑️ *ÓRDENES CANCELADAS*\\n`;\ntelegramMessage += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\n\\n`;\ntelegramMessage += `Se cancelaron ${count} órdenes pendientes por antigüedad (>48h).\\n\\n`;\ntelegramMessage += `📝 *Detalle:*\\n${message}\\n\\n`;\ntelegramMessage += `🕐 *Hora:* ${new Date().toISOString().replace(\"T\", \" \").substring(0, 19)}`;\n\nreturn [{\n    json: {\n        chat_id: \"6231139143\",\n        text: telegramMessage,\n        parse_mode: \"Markdown\"\n    }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1488, -192],
+      "id": "8829fa5a-580f-4f13-a420-61c3e063147a",
+      "name": "Format Telegram Cancel"
+    },
+    {
+      "parameters": {
+        "chatId": "=6231139143",
+        "text": "={{ $json.text }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [1840, -192],
+      "id": "1b8c6e27-d495-42b0-a30e-108ae5c8749d",
+      "name": "Send a text message",
+      "webhookId": "87b6f8d0-c7d0-4a6f-9e8b-f1193ed091b4",
+      "credentials": {
+        "telegramApi": {
+          "id": "S0L9JXxUjOuC66zv",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "DELETE",
+        "url": "=http://192.168.0.100:8000/api/v1/order/pending/{{ $json.order_id }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [496, -208],
+      "id": "017f8ca9-d7a5-4dfa-8f49-618d2166f3eb",
+      "name": "DELETE Old pending"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================\n// FILTER OLD PENDING ORDERS - Versión Corregida v2.0\n// ============================================\n// CORRECCIONES:\n// 1. Parseo correcto de fechas MT5 \"2026.04.08 16:21:06\"\n// 2. Soporte para formato ISO \"2026-04-08T16:21:06+02:00\"\n// 3. Umbral configurable (48 horas por defecto)\n// 4. Campo _debug con detalles de parseo\n// ============================================\n\nconst inputData = $input.all()[0].json;\n\nconsole.log(\"========================================\");\nconsole.log(\"🔍 FILTER OLD PENDING ORDERS - v2.0\");\nconsole.log(\"========================================\");\n\n// ============================================\n// FUNCIÓN: Parsear fechas MT5\n// ============================================\nfunction parseMT5Date(dateString) {\n    if (!dateString) {\n        return null;\n    }\n    \n    // Formato MT5: \"2026.04.08 16:21:06\"\n    const mt5Match = String(dateString).match(/(\\d{4})\\.(\\d{2})\\.(\\d{2})\\s+(\\d{2}):(\\d{2}):(\\d{2})/);\n    if (mt5Match) {\n        const [, year, month, day, hour, minute, second] = mt5Match;\n        return new Date(parseInt(year), parseInt(month) - 1, parseInt(day), \n                       parseInt(hour), parseInt(minute), parseInt(second));\n    }\n    \n    // Formato ISO: \"2026-04-08T16:21:06+02:00\" o \"2026-04-08T16:21:06Z\"\n    const isoDate = new Date(dateString);\n    if (!isNaN(isoDate.getTime())) {\n        return isoDate;\n    }\n    \n    return null;\n}\n\n// ============================================\n// BUSCAR ÓRDENES PENDIENTES\n// ============================================\nlet pendingOrders = [];\n\nif (inputData.pending_orders?.details && Array.isArray(inputData.pending_orders.details)) {\n    pendingOrders = inputData.pending_orders.details;\n} else if (inputData.pending_orders && Array.isArray(inputData.pending_orders)) {\n    pendingOrders = inputData.pending_orders;\n} else if (Array.isArray(inputData) && inputData[0]?.id) {\n    pendingOrders = inputData;\n} else {\n    // Buscar en cualquier propiedad que sea array de órdenes\n    for (const key of Object.keys(inputData)) {\n        if (Array.isArray(inputData[key]) && inputData[key][0]?.id) {\n            pendingOrders = inputData[key];\n            break;\n        }\n    }\n}\n\nconsole.log(`📊 Total órdenes pendientes: ${pendingOrders.length}`);\n\nif (pendingOrders.length === 0) {\n    return [{\n        json: {\n            ...inputData,\n            pending_orders_to_cancel: [],\n            _debug_cancel: { \n                total_pending: 0, \n                to_cancel: 0, \n                message: \"No pending orders found\",\n                timestamp: new Date().toISOString()\n            }\n        }\n    }];\n}\n\n// ============================================\n// CONFIGURACIÓN DE UMBRAL (48 horas por defecto)\n// ============================================\nconst HOURS_THRESHOLD = 48; // Hacer configurable si es necesario\nconst THRESHOLD_MS = HOURS_THRESHOLD * 60 * 60 * 1000;\nconst now = Date.now();\n\nconst ordersToCancel = [];\n\nconsole.log(`\\n🔍 Procesando órdenes (umbral: ${HOURS_THRESHOLD}h):\\n`);\n\nfor (const order of pendingOrders) {\n    console.log(`━━━ Orden ID: ${order.id} | ${order.symbol} | ${order.type} ━━━`);\n    \n    // Obtener campo de tiempo\n    let timeValue = order.time || order.open_time || order.created_at || order.insert_time;\n    \n    if (!timeValue) {\n        console.log(`   ❌ Sin campo de tiempo - NO se cancela`);\n        continue;\n    }\n    \n    const orderDate = parseMT5Date(timeValue);\n    \n    if (!orderDate) {\n        console.log(`   ❌ Fecha inválida: \"${timeValue}\" - NO se cancela`);\n        continue;\n    }\n    \n    const ageMs = now - orderDate.getTime();\n    const ageHours = ageMs / (60 * 60 * 1000);\n    const ageDays = ageHours / 24;\n    \n    console.log(`   📅 Edad: ${ageHours.toFixed(1)}h (${ageDays.toFixed(1)} días)`);\n    \n    if (ageMs > THRESHOLD_MS) {\n        console.log(`   ✅ CANCELAR (> ${HOURS_THRESHOLD}h)`);\n        ordersToCancel.push({\n            id: order.id,\n            symbol: order.symbol,\n            type: order.type,\n            open: order.open || order.price,\n            volume: order.volume,\n            age_hours: ageHours,\n            age_days: ageDays,\n            order_date: orderDate.toISOString()\n        });\n    } else {\n        const remainingHours = (THRESHOLD_MS - ageMs) / (60 * 60 * 1000);\n        console.log(`   ❌ MANTENER (faltan ${remainingHours.toFixed(1)}h)`);\n    }\n}\n\nconsole.log(`\\n📋 RESULTADO: ${ordersToCancel.length}/${pendingOrders.length} órdenes a cancelar`);\n\nreturn [{\n    json: {\n        ...inputData,\n        pending_orders_to_cancel: ordersToCancel.map(o => o.id),\n        _debug_cancel: {\n            total_pending: pendingOrders.length,\n            to_cancel: ordersToCancel.length,\n            details: ordersToCancel,\n            threshold_hours: HOURS_THRESHOLD,\n            threshold_ms: THRESHOLD_MS,\n            current_time: new Date(now).toISOString(),\n            timestamp: new Date().toISOString()\n        }\n    }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-416, -48],
+      "id": "f0228775-cfb9-40b0-b42e-4a759d418ee1",
+      "name": "Filter Old Pending Orders"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "74032024-ffcc-4e43-8c0a-df6b75e28241",
+              "leftValue": "={{ $json.pending_orders_to_cancel }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "array",
+                "operation": "lengthGt",
+                "rightType": "number"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [-112, -48],
+      "id": "657a0ff1-7320-435e-b990-faae6ca3af58",
+      "name": "hay datos?"
+    },
+    {
+      "parameters": {
+        "url": "https://api.massive.com/v1/marketstatus/now?apiKey=ehYSWLZ7fohWx3BPaKyvwaq8JIbNablD",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [-1584, 288],
+      "id": "a17ab1eb-316f-47f8-9f17-d5732cf6d632",
+      "name": "Check Market Status",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "477d1770-3890-4236-8f24-1082cbea26ed",
+              "leftValue": "={{ $json.currencies.fx }}",
+              "rightValue": "open",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [-1360, 288],
+      "id": "580ea37d-f8d3-459c-9378-344e6431c5ed",
+      "name": "Is Open?"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "ZIvccIJb1OwGQh3N",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/ZIvccIJb1OwGQh3N",
+          "cachedResultName": "Jetson"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [176, 80],
+      "id": "9ca4965e-f143-428d-adc9-af047555f077",
+      "name": "Call 'Jetson'"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "22gscjgfPYX25LvU",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/22gscjgfPYX25LvU",
+          "cachedResultName": "Info Market"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [-1056, 272],
+      "id": "bdc7646a-9ca3-43b5-ba46-af32b422e557",
+      "name": "Call 'Info Market'"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "CdY1ZiW6PD5jvr0S",
+          "mode": "id",
+          "cachedResultUrl": "/workflow/CdY1ZiW6PD5jvr0S"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [176, 272],
+      "id": "d4119b1a-503a-4854-8206-387fe54a6cb8",
+      "name": "Call 'OpenRuter - UNA'"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================\n// DEBUG CHECK ACTION INPUT - Logger\n// ============================================\n\nconst data = $input.all()[0].json;\n\nconsole.log(\"========================================\");\nconsole.log(\"🔍 DATOS QUE LLEGAN A CHECK ACTION\");\nconsole.log(\"========================================\");\nconsole.log(\"decision:\", data.decision);\nconsole.log(\"confianza:\", data.confianza);\nconsole.log(\"entrada:\", data.entrada);\nconsole.log(\"take_profit:\", data.take_profit);\nconsole.log(\"volumen:\", data.volumen);\nconsole.log(\"convergence:\", data.convergence);\nconsole.log(\"========================================\");\n\nif (data.decision !== \"hold\" && data.decision !== \"neutral\" && data.confianza >= 45) {\n    console.log(\"✅ Debería ir a TRUE branch\");\n} else {\n    console.log(\"❌ Debería ir a FALSE branch\");\n    console.log(\"   Razón:\", data.decision === \"hold\" || data.decision === \"neutral\" ? \n        \"decision es hold/neutral\" : \"confianza < 45\");\n}\n\nreturn $input.all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [496, 272],
+      "id": "e33dc044-7ca2-45bb-8c00-081b87750a90",
+      "name": "Logger"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "ecc56734-de54-485c-9f1f-b68df7cbf070",
+              "leftValue": "={{ $json.should_execute }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [1488, 48],
+      "id": "dfff3874-d846-415c-9dc2-ba4def4c13da",
+      "name": "If1"
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [[{ "node": "Check Market Status", "type": "main", "index": 0 }]]
+    },
+    "Analizar Pares": {
+      "main": [
+        [{ "node": "Wait", "type": "main", "index": 0 }],
+        [{ "node": "Filter Old Pending Orders", "type": "main", "index": 0 }]
+      ]
+    },
+    "Memory Manager": {
+      "main": [[{ "node": "Call 'OpenRuter - UNA'", "type": "main", "index": 0 }]]
+    },
+    "Check Action": {
+      "main": [
+        [{ "node": "Preparar Orden", "type": "main", "index": 0 }],
+        [{ "node": "Log Decisión Skip", "type": "main", "index": 0 }]
+      ]
+    },
+    "Preparar Orden": {
+      "main": [[{ "node": "If1", "type": "main", "index": 0 }]]
+    },
+    "Execute Order": {
+      "main": [[{ "node": "Log Result", "type": "main", "index": 0 }]]
+    },
+    "Log Result": {
+      "main": [[{ "node": "Format Telegram Message", "type": "main", "index": 0 }]]
+    },
+    "Format Telegram Message": {
+      "main": [[{ "node": "Telegram", "type": "main", "index": 0 }]]
+    },
+    "Log Decisión Skip": {
+      "main": [[{ "node": "Save Log", "type": "main", "index": 0 }]]
+    },
+    "Extract Pending IDs": {
+      "main": [[{ "node": "DELETE Old pending", "type": "main", "index": 0 }]]
+    },
+    "Wait": {
+      "main": [[{ "node": "Memory Manager", "type": "main", "index": 0 }]]
+    },
+    "Log Cancel Results": {
+      "main": [[{ "node": "If", "type": "main", "index": 0 }]]
+    },
+    "If": {
+      "main": [[], [{ "node": "Format Telegram Cancel", "type": "main", "index": 0 }]]
+    },
+    "Format Telegram Cancel": {
+      "main": [[{ "node": "Send a text message", "type": "main", "index": 0 }]]
+    },
+    "DELETE Old pending": {
+      "main": [[{ "node": "Log Cancel Results", "type": "main", "index": 0 }]]
+    },
+    "Filter Old Pending Orders": {
+      "main": [[{ "node": "hay datos?", "type": "main", "index": 0 }]]
+    },
+    "hay datos?": {
+      "main": [[{ "node": "Extract Pending IDs", "type": "main", "index": 0 }]]
+    },
+    "Check Market Status": {
+      "main": [[{ "node": "Is Open?", "type": "main", "index": 0 }]]
+    },
+    "Is Open?": {
+      "main": [[{ "node": "Call 'Info Market'", "type": "main", "index": 0 }]]
+    },
+    "Call 'Jetson'": {
+      "main": [[]]
+    },
+    "Call 'Info Market'": {
+      "main": [[{ "node": "Analizar Pares", "type": "main", "index": 0 }]]
+    },
+    "Call 'OpenRuter - UNA'": {
+      "main": [[{ "node": "Logger", "type": "main", "index": 0 }]]
+    },
+    "Logger": {
+      "main": [[{ "node": "Check Action", "type": "main", "index": 0 }]]
+    },
+    "If1": {
+      "main": [
+        [{ "node": "Execute Order", "type": "main", "index": 0 }],
+        [{ "node": "Log Decisión Skip", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "515fdd51c531b5de47935866fd08e3e0aa440d6aebc162f95b77585a19af3727"
+  }
+}

@@ -1,0 +1,160 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "url": "http://192.168.0.100:8000/api/v1/positions",
+        "options": {}
+      },
+      "id": "0c64ecee-808a-4155-831d-952ddbe21562",
+      "name": "Get MT5 Positions",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        -128,
+        -16
+      ],
+      "typeVersion": 4.4,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll",
+        "options": {}
+      },
+      "id": "c7d02b3b-2cd0-43b7-8210-a5300f1423c5",
+      "name": "Merge 1 (Positions + Account)",
+      "type": "n8n-nodes-base.merge",
+      "position": [
+        272,
+        256
+      ],
+      "typeVersion": 3.2
+    },
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -560,
+        448
+      ],
+      "id": "fce2f0fd-1070-4070-a0ed-1d955aa85b4d",
+      "name": "When Executed by Another Workflow"
+    },
+    {
+      "parameters": {
+        "url": "http://192.168.0.100:8000/api/v1/account/info",
+        "options": {}
+      },
+      "id": "2f8b6004-8b9d-4e4d-a8ff-009f4bc2fbab",
+      "name": "Get Account Info",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        -128,
+        208
+      ],
+      "typeVersion": 4.4,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "url": "http://192.168.0.100:8000/api/v1/order/pending",
+        "options": {}
+      },
+      "id": "7a71e890-b658-4aed-a708-c602762fbb6d",
+      "name": "Get MT5 Pendings",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [
+        -144,
+        416
+      ],
+      "typeVersion": 4.4,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        544,
+        368
+      ],
+      "id": "25b4c1cd-61a0-426d-85c6-76f993ce36b4",
+      "name": "Merge",
+      "alwaysOutputData": true
+    }
+  ],
+  "connections": {
+    "Get MT5 Positions": {
+      "main": [
+        [
+          {
+            "node": "Merge 1 (Positions + Account)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge 1 (Positions + Account)": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Get MT5 Positions",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Account Info",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get MT5 Pendings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Account Info": {
+      "main": [
+        [
+          {
+            "node": "Merge 1 (Positions + Account)",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Get MT5 Pendings": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "515fdd51c531b5de47935866fd08e3e0aa440d6aebc162f95b77585a19af3727"
+  }
+}

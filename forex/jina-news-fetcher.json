@@ -1,0 +1,76 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        288,
+        -16
+      ],
+      "id": "844f06b2-c2dd-42fe-94cd-b61dfe8166bc",
+      "name": "When Executed by Another Workflow"
+    },
+    {
+      "parameters": {
+        "url": "https://r.jina.ai/https://www.forexlive.com/feed/news",
+        "options": {
+          "response": {
+            "response": {}
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        592,
+        -16
+      ],
+      "id": "e1f16a85-542c-43be-9d1a-3655374f8ccc",
+      "name": "Jina Reader"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Nodo: \"Process News\" - VERSIÓN CORREGIDA\nconst inputData = $input.all()[0].json;\n\nlet rawText = \"\";\n\nconsole.log(\"📰 Datos recibidos:\", Object.keys(inputData));\n\n// Extraer el texto de la respuesta de Jina Reader\nif (inputData.data && typeof inputData.data === 'string') {\n    rawText = inputData.data;\n    console.log(`✅ Texto extraído de 'data': ${rawText.length} caracteres`);\n} \nelse if (typeof inputData === 'string') {\n    rawText = inputData;\n    console.log(`✅ Texto extraído de string: ${rawText.length} caracteres`);\n}\nelse if (inputData.raw_text) {\n    rawText = inputData.raw_text;\n    console.log(`✅ Texto extraído de raw_text: ${rawText.length} caracteres`);\n}\nelse if (inputData.text) {\n    rawText = inputData.text;\n    console.log(`✅ Texto extraído de text: ${rawText.length} caracteres`);\n}\n\n// Limpiar caracteres de escape\nrawText = rawText.replace(/\\\\n/g, '\\n').replace(/\\\\\"/g, '\"').replace(/\\\\\\\\/g, '\\\\');\n\nconsole.log(`📄 Primeros 300 caracteres: ${rawText.substring(0, 300)}`);\n\n// Extraer noticias\nlet articles = [];\nconst lines = rawText.split('\\n');\n\nconst highImpactKeywords = [\n    \"ecb\", \"fed\", \"interest rate\", \"gdp\", \"cpi\", \"nfp\", \"non-farm\",\n    \"employment\", \"retail sales\", \"pmi\", \"manufacturing\", \"trump\",\n    \"powell\", \"jolts\", \"unemployment\", \"inflation\"\n];\n\nfor (let i = 0; i < lines.length; i++) {\n    const line = lines[i];\n    \n    if (line.includes('investinglive.com/news/') || line.includes('forexlive.com')) {\n        let title = \"\";\n        const urlMatch = line.match(/https?:\\/\\/[^\\/]+\\/news\\/([^\\/]+)/);\n        if (urlMatch) {\n            title = urlMatch[1].replace(/-/g, ' ').replace(/\\d{8}$/, '').trim();\n            title = title.charAt(0).toUpperCase() + title.slice(1);\n        }\n        \n        if (!title || title.length < 5) continue;\n        \n        let relevance = \"low\";\n        const titleLower = title.toLowerCase();\n        for (const keyword of highImpactKeywords) {\n            if (titleLower.includes(keyword)) {\n                relevance = \"high\";\n                break;\n            }\n        }\n        \n        let currency = \"\";\n        if (titleLower.includes(\"us\") || titleLower.includes(\"fed\")) currency = \"USD\";\n        else if (titleLower.includes(\"euro\") || titleLower.includes(\"ecb\")) currency = \"EUR\";\n        else if (titleLower.includes(\"uk\") || titleLower.includes(\"boe\")) currency = \"GBP\";\n        else if (titleLower.includes(\"japan\") || titleLower.includes(\"boj\")) currency = \"JPY\";\n        else if (titleLower.includes(\"swiss\")) currency = \"CHF\";\n        \n        articles.push({\n            title: title.substring(0, 150),\n            currency: currency,\n            relevance: relevance,\n            // url: line.trim()\n        });\n    }\n}\n\n// Eliminar duplicados\nconst uniqueArticles = [];\nconst titles = new Set();\nfor (const article of articles) {\n    if (!titles.has(article.title)) {\n        titles.add(article.title);\n        uniqueArticles.push(article);\n    }\n}\n\nuniqueArticles.sort((a, b) => {\n    if (a.relevance === \"high\" && b.relevance !== \"high\") return -1;\n    return 0;\n});\n\nconst topArticles = uniqueArticles.slice(0, 10);\n\nconsole.log(`📰 ${topArticles.length} noticias procesadas`);\ntopArticles.forEach(a => console.log(`   - ${a.currency}: ${a.title.substring(0, 50)} (${a.relevance})`));\n\nreturn [{\n    json: {\n        news: topArticles,\n        news_count: topArticles.length,\n        high_impact_count: topArticles.filter(a => a.relevance === \"high\").length\n    }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        896,
+        -16
+      ],
+      "id": "00f501a3-61fe-4c62-a62d-e9b7935da0e5",
+      "name": "Process News"
+    }
+  ],
+  "connections": {
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Jina Reader",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Jina Reader": {
+      "main": [
+        [
+          {
+            "node": "Process News",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "515fdd51c531b5de47935866fd08e3e0aa440d6aebc162f95b77585a19af3727"
+  }
+}
