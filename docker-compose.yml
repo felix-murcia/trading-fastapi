@@ -1,5 +1,11 @@
 version: '3.8'
 
+# Topología de red:
+#   n8n       → network_mode: host  → llama a FastAPI en http://localhost:8000
+#   fastapi   → trading-net, puerto 8000 publicado solo en 127.0.0.1
+#   postgres  → trading-net, sin puerto expuesto al host
+#   MT5 EA    → corre en Windows/host, fastapi lo alcanza via host.docker.internal:9999
+
 services:
   n8n:
     build: .
@@ -15,10 +21,58 @@ services:
       - MASSIVE_API_KEY=${MASSIVE_API_KEY}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
       - N8N_BLOCK_ENV_ACCESS_IN_FUNCTION_NODES=false
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+      - FASTAPI_URL=http://localhost:8090
+      - FASTAPI_INTERNAL_TOKEN=${INTERNAL_TOKEN}
     env_file:
       - .env
     volumes:
       - n8n_data:/home/node/.n8n
 
+  fastapi:
+    build: ./fastapi
+    container_name: trading-fastapi
+    restart: unless-stopped
+    networks:
+      - trading-net
+    ports:
+      - "127.0.0.1:8090:8000"          # solo accesible desde localhost, no desde Internet
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql://trading:${POSTGRES_PASSWORD}@postgres:5432/trading
+      - INTERNAL_TOKEN=${INTERNAL_TOKEN}
+      - HMAC_SECRET=${HMAC_SECRET}
+      - MT5_HTTP_URL=${MT5_HTTP_URL}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # Linux: resuelve la IP del host
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: trading-postgres
+    restart: unless-stopped
+    networks:
+      - trading-net
+    environment:
+      - POSTGRES_USER=trading
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=trading
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./fastapi/db/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trading -d trading"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+networks:
+  trading-net:
+    driver: bridge
+
 volumes:
   n8n_data:
+  postgres_data:

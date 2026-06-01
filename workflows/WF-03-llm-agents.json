@@ -1,0 +1,201 @@
+{
+  "name": "WF-03 LLM Agents",
+  "nodes": [
+    {
+      "id": "b5bf6391-d359-4381-81f0-40fae7113efd",
+      "name": "Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        400
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "e33ca44d-2f54-4c14-bece-60a79ae7090f",
+      "name": "Agent Technical",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        220,
+        240
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "REPLACE_WF04_ID",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "9e64ac72-4c12-4245-9ea0-55bd6b4367cc",
+      "name": "Agent Fundamental",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        220,
+        400
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "REPLACE_WF05_ID",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "70a92006-1a0a-493e-80fb-d5557f0eb59f",
+      "name": "Agent Sentiment",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        220,
+        560
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "REPLACE_WF06_ID",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "00c372da-8088-4858-987d-832045fe0a04",
+      "name": "Merge Signals",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        460,
+        400
+      ],
+      "parameters": {
+        "mode": "append",
+        "options": {}
+      }
+    },
+    {
+      "id": "246d2030-ab01-4a76-8f92-4019e0aad229",
+      "name": "Aggregate Signals",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        400
+      ],
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst signals = items.map(i => i.json).filter(s => s.agent);\nreturn [{ json: { signals } }];",
+        "mode": "runOnceForAllItems"
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Trigger": {
+      "main": [
+        [
+          {
+            "node": "Agent Technical",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Agent Fundamental",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Agent Sentiment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Agent Technical": {
+      "main": [
+        [
+          {
+            "node": "Merge Signals",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Agent Fundamental": {
+      "main": [
+        [
+          {
+            "node": "Merge Signals",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Agent Sentiment": {
+      "main": [
+        [
+          {
+            "node": "Merge Signals",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Merge Signals": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Signals",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "d7e255ab-955c-44fa-bc45-df0b74f2c4c2",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}

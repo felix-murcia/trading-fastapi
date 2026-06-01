@@ -1,0 +1,105 @@
+{
+  "name": "WF-04 Agent Technical",
+  "nodes": [
+    {
+      "id": "94fd2edb-360a-4a16-84f7-995e6bfbbc30",
+      "name": "Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        400
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "3adf1cd6-a3af-4a3f-bd9e-59bba5715bd9",
+      "name": "Build Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        400
+      ],
+      "parameters": {
+        "jsCode": "\nconst ctx = $input.first().json;\nconst t   = ctx.technical || {};\nconst best= ctx.best_pair || \"EURUSD\";\nconst price = t.current_price || 0;\nconst candles = (t.candles_recent || []).map(c =>\n  \"O:\" + c.open + \" H:\" + c.high + \" L:\" + c.low + \" C:\" + c.close\n).join(\" | \");\n\nconst prompt = \"[INST] You are a technical analysis expert.\\n\" +\n  \"Symbol: \" + best + \" | Price: \" + price + \" | RSI: \" + t.rsi + \" | Trend: \" + t.trend + \"\\n\" +\n  \"SMA9: \" + t.sma9 + \" SMA20: \" + t.sma20 + \" SMA50: \" + t.sma50 + \" SMA200: \" + t.sma200 + \"\\n\" +\n  \"ATR: \" + t.atr + \" | Support: \" + t.support + \" | Resistance: \" + t.resistance + \"\\n\" +\n  \"Recent candles (last 5): \" + candles + \"\\n\" +\n  \"Analyse ONLY the technical data. Respond ONLY with JSON:\\n\" +\n  '{\"signal\":\"buy|sell|neutral\",\"confidence\":0.0-1.0,\"reason\":\"one sentence\"} [/INST]';\n\nreturn [{ json: { ...ctx, prompt } }];\n",
+        "mode": "runOnceForAllItems"
+      }
+    },
+    {
+      "id": "2ac421b3-23e6-40da-abaf-031e7f5187d3",
+      "name": "Call LLM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        440,
+        400
+      ],
+      "parameters": {
+        "url": "http://127.0.0.1:8090/v1/llm/signal",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Internal-Token",
+              "value": "90c42a9448defc1f57K8WGdyb3FYaXgTw00gCVKY9JhfFG1A9tfji"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "agent",
+              "value": "technical"
+            },
+            {
+              "name": "prompt",
+              "value": "={{ $json.prompt }}"
+            }
+          ]
+        },
+        "options": {}
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Trigger": {
+      "main": [
+        [
+          {
+            "node": "Build Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Prompt": {
+      "main": [
+        [
+          {
+            "node": "Call LLM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "5677af2e-0b8b-4a6f-b330-e4c3f8e10253",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}

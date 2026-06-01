@@ -1,0 +1,109 @@
+{
+  "name": "WF-07 Order Cleanup",
+  "nodes": [
+    {
+      "id": "81095b9c-8a3e-4434-8534-bfa2f3fd0682",
+      "name": "Cron Every Hour",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        0,
+        400
+      ],
+      "parameters": {
+        "triggerTimes": {
+          "item": [
+            {
+              "mode": "everyX",
+              "value": 60,
+              "unit": "minutes"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "274a51cf-13d1-4195-be1b-944ee656c42e",
+      "name": "POST Cleanup",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        220,
+        400
+      ],
+      "parameters": {
+        "url": "http://127.0.0.1:8090/v1/orders/cleanup",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Internal-Token",
+              "value": "90c42a9448defc1f57K8WGdyb3FYaXgTw00gCVKY9JhfFG1A9tfji"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "max_age_hours",
+              "value": "48"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "0ba96887-eb0b-4b97-8fad-93c690e25271",
+      "name": "Log Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        400
+      ],
+      "parameters": {
+        "jsCode": "const r = $input.first().json;\nconsole.log(\"Cleanup:\", (r.cancelled||[]).length, \"canceladas,\", (r.errors||[]).length, \"errores\");\nreturn [{ json: r }];",
+        "mode": "runOnceForAllItems"
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Cron Every Hour": {
+      "main": [
+        [
+          {
+            "node": "POST Cleanup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "POST Cleanup": {
+      "main": [
+        [
+          {
+            "node": "Log Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "9c11e709-a66f-43ad-9431-a9cf9f6d58fc",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}

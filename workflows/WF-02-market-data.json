@@ -1,0 +1,227 @@
+{
+  "name": "WF-02 Market Data",
+  "nodes": [
+    {
+      "id": "3da41cfc-6281-4419-a70a-cd8be2ac6cd9",
+      "name": "Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        400
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "183f1098-c95a-48e7-b1d5-9ba7fde903f1",
+      "name": "GET Prices",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        220,
+        400
+      ],
+      "parameters": {
+        "url": "http://127.0.0.1:8090/v1/market/prices",
+        "method": "GET",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Internal-Token",
+              "value": "90c42a9448defc1f57K8WGdyb3FYaXgTw00gCVKY9JhfFG1A9tfji"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "040f6538-23d5-4a86-a83b-e055e5967ba1",
+      "name": "GET Positions",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        440,
+        400
+      ],
+      "parameters": {
+        "url": "http://127.0.0.1:8090/v1/market/positions",
+        "method": "GET",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Internal-Token",
+              "value": "90c42a9448defc1f57K8WGdyb3FYaXgTw00gCVKY9JhfFG1A9tfji"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "8348baf6-0153-4b1a-9591-f824af5a9701",
+      "name": "GET News",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        660,
+        400
+      ],
+      "parameters": {
+        "url": "https://r.jina.ai/https://www.forexlive.com/feed/news",
+        "method": "GET",
+        "options": {}
+      }
+    },
+    {
+      "id": "0946332a-e515-43fe-a158-49b075219bdb",
+      "name": "GET Calendar",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        880,
+        400
+      ],
+      "parameters": {
+        "url": "https://r.jina.ai/https://www.forexfactory.com/calendar",
+        "method": "GET",
+        "options": {}
+      }
+    },
+    {
+      "id": "1acaa6e1-d542-4e56-80a7-2fb6e5cb1a0a",
+      "name": "Parse News",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        400
+      ],
+      "parameters": {
+        "jsCode": "const raw = $input.first().json?.content || $input.first().json?.data || \"\";\nconst lines = String(raw).split(\"\\n\").filter(l => l.trim().length > 20).slice(0,20);\nconst CURRENCIES = [\"EUR\",\"USD\",\"GBP\",\"JPY\",\"CHF\"];\nconst news = lines.map(l => ({\n  headline: l.trim().slice(0,120),\n  impact:   l.toLowerCase().includes(\"high\") ? \"high\" : l.toLowerCase().includes(\"medium\") ? \"medium\" : \"low\",\n  currency: CURRENCIES.find(c => l.includes(c)) || \"\"\n}));\nreturn [{ json: { news } }];",
+        "mode": "runOnceForAllItems"
+      }
+    },
+    {
+      "id": "4ae69ca1-e96f-49c9-b75a-0fcc0e50b16a",
+      "name": "Parse Calendar",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        400
+      ],
+      "parameters": {
+        "jsCode": "const raw = $input.first().json?.content || $input.first().json?.data || \"\";\nconst lines = String(raw).split(\"\\n\").filter(l => l.trim().length > 10).slice(0,15);\nconst CURRENCIES = [\"EUR\",\"USD\",\"GBP\",\"JPY\",\"CHF\"];\nconst calendar = lines.map(l => ({\n  event:    l.trim().slice(0,100),\n  currency: CURRENCIES.find(c => l.includes(c)) || \"\",\n  impact:   l.toLowerCase().includes(\"high\") ? \"high\" : l.toLowerCase().includes(\"medium\") ? \"medium\" : \"low\",\n  time: \"\", forecast: \"\"\n}));\nreturn [{ json: { calendar } }];",
+        "mode": "runOnceForAllItems"
+      }
+    },
+    {
+      "id": "90b35f45-99be-44f1-a01a-cd2d42458e02",
+      "name": "Merge All",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        400
+      ],
+      "parameters": {
+        "jsCode": "const prices   = $(\"GET Prices\").first().json;\nconst pos      = $(\"GET Positions\").first().json;\nconst positions = (pos.open || []).concat(pos.pending || []);\nconst newsObj  = $(\"Parse News\").first().json;\nconst calObj   = $(\"Parse Calendar\").first().json;\nreturn [{ json: { prices, positions, news: newsObj.news || [], calendar: calObj.calendar || [] } }];",
+        "mode": "runOnceForAllItems"
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Trigger": {
+      "main": [
+        [
+          {
+            "node": "GET Prices",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET Prices": {
+      "main": [
+        [
+          {
+            "node": "GET Positions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET Positions": {
+      "main": [
+        [
+          {
+            "node": "GET News",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET News": {
+      "main": [
+        [
+          {
+            "node": "GET Calendar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET Calendar": {
+      "main": [
+        [
+          {
+            "node": "Parse News",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse News": {
+      "main": [
+        [
+          {
+            "node": "Parse Calendar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Calendar": {
+      "main": [
+        [
+          {
+            "node": "Merge All",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "a62d3734-4cca-45c4-b007-f93e4a9ff52d",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}

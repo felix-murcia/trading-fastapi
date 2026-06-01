@@ -1,0 +1,105 @@
+{
+  "name": "WF-06 Agent Sentiment",
+  "nodes": [
+    {
+      "id": "b1b43c8c-f23d-4d5a-9407-7eb90fe46a64",
+      "name": "Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        400
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "7648aebc-044b-4b5a-bdb6-2aa2bf801c65",
+      "name": "Build Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        400
+      ],
+      "parameters": {
+        "jsCode": "\nconst ctx = $input.first().json;\nconst best   = ctx.best_pair || \"EURUSD\";\nconst pos    = ctx.positions || {};\nconst open   = (pos.open    || []).filter(p => p.symbol === best);\nconst longV  = open.filter(p => p.type === \"BUY\" ).reduce((s,p) => s + (p.volume||0), 0);\nconst shortV = open.filter(p => p.type === \"SELL\").reduce((s,p) => s + (p.volume||0), 0);\nconst total  = longV + shortV;\nconst bias   = total > 0 ? ((longV - shortV) / total * 100).toFixed(1) : \"0\";\n\nconst prompt = \"[INST] You are a market sentiment expert.\\n\" +\n  \"Symbol: \" + best + \"\\n\" +\n  \"Open positions: Long \" + longV.toFixed(2) + \" lots, Short \" + shortV.toFixed(2) + \" lots\\n\" +\n  \"Sentiment bias: \" + bias + \"% towards longs\\n\" +\n  \"Extreme positioning (>70% one side) suggests contrarian signal.\\n\" +\n  \"Respond ONLY with JSON:\\n\" +\n  '{\"signal\":\"buy|sell|neutral\",\"confidence\":0.0-1.0,\"reason\":\"one sentence\"} [/INST]';\n\nreturn [{ json: { ...ctx, prompt } }];\n",
+        "mode": "runOnceForAllItems"
+      }
+    },
+    {
+      "id": "cc4fb39e-e486-4cc6-ab7c-b1f1ba28652e",
+      "name": "Call LLM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        440,
+        400
+      ],
+      "parameters": {
+        "url": "http://127.0.0.1:8090/v1/llm/signal",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Internal-Token",
+              "value": "90c42a9448defc1f57K8WGdyb3FYaXgTw00gCVKY9JhfFG1A9tfji"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "agent",
+              "value": "sentiment"
+            },
+            {
+              "name": "prompt",
+              "value": "={{ $json.prompt }}"
+            }
+          ]
+        },
+        "options": {}
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Trigger": {
+      "main": [
+        [
+          {
+            "node": "Build Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Prompt": {
+      "main": [
+        [
+          {
+            "node": "Call LLM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "721c034c-9dd3-4754-895a-9299363dab77",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}

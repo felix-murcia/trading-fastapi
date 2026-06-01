@@ -1,0 +1,105 @@
+{
+  "name": "WF-05 Agent Fundamental",
+  "nodes": [
+    {
+      "id": "e8f0f190-1107-4f85-b7a2-e8fb0cac4c1d",
+      "name": "Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        400
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "147e8a64-ca51-4d6d-bed3-c94817ae1411",
+      "name": "Build Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        400
+      ],
+      "parameters": {
+        "jsCode": "\nconst ctx = $input.first().json;\nconst best  = ctx.best_pair || \"EURUSD\";\nconst news  = (ctx.news || []).slice(0,5).map(n => \"- \" + (n.headline||\"\") + \" [\" + (n.impact||\"\") + \"]\").join(\"\\n\");\nconst events= (ctx.calendar || []).slice(0,5).map(e =>\n  \"- \" + (e.event||\"\") + \" (\" + (e.currency||\"\") + \", \" + (e.impact||\"\") + \", forecast:\" + (e.forecast||\"\") + \")\"\n).join(\"\\n\");\n\nconst prompt = \"[INST] You are a fundamental analysis expert.\\n\" +\n  \"Symbol: \" + best + \"\\n\" +\n  \"Recent news:\\n\" + (news || \"none\") + \"\\n\" +\n  \"Upcoming events:\\n\" + (events || \"none\") + \"\\n\" +\n  \"Respond ONLY with JSON:\\n\" +\n  '{\"signal\":\"buy|sell|neutral\",\"confidence\":0.0-1.0,\"reason\":\"one sentence\"} [/INST]';\n\nreturn [{ json: { ...ctx, prompt } }];\n",
+        "mode": "runOnceForAllItems"
+      }
+    },
+    {
+      "id": "2e02b492-5c4b-474c-86d5-74b4ca85ca89",
+      "name": "Call LLM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        440,
+        400
+      ],
+      "parameters": {
+        "url": "http://127.0.0.1:8090/v1/llm/signal",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Internal-Token",
+              "value": "90c42a9448defc1f57K8WGdyb3FYaXgTw00gCVKY9JhfFG1A9tfji"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "agent",
+              "value": "fundamental"
+            },
+            {
+              "name": "prompt",
+              "value": "={{ $json.prompt }}"
+            }
+          ]
+        },
+        "options": {}
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Trigger": {
+      "main": [
+        [
+          {
+            "node": "Build Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Prompt": {
+      "main": [
+        [
+          {
+            "node": "Call LLM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "311e0945-81e0-41bb-9f76-b5f7841336c8",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}
