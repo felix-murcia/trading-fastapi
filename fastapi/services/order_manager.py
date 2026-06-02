@@ -29,7 +29,7 @@ VALID_RANGES = {
     "EURUSD": (1.05, 1.20),
     "GBPUSD": (1.20, 1.45),
     "USDJPY": (130.0, 175.0),
-    "USDCHF": (0.82, 1.05),
+    "USDCHF": (0.75, 1.05),
 }
 
 PIP_SIZE = {
@@ -140,6 +140,31 @@ async def prepare(req: OrderPrepareRequest) -> OrderPrepareResponse:
 
     payload = {**to_sign, "_canonical": canonical, "_sig": sig}
     return OrderPrepareResponse(approved=True, order_payload=payload, rejection_reason="")
+
+
+def validate_only(req: OrderPrepareRequest) -> tuple[bool, str]:
+    """Valida geometría y rangos sin escribir en DB. Para dry-run/test."""
+    lo, hi = VALID_RANGES.get(req.symbol, (0, 99999))
+    if not (lo <= req.entry <= hi):
+        return False, f"entry_out_of_range:{req.entry}"
+    if req.type == "BUY":
+        if not (req.sl < req.entry < req.tp):
+            return False, "invalid_geometry_buy"
+    elif req.type == "SELL":
+        if not (req.tp < req.entry < req.sl):
+            return False, "invalid_geometry_sell"
+    else:
+        return False, f"unknown_order_type:{req.type}"
+    sl_pips = _pips(req.symbol, req.entry, req.sl)
+    min_pips = SL_MIN_PIPS * (10 if "JPY" in req.symbol else 1)
+    max_pips = SL_MAX_PIPS * (10 if "JPY" in req.symbol else 1)
+    if sl_pips < min_pips:
+        return False, f"sl_too_tight:{round(sl_pips,1)}pips"
+    if sl_pips > max_pips:
+        return False, f"sl_too_wide:{round(sl_pips,1)}pips"
+    if not (settings.min_volume <= req.volume <= settings.max_volume):
+        return False, f"volume_out_of_range:{req.volume}"
+    return True, ""
 
 
 async def confirm(req: OrderConfirmRequest) -> OrderConfirmResponse:

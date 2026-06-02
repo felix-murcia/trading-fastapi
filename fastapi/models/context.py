@@ -20,7 +20,7 @@ class Position(BaseModel):
     symbol: str
     type: str     # BUY | SELL | BUY_LIMIT | SELL_LIMIT | etc.
     volume: float
-    open_price: float
+    price: float
     ticket: int | None = None
 
 

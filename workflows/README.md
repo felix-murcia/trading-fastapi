@@ -84,3 +84,8 @@ Cron 5min
   → FastAPI POST /v1/audit/log
   → Telegram
 ```
+
+Para relanzar el test en cualquier momento:
+
+curl -X POST http://localhost:5678/webhook/test-simulate -H "Content-Type: application/json" -d '{}'
+```

@@ -1,2 +1,7 @@
 .env
 QWEN.md
+.claude/
+.mcp.json
+CLAUDE.md
+ESTADO_ACTUAL.md
+forex/
