@@ -42,3 +42,5 @@ class PairsAnalysisResponse(BaseModel):
     price: float
     scores: list[PairScore]
     technical: TechnicalData
+    smc_active: bool = False        # True si best_pair fue elegido por señal SMC activa
+    smc_direction: str | None = None  # "buy" | "sell" | None

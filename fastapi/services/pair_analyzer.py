@@ -104,7 +104,9 @@ def _score(sym: str, closes: list[float], rsi: float,
 
 
 async def analyze(req: PairsAnalysisRequest) -> PairsAnalysisResponse:
-    # Fetchar candles de MT5 para cada par en paralelo (secuencial es suficiente dado el volumen)
+    from db.connection import get_pool
+
+    # Fetchar candles de MT5
     candles_map: dict[str, list[Candle]] = {}
     for sym in SYMBOLS:
         raw = await mt5_client.get_candles(sym, TIMEFRAME, CANDLE_COUNT)
@@ -131,7 +133,26 @@ async def analyze(req: PairsAnalysisRequest) -> PairsAnalysisResponse:
     if not scores:
         raise ValueError("Sin candles disponibles para ningún par")
 
-    best    = max(scores, key=lambda s: s.score)
+    # Consultar señales SMC activas para todos los pares
+    pool = get_pool()
+    smc_rows = await pool.fetch(
+        "SELECT symbol, direction FROM smc_signals WHERE entry_zone = TRUE",
+    )
+    smc_active_map: dict[str, str] = {r["symbol"]: r["direction"] for r in smc_rows}
+
+    # Prioridad 1: mejor par con SMC activo
+    # Prioridad 2: mejor par sin SMC (flujo normal)
+    scores_sorted = sorted(scores, key=lambda s: s.score, reverse=True)
+    smc_candidates = [s for s in scores_sorted if s.symbol in smc_active_map]
+
+    smc_active   = False
+    smc_direction = None
+    if smc_candidates:
+        best = smc_candidates[0]
+        smc_active    = True
+        smc_direction = smc_active_map[best.symbol]
+    else:
+        best    = max(scores, key=lambda s: s.score)
     sym     = best.symbol
     candles = candles_map[sym]
     closes  = _closes(candles)
@@ -161,4 +182,6 @@ async def analyze(req: PairsAnalysisRequest) -> PairsAnalysisResponse:
         price=technical.current_price,
         scores=sorted(scores, key=lambda s: s.score, reverse=True),
         technical=technical,
+        smc_active=smc_active,
+        smc_direction=smc_direction,
     )
