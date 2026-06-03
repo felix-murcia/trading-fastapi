@@ -1,124 +1,140 @@
 //+------------------------------------------------------------------+
 //| SignalBridge.mq5                                                  |
-//| Lee objetos de Brain SMC Ultimate y los envía a FastAPI           |
+//| Lee señales de Brain SMC Ultimate y las envía a FastAPI           |
 //+------------------------------------------------------------------+
 #property copyright "Trading System"
-#property version   "1.0"
+#property version   "1.2"
 #property strict
 
-#include <Trade\Trade.mqh>
-
 //--- Parámetros configurables
-input string FastAPI_URL      = "http://100.91.167.17:8090";  // IP del servidor FastAPI (ajustar)
-input string InternalToken    = "90c42a9448defc1f57K8WGdyb3FYaXgTw00gCVKY9JhfFG1A9tfji"; // X-Internal-Token
-input int    SendIntervalSec  = 10;                          // Cada cuántos segundos enviar señal
-input string ObjPrefix_Bull   = "";  // Prefijo de objetos alcistas de Brain SMC (dejar vacío = detectar todo)
-input string ObjPrefix_Bear   = "";  // Prefijo de objetos bajistas
-input color  BullZoneColor    = clrGreen;   // Color de zona alcista en el chart
-input color  BearZoneColor    = clrRed;     // Color de zona bajista en el chart
-input string Timeframe        = "H1";
-
-//--- Estado interno
-datetime lastSendTime = 0;
+input string FastAPI_URL      = "http://100.91.167.17:8090";
+input string InternalToken    = "90c42a9448defc1f57K8WGdyb3FYaXgTw00gCVKY9JhfFG1A9tfji";
+input int    SendIntervalSec  = 10;
+input string Timeframe        = "M5";
+input double MaxDistATR       = 3.0;   // Zona ignorada si precio está a más de N×ATR
+input bool   DiagMode         = false;
 
 //+------------------------------------------------------------------+
 int OnInit()
   {
    EventSetTimer(SendIntervalSec);
-   Print("SignalBridge iniciado en ", Symbol(), " TF=", Timeframe);
+   Print("SignalBridge v1.2 iniciado en ", Symbol(), " TF=", Timeframe,
+         " | MaxDistATR=", MaxDistATR);
    return INIT_SUCCEEDED;
   }
 
-void OnDeinit(const int reason)
-  {
-   EventKillTimer();
-  }
+void OnDeinit(const int reason) { EventKillTimer(); }
+void OnTimer()                  { SendCurrentSignal(); }
 
-void OnTimer()
+//+------------------------------------------------------------------+
+double GetATR(int period = 14)
   {
-   SendCurrentSignal();
+   double atr = 0;
+   for(int i = 1; i <= period; i++)
+     {
+      double h = iHigh(Symbol(), PERIOD_CURRENT, i);
+      double l = iLow (Symbol(), PERIOD_CURRENT, i);
+      double c = iClose(Symbol(), PERIOD_CURRENT, i + 1);
+      double tr = MathMax(h - l, MathMax(MathAbs(h - c), MathAbs(l - c)));
+      atr += tr;
+     }
+   return atr / period;
   }
 
 //+------------------------------------------------------------------+
-//| Lógica principal: escanea objetos y determina si hay Entry Zone   |
+void PrintAllObjects()
+  {
+   int total = ObjectsTotal(0, 0, -1);
+   Print("=== Objetos en el chart: ", total, " ===");
+   for(int i = 0; i < total; i++)
+     {
+      string name  = ObjectName(0, i, 0, -1);
+      int    type  = (int)ObjectGetInteger(0, name, OBJPROP_TYPE);
+      string text  = ObjectGetString(0, name, OBJPROP_TEXT);
+      double price = ObjectGetDouble(0, name, OBJPROP_PRICE, 0);
+      PrintFormat("  [%d] type=%d name=%s text=%s price=%.5f", i, type, name, text, price);
+     }
+   Print("=== Fin listado ===");
+  }
+
 //+------------------------------------------------------------------+
 void SendCurrentSignal()
   {
-   double currentPrice = SymbolInfoDouble(Symbol(), SYMBOL_BID);
+   if(DiagMode) { PrintAllObjects(); return; }
 
-   bool   entryZone  = false;
-   string direction  = "";
-   double zoneHigh   = 0;
-   double zoneLow    = 0;
+   double currentPrice = SymbolInfoDouble(Symbol(), SYMBOL_BID);
+   double atr          = GetATR(14);
+   double maxDist      = atr * MaxDistATR;
+
+   bool   entryZone = false;
+   string direction = "";
+   double zonePrice = 0;
 
    int total = ObjectsTotal(0, 0, -1);
 
    for(int i = 0; i < total; i++)
      {
-      string name = ObjectName(0, i, 0, -1);
-      ENUM_OBJECT type = (ENUM_OBJECT)ObjectGetInteger(0, name, OBJPROP_TYPE);
+      string name    = ObjectName(0, i, 0, -1);
+      string text    = ObjectGetString(0, name, OBJPROP_TEXT);
+      string nameLow = name; StringToLower(nameLow);
+      string textLow = text; StringToLower(textLow);
 
-      // Solo rectángulos (zonas de precio)
-      if(type != OBJ_RECTANGLE) continue;
+      // Patrón Brain SMC Ultimate: TB_C_B_<fecha>_txt o TB_C_U_<fecha>_txt
+      // También acepta cualquier objeto cuyo texto contenga "entry zone"
+      bool isBrainSMC = StringFind(nameLow, "tb_c_") >= 0;
+      bool hasEntryText = StringFind(textLow, "entry") >= 0
+                       || StringFind(textLow, "zone")  >= 0;
 
-      double p1 = ObjectGetDouble(0, name, OBJPROP_PRICE, 0);
-      double p2 = ObjectGetDouble(0, name, OBJPROP_PRICE, 1);
-      double high = MathMax(p1, p2);
-      double low  = MathMin(p1, p2);
+      if(!isBrainSMC && !hasEntryText) continue;
 
-      // ¿El precio actual está dentro de la zona?
-      if(currentPrice >= low && currentPrice <= high)
+      double price = ObjectGetDouble(0, name, OBJPROP_PRICE, 0);
+      if(price <= 0) continue;
+
+      // Filtro de proximidad: ignorar zonas muy alejadas del precio actual
+      if(MathAbs(currentPrice - price) > maxDist)
         {
-         color  objColor = (color)ObjectGetInteger(0, name, OBJPROP_COLOR);
-         string zoneName = name;
-         StringToLower(zoneName);
-
-         // Determinar dirección por color o nombre
-         bool isBull = (objColor == BullZoneColor)
-                    || StringFind(zoneName, "bull")  >= 0
-                    || StringFind(zoneName, "buy")   >= 0
-                    || StringFind(zoneName, "green") >= 0
-                    || StringFind(zoneName, "support") >= 0
-                    || StringFind(zoneName, "demand") >= 0;
-
-         bool isBear = (objColor == BearZoneColor)
-                    || StringFind(zoneName, "bear")   >= 0
-                    || StringFind(zoneName, "sell")   >= 0
-                    || StringFind(zoneName, "red")    >= 0
-                    || StringFind(zoneName, "resist") >= 0
-                    || StringFind(zoneName, "supply") >= 0;
-
-         if(isBull || isBear)
-           {
-            entryZone = true;
-            direction = isBull ? "buy" : "sell";
-            zoneHigh  = high;
-            zoneLow   = low;
-
-            PrintFormat("Zona detectada: %s dir=%s high=%.5f low=%.5f",
-                        name, direction, zoneHigh, zoneLow);
-            break;
-           }
+         PrintFormat("Zona ignorada (lejos): %s price=%.5f dist=%.5f maxDist=%.5f",
+                     name, price, MathAbs(currentPrice - price), maxDist);
+         continue;
         }
+
+      // Determinar dirección
+      // Patrón nombre: TB_C_B_ = Bearish (SELL), TB_C_U_ / TB_C_L_ = Bullish (BUY)
+      string dir = "";
+      if(StringFind(nameLow, "_b_") >= 0 || StringFind(nameLow, "_bear") >= 0
+         || StringFind(textLow, "bear") >= 0 || StringFind(textLow, "sell") >= 0)
+         dir = "sell";
+      else if(StringFind(nameLow, "_u_") >= 0 || StringFind(nameLow, "_l_") >= 0
+              || StringFind(nameLow, "_bull") >= 0 || StringFind(nameLow, "_buy") >= 0
+              || StringFind(textLow, "bull") >= 0 || StringFind(textLow, "buy") >= 0)
+         dir = "buy";
+      else
+         dir = (price <= currentPrice) ? "buy" : "sell";   // fallback por posición
+
+      entryZone = true;
+      direction = dir;
+      zonePrice = price;
+
+      PrintFormat("Entry Zone activa: obj=%s price=%.5f dir=%s dist=%.5f",
+                  name, price, direction, MathAbs(currentPrice - price));
+      break;
      }
 
-   // Construir JSON
+   // JSON
    string body = StringFormat(
      "{\"symbol\":\"%s\",\"entry_zone\":%s,\"direction\":%s,"
       "\"zone_high\":%s,\"zone_low\":%s,\"timeframe\":\"%s\"}",
      Symbol(),
      entryZone ? "true" : "false",
      direction != "" ? ("\"" + direction + "\"") : "null",
-     zoneHigh > 0 ? DoubleToString(zoneHigh, 5) : "null",
-     zoneLow  > 0 ? DoubleToString(zoneLow,  5) : "null",
+     zonePrice > 0 ? DoubleToString(zonePrice, 5) : "null",
+     zonePrice > 0 ? DoubleToString(zonePrice, 5) : "null",
      Timeframe
    );
 
    PostToFastAPI(body);
   }
 
-//+------------------------------------------------------------------+
-//| Envía POST a FastAPI                                               |
 //+------------------------------------------------------------------+
 void PostToFastAPI(string body)
   {
@@ -137,7 +153,7 @@ void PostToFastAPI(string body)
    int res = WebRequest("POST", url, headers, timeout, postData, result, responseHeaders);
 
    if(res == -1)
-      PrintFormat("SignalBridge ERROR: WebRequest falló (¿URL permitida en MT5?) code=%d", GetLastError());
+      PrintFormat("SignalBridge ERROR: WebRequest falló code=%d", GetLastError());
    else if(res != 200)
-      PrintFormat("SignalBridge HTTP %d para %s", res, url);
+      PrintFormat("SignalBridge HTTP %d", res);
   }
