@@ -101,9 +101,8 @@ def _derive_levels(direction: str, tech: TechnicalData) -> tuple[float, float, f
         tp = round(entry + sl_dist * settings.rr_min, 5)
     else:
         entry = price
-        # Anclar SL en max(resistance, entry) por la misma razón
-        sl_anchor = max(tech.resistance, price)
-        sl = round(sl_anchor + atr * 0.5, 5)
+        # SL para SELL: precio + ATR×0.5 (sin ancla en resistencia — evita SL muy lejano)
+        sl = round(price + atr * 0.5, 5)
         sl_dist = sl - entry
         tp = round(entry - sl_dist * settings.rr_min, 5)
 
