@@ -41,12 +41,12 @@ PIP_SIZE = {
     "XAUUSD": 0.10,
 }
 
-# (min_pips, max_pips) por símbolo
+# (min_pips, max_pips) por símbolo — calibrado para M5
 SL_LIMITS: dict[str, tuple[int, int]] = {
-    "USDJPY": (50, 500),
-    "XAUUSD": (50, 2000),
+    "USDJPY": (2, 30),
+    "XAUUSD": (15, 500),
 }
-_SL_DEFAULT = (5, 50)
+_SL_DEFAULT = (2, 30)
 
 
 def _sign(payload: dict) -> str:

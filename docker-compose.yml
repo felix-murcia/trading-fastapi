@@ -36,7 +36,7 @@ services:
     networks:
       - trading-net
     ports:
-      - "127.0.0.1:8090:8000"          # solo accesible desde localhost, no desde Internet
+      - "0.0.0.0:8090:8000"             # LAN + localhost; protegido por X-Internal-Token
     env_file:
       - .env
     environment:

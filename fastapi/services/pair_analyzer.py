@@ -10,6 +10,7 @@ from models.analysis import PairsAnalysisRequest, PairsAnalysisResponse, Technic
 from services import mt5_client
 
 SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "XAUUSD"]
+TIMEFRAME    = "M5"
 CANDLE_COUNT = 220   # suficiente para SMA-200 + margen
 
 PAIR_CURRENCIES = {
@@ -106,7 +107,7 @@ async def analyze(req: PairsAnalysisRequest) -> PairsAnalysisResponse:
     # Fetchar candles de MT5 para cada par en paralelo (secuencial es suficiente dado el volumen)
     candles_map: dict[str, list[Candle]] = {}
     for sym in SYMBOLS:
-        raw = await mt5_client.get_candles(sym, "H1", CANDLE_COUNT)
+        raw = await mt5_client.get_candles(sym, TIMEFRAME, CANDLE_COUNT)
         candles_map[sym] = [Candle(**c) for c in raw]
 
     strength = _currency_strength(candles_map)
