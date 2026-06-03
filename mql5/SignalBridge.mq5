@@ -79,13 +79,14 @@ void SendCurrentSignal()
       string nameLow = name; StringToLower(nameLow);
       string textLow = text; StringToLower(textLow);
 
-      // Patrón Brain SMC Ultimate: TB_C_B_<fecha>_txt o TB_C_U_<fecha>_txt
-      // También acepta cualquier objeto cuyo texto contenga "entry zone"
-      bool isBrainSMC = StringFind(nameLow, "tb_c_") >= 0;
-      bool hasEntryText = StringFind(textLow, "entry") >= 0
-                       || StringFind(textLow, "zone")  >= 0;
+      // Patrón Brain SMC Ultimate: TB_C_B_ (bearish) o TB_C_U_ (bullish)
+      // Solo Entry Zones, no Support/Resistance (TB_C_S_)
+      bool isBrainEntryZone = (StringFind(nameLow, "tb_c_b_") >= 0
+                            || StringFind(nameLow, "tb_c_u_") >= 0)
+                           && StringFind(nameLow, "tb_c_s_") < 0;
+      bool hasEntryText = StringFind(textLow, "entry") >= 0;
 
-      if(!isBrainSMC && !hasEntryText) continue;
+      if(!isBrainEntryZone && !hasEntryText) continue;
 
       double price = ObjectGetDouble(0, name, OBJPROP_PRICE, 0);
       if(price <= 0) continue;
