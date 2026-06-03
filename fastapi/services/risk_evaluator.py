@@ -49,9 +49,17 @@ def _calc_volume(equity: float, sl_pips: float) -> float:
 def _voting(signals: list) -> tuple[str, float]:
     """
     Devuelve (direction, avg_confidence).
-    Requiere mínimo 2 de 3 agentes con señal coherente y confidence >= umbral.
+    - smc_brain con confidence >= umbral: señal directa, no requiere mayoría.
+    - Agentes LLM: requiere mínimo 2 de 3 con señal coherente y confidence >= umbral.
     """
     threshold = settings.llm_confidence_threshold
+
+    # Señal SMC directa — tiene prioridad y no pasa por votación
+    smc = next((s for s in signals if s.agent == "smc_brain"), None)
+    if smc and smc.confidence >= threshold and smc.signal in ("buy", "sell"):
+        return smc.signal, smc.confidence
+
+    # Votación LLM normal
     valid = [s for s in signals if not s.parse_error and s.confidence >= threshold]
 
     if len(valid) < 2:

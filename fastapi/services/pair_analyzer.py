@@ -135,8 +135,10 @@ async def analyze(req: PairsAnalysisRequest) -> PairsAnalysisResponse:
 
     # Consultar señales SMC activas para todos los pares
     pool = get_pool()
+    # Solo señales activas y recientes (EA envía cada 10s — TTL de 2 min evita señales obsoletas)
     smc_rows = await pool.fetch(
-        "SELECT symbol, direction FROM smc_signals WHERE entry_zone = TRUE",
+        "SELECT symbol, direction FROM smc_signals "
+        "WHERE entry_zone = TRUE AND received_at > NOW() - INTERVAL '2 minutes'",
     )
     smc_active_map: dict[str, str] = {r["symbol"]: r["direction"] for r in smc_rows}
 
