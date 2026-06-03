@@ -21,6 +21,7 @@ PIP_SIZE = {
     "GBPUSD": 0.0001,
     "USDJPY": 0.01,
     "USDCHF": 0.0001,
+    "XAUUSD": 0.10,
 }
 PIP_VALUE_PER_LOT = 10.0   # USD aproximado para todos los pares
 
@@ -84,12 +85,17 @@ def _derive_levels(direction: str, tech: TechnicalData) -> tuple[float, float, f
 
     if direction == "buy":
         entry = price
-        sl = round(tech.support - atr * 0.5, 5)
+        # Anclar SL en min(support, entry) para evitar que un soporte histórico
+        # por encima del precio actual produzca un SL demasiado ajustado
+        sl_anchor = min(tech.support, price)
+        sl = round(sl_anchor - atr * 0.5, 5)
         sl_dist = entry - sl
         tp = round(entry + sl_dist * settings.rr_min, 5)
     else:
         entry = price
-        sl = round(tech.resistance + atr * 0.5, 5)
+        # Anclar SL en max(resistance, entry) por la misma razón
+        sl_anchor = max(tech.resistance, price)
+        sl = round(sl_anchor + atr * 0.5, 5)
         sl_dist = sl - entry
         tp = round(entry - sl_dist * settings.rr_min, 5)
 
@@ -118,7 +124,7 @@ def evaluate(req: RiskEvaluateRequest, equity: float) -> RiskEvaluateResponse:
     # 4. Verificar R/R
     sl_p = _sl_pips(req.best_pair, entry, sl)
     tp_p = _tp_pips(req.best_pair, entry, tp)
-    if sl_p <= 0 or (tp_p / sl_p) < settings.rr_min:
+    if sl_p <= 0 or round(tp_p / sl_p, 4) < settings.rr_min:
         return RiskEvaluateResponse(
             action="skip", entry=entry, sl=sl, tp=tp, volume=0,
             confidence=avg_conf,

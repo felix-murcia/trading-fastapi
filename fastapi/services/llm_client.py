@@ -16,11 +16,12 @@ async def call_llm(prompt: str) -> str:
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
     }
     body = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 250,
+        "max_tokens": 2000,
         "temperature": 0.2,
     }
     async with httpx.AsyncClient(timeout=settings.llm_agent_timeout) as client:

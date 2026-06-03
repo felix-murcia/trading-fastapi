@@ -21,13 +21,14 @@ _SESSIONS = {
     "overlap":  (13, 17),
 }
 
-SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF"]
+SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "XAUUSD"]
 
 VALID_RANGES = {
     "EURUSD": (1.05, 1.20),
     "GBPUSD": (1.20, 1.45),
     "USDJPY": (130.0, 175.0),
     "USDCHF": (0.75, 1.05),
+    "XAUUSD": (2500.0, 6000.0),
 }
 
 

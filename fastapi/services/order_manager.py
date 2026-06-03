@@ -30,6 +30,7 @@ VALID_RANGES = {
     "GBPUSD": (1.20, 1.45),
     "USDJPY": (130.0, 175.0),
     "USDCHF": (0.75, 1.05),
+    "XAUUSD": (2500.0, 6000.0),
 }
 
 PIP_SIZE = {
@@ -37,10 +38,15 @@ PIP_SIZE = {
     "GBPUSD": 0.0001,
     "USDJPY": 0.01,
     "USDCHF": 0.0001,
+    "XAUUSD": 0.10,
 }
 
-SL_MIN_PIPS = 5
-SL_MAX_PIPS = 50
+# (min_pips, max_pips) por símbolo
+SL_LIMITS: dict[str, tuple[int, int]] = {
+    "USDJPY": (50, 500),
+    "XAUUSD": (50, 2000),
+}
+_SL_DEFAULT = (5, 50)
 
 
 def _sign(payload: dict) -> str:
@@ -90,8 +96,7 @@ async def prepare(req: OrderPrepareRequest) -> OrderPrepareResponse:
 
     # 4. SL en pips
     sl_pips = _pips(req.symbol, req.entry, req.sl)
-    min_pips = SL_MIN_PIPS * (10 if "JPY" in req.symbol else 1)
-    max_pips = SL_MAX_PIPS * (10 if "JPY" in req.symbol else 1)
+    min_pips, max_pips = SL_LIMITS.get(req.symbol, _SL_DEFAULT)
     if sl_pips < min_pips:
         return _reject(f"sl_too_tight:{round(sl_pips,1)}pips")
     if sl_pips > max_pips:
@@ -156,8 +161,7 @@ def validate_only(req: OrderPrepareRequest) -> tuple[bool, str]:
     else:
         return False, f"unknown_order_type:{req.type}"
     sl_pips = _pips(req.symbol, req.entry, req.sl)
-    min_pips = SL_MIN_PIPS * (10 if "JPY" in req.symbol else 1)
-    max_pips = SL_MAX_PIPS * (10 if "JPY" in req.symbol else 1)
+    min_pips, max_pips = SL_LIMITS.get(req.symbol, _SL_DEFAULT)
     if sl_pips < min_pips:
         return False, f"sl_too_tight:{round(sl_pips,1)}pips"
     if sl_pips > max_pips:

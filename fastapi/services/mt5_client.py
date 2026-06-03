@@ -13,7 +13,7 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF"]
+SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "XAUUSD"]
 
 
 async def _get(path: str, params: dict | None = None) -> any:
@@ -97,7 +97,7 @@ async def place_order(symbol: str, order_type: str, volume: float,
                       comment: str = "") -> dict:
     body = {
         "symbol":     symbol,
-        "order_type": order_type,
+        "type":       order_type,
         "volume":     volume,
         "price":      price,
         "stop_loss":  sl,

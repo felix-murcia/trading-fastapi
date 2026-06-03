@@ -62,13 +62,15 @@ async def simulate_cycle(
     from models.analysis import PairsAnalysisRequest
     analysis = await pair_analyzer.analyze(PairsAnalysisRequest(cycle_id=cycle_id, prices=prices))
 
-    # 3. Risk evaluate — ajustar soporte/resistencia para garantizar SL ≤ 40 pips
+    # 3. Risk evaluate — ajustar soporte/resistencia para garantizar SL dentro del rango válido
+    from services.order_manager import PIP_SIZE as _PIP, SL_LIMITS, _SL_DEFAULT
     tech = analysis.technical
-    pip = 0.01 if "JPY" in analysis.best_pair else 0.0001
-    target_sl_pips = 30  # 30 pips → SL dentro del rango [5, 50]
+    pip = _PIP.get(analysis.best_pair, 0.0001)
+    sl_min, sl_max = SL_LIMITS.get(analysis.best_pair, _SL_DEFAULT)
+    target_sl_pips = sl_min * 6   # 6× el mínimo — SL holgado pero dentro del rango
     tech.support    = round(tech.current_price - target_sl_pips * pip, 5)
     tech.resistance = round(tech.current_price + target_sl_pips * pip, 5)
-    tech.atr        = round(target_sl_pips * pip * 0.5, 5)  # ATR coherente
+    tech.atr        = round(target_sl_pips * pip * 0.5, 5)
 
     from models.risk import RiskEvaluateRequest
     risk_req = RiskEvaluateRequest(

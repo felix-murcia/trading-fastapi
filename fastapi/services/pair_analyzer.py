@@ -9,7 +9,7 @@ Devuelve best_pair y los datos técnicos completos de ese par.
 from models.analysis import PairsAnalysisRequest, PairsAnalysisResponse, TechnicalData, PairScore, Candle
 from services import mt5_client
 
-SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF"]
+SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "XAUUSD"]
 CANDLE_COUNT = 220   # suficiente para SMA-200 + margen
 
 PAIR_CURRENCIES = {
@@ -17,6 +17,7 @@ PAIR_CURRENCIES = {
     "GBPUSD": ("GBP", "USD"),
     "USDJPY": ("USD", "JPY"),
     "USDCHF": ("USD", "CHF"),
+    "XAUUSD": ("XAU", "USD"),
 }
 
 
@@ -77,7 +78,7 @@ def _currency_strength(candles_map: dict[str, list[Candle]]) -> dict[str, float]
         closes = _closes(candles)
         pair_change[sym] = (closes[-1] - closes[0]) / closes[0] * 100 if len(closes) >= 2 else 0.0
 
-    strength: dict[str, float] = {"EUR": 0.0, "GBP": 0.0, "USD": 0.0, "JPY": 0.0, "CHF": 0.0}
+    strength: dict[str, float] = {"EUR": 0.0, "GBP": 0.0, "USD": 0.0, "JPY": 0.0, "CHF": 0.0, "XAU": 0.0}
     count:    dict[str, int]   = {k: 0 for k in strength}
     for sym, chg in pair_change.items():
         base, quote = PAIR_CURRENCIES.get(sym, ("?", "?"))
