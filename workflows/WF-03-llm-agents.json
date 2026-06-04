@@ -1,34 +1,19 @@
 {
-  "updatedAt": "2026-06-03T09:29:25.199Z",
-  "createdAt": "2026-06-01T13:06:48.741Z",
-  "id": "1rBvOPpAo3qwOKCR",
-  "name": "WF-03 LLM Agents",
-  "description": null,
-  "active": true,
-  "isArchived": false,
   "nodes": [
     {
-      "id": "b5bf6391-d359-4381-81f0-40fae7113efd",
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "id": "f6d9a410-b186-493f-ba9f-4a49285998f0",
       "name": "Trigger",
       "type": "n8n-nodes-base.executeWorkflowTrigger",
       "typeVersion": 1.1,
       "position": [
-        0,
-        400
-      ],
-      "parameters": {
-        "inputSource": "passthrough"
-      }
+        -1184,
+        2224
+      ]
     },
     {
-      "id": "e33ca44d-2f54-4c14-bece-60a79ae7090f",
-      "name": "Agent Technical",
-      "type": "n8n-nodes-base.executeWorkflow",
-      "typeVersion": 1.3,
-      "position": [
-        220,
-        240
-      ],
       "parameters": {
         "workflowId": {
           "__rl": true,
@@ -43,24 +28,20 @@
             "technical": "={{ $input.first().json.technical }}",
             "news": "={{ $input.first().json.news }}",
             "positions": "={{ $input.first().json.positions }}"
-          },
-          "matchingColumns": [],
-          "schema": [],
-          "attemptToConvertTypes": false,
-          "convertFieldsToString": false
+          }
         },
         "options": {}
-      }
-    },
-    {
-      "id": "9e64ac72-4c12-4245-9ea0-55bd6b4367cc",
-      "name": "Agent Fundamental",
+      },
+      "id": "ee36f940-092c-4df1-8faf-6c4eaa000e08",
+      "name": "Agent Technical",
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1.3,
       "position": [
-        220,
-        400
-      ],
+        -960,
+        2064
+      ]
+    },
+    {
       "parameters": {
         "workflowId": {
           "__rl": true,
@@ -75,24 +56,20 @@
             "technical": "={{ $input.first().json.technical }}",
             "news": "={{ $input.first().json.news }}",
             "positions": "={{ $input.first().json.positions }}"
-          },
-          "matchingColumns": [],
-          "schema": [],
-          "attemptToConvertTypes": false,
-          "convertFieldsToString": false
+          }
         },
         "options": {}
-      }
-    },
-    {
-      "id": "70a92006-1a0a-493e-80fb-d5557f0eb59f",
-      "name": "Agent Sentiment",
+      },
+      "id": "2e90da3b-2d47-4028-8728-8bc68ed3a9e5",
+      "name": "Agent Fundamental",
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1.3,
       "position": [
-        220,
-        560
-      ],
+        -960,
+        2224
+      ]
+    },
+    {
       "parameters": {
         "workflowId": {
           "__rl": true,
@@ -107,42 +84,44 @@
             "technical": "={{ $input.first().json.technical }}",
             "news": "={{ $input.first().json.news }}",
             "positions": "={{ $input.first().json.positions }}"
-          },
-          "matchingColumns": [],
-          "schema": [],
-          "attemptToConvertTypes": false,
-          "convertFieldsToString": false
+          }
         },
         "options": {}
-      }
+      },
+      "id": "cfad3ffd-2b9a-4b97-b811-bf949497da25",
+      "name": "Agent Sentiment",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        -960,
+        2384
+      ]
     },
     {
-      "id": "246d2030-ab01-4a76-8f92-4019e0aad229",
+      "parameters": {
+        "numberInputs": 3
+      },
+      "id": "905e30ad-142f-4b94-8487-0361ec1071fa",
+      "name": "Merge Signals",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        -576,
+        2224
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst signals = items.map(item => item.json).filter(s => s && s.agent);\nreturn [{ json: { signals } }];"
+      },
+      "id": "d3c14e3b-ebf5-4111-ac85-3b9a60865ff2",
       "name": "Collect Signals",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        680,
-        400
-      ],
-      "parameters": {
-        "jsCode": "// Collect signals from all 3 agents (execute in parallel)\ntry {\n  const tech = $('Agent Technical').first().json;\n  const fund = $('Agent Fundamental').first().json;\n  const sent = $('Agent Sentiment').first().json;\n  const signals = [tech, fund, sent].filter(s => s && s.agent);\n  return [{ json: { signals } }];\n} catch (e) {\n  throw new Error(`Collect Signals: One or more agents failed. Error: ${e.message}`);\n}\n",
-        "mode": "runOnceForAllItems"
-      }
-    },
-    {
-      "id": "724bf45f-458d-42fc-8121-0e5ef55ae881",
-      "name": "Wait for All Agents",
-      "type": "n8n-nodes-base.wait",
-      "typeVersion": 1,
-      "position": [
-        600,
-        200
-      ],
-      "parameters": {
-        "waitType": "all",
-        "inputCount": 3
-      }
+        -272,
+        2240
+      ]
     }
   ],
   "connections": {
@@ -171,7 +150,7 @@
       "main": [
         [
           {
-            "node": "Wait for All Agents",
+            "node": "Merge Signals",
             "type": "main",
             "index": 0
           }
@@ -182,7 +161,7 @@
       "main": [
         [
           {
-            "node": "Wait for All Agents",
+            "node": "Merge Signals",
             "type": "main",
             "index": 1
           }
@@ -193,14 +172,14 @@
       "main": [
         [
           {
-            "node": "Wait for All Agents",
+            "node": "Merge Signals",
             "type": "main",
             "index": 2
           }
         ]
       ]
     },
-    "Wait for All Agents": {
+    "Merge Signals": {
       "main": [
         [
           {
@@ -212,250 +191,11 @@
       ]
     }
   },
-  "settings": {
-    "executionOrder": "v1",
-    "errorWorkflow": "BPv6AwQFgkIja8XW"
+  "pinData": {},
+  "meta": {
+    "instanceId": "515fdd51c531b5de47935866fd08e3e0aa440d6aebc162f95b77585a19af3727"
   },
-  "staticData": null,
-  "meta": null,
-  "nodeGroups": [],
-  "pinData": null,
-  "versionId": "3e9079b8-beee-4596-a942-f1086da4157e",
-  "activeVersionId": "3e9079b8-beee-4596-a942-f1086da4157e",
-  "versionCounter": 51,
-  "triggerCount": 0,
-  "shared": [
-    {
-      "updatedAt": "2026-06-01T13:06:48.744Z",
-      "createdAt": "2026-06-01T13:06:48.744Z",
-      "role": "workflow:owner",
-      "workflowId": "1rBvOPpAo3qwOKCR",
-      "projectId": "KPFvGBpBmH2Cz9hD",
-      "project": {
-        "updatedAt": "2026-03-29T12:09:47.740Z",
-        "createdAt": "2026-03-29T12:08:55.913Z",
-        "id": "KPFvGBpBmH2Cz9hD",
-        "name": "Felix Marin Ramirez <felixmurcia@gmail.com>",
-        "type": "personal",
-        "icon": null,
-        "description": null,
-        "creatorId": "2103296d-fece-47a3-8c4b-99ead91b8c22"
-      }
-    }
-  ],
-  "tags": [],
-  "activeVersion": {
-    "updatedAt": "2026-06-02T09:32:45.995Z",
-    "createdAt": "2026-06-02T09:32:45.995Z",
-    "versionId": "3e9079b8-beee-4596-a942-f1086da4157e",
-    "workflowId": "1rBvOPpAo3qwOKCR",
-    "nodes": [
-      {
-        "id": "b5bf6391-d359-4381-81f0-40fae7113efd",
-        "name": "Trigger",
-        "type": "n8n-nodes-base.executeWorkflowTrigger",
-        "typeVersion": 1.1,
-        "position": [
-          0,
-          400
-        ],
-        "parameters": {
-          "inputSource": "passthrough"
-        }
-      },
-      {
-        "id": "e33ca44d-2f54-4c14-bece-60a79ae7090f",
-        "name": "Agent Technical",
-        "type": "n8n-nodes-base.executeWorkflow",
-        "typeVersion": 1.3,
-        "position": [
-          220,
-          240
-        ],
-        "parameters": {
-          "workflowId": {
-            "__rl": true,
-            "value": "yHrsKjF2j9gmYG3D",
-            "mode": "id"
-          },
-          "workflowInputs": {
-            "mappingMode": "defineBelow",
-            "value": {
-              "cycle_id": "={{ $input.first().json.cycle_id }}",
-              "best_pair": "={{ $input.first().json.best_pair }}",
-              "technical": "={{ $input.first().json.technical }}",
-              "news": "={{ $input.first().json.news }}",
-              "positions": "={{ $input.first().json.positions }}"
-            },
-            "matchingColumns": [],
-            "schema": [],
-            "attemptToConvertTypes": false,
-            "convertFieldsToString": false
-          },
-          "options": {}
-        }
-      },
-      {
-        "id": "9e64ac72-4c12-4245-9ea0-55bd6b4367cc",
-        "name": "Agent Fundamental",
-        "type": "n8n-nodes-base.executeWorkflow",
-        "typeVersion": 1.3,
-        "position": [
-          220,
-          400
-        ],
-        "parameters": {
-          "workflowId": {
-            "__rl": true,
-            "value": "WWH62Wuwn5H9gKvi",
-            "mode": "id"
-          },
-          "workflowInputs": {
-            "mappingMode": "defineBelow",
-            "value": {
-              "cycle_id": "={{ $input.first().json.cycle_id }}",
-              "best_pair": "={{ $input.first().json.best_pair }}",
-              "technical": "={{ $input.first().json.technical }}",
-              "news": "={{ $input.first().json.news }}",
-              "positions": "={{ $input.first().json.positions }}"
-            },
-            "matchingColumns": [],
-            "schema": [],
-            "attemptToConvertTypes": false,
-            "convertFieldsToString": false
-          },
-          "options": {}
-        }
-      },
-      {
-        "id": "70a92006-1a0a-493e-80fb-d5557f0eb59f",
-        "name": "Agent Sentiment",
-        "type": "n8n-nodes-base.executeWorkflow",
-        "typeVersion": 1.3,
-        "position": [
-          220,
-          560
-        ],
-        "parameters": {
-          "workflowId": {
-            "__rl": true,
-            "value": "6yZU5Ob3S5gr7m2y",
-            "mode": "id"
-          },
-          "workflowInputs": {
-            "mappingMode": "defineBelow",
-            "value": {
-              "cycle_id": "={{ $input.first().json.cycle_id }}",
-              "best_pair": "={{ $input.first().json.best_pair }}",
-              "technical": "={{ $input.first().json.technical }}",
-              "news": "={{ $input.first().json.news }}",
-              "positions": "={{ $input.first().json.positions }}"
-            },
-            "matchingColumns": [],
-            "schema": [],
-            "attemptToConvertTypes": false,
-            "convertFieldsToString": false
-          },
-          "options": {}
-        }
-      },
-      {
-        "id": "246d2030-ab01-4a76-8f92-4019e0aad229",
-        "name": "Collect Signals",
-        "type": "n8n-nodes-base.code",
-        "typeVersion": 2,
-        "position": [
-          680,
-          400
-        ],
-        "parameters": {
-          "jsCode": "// Triggered by Agent Sentiment (slowest). All 3 agents have already run.\nconst tech = $('Agent Technical').first().json;\nconst fund = $('Agent Fundamental').first().json;\nconst sent = $('Agent Sentiment').first().json;\nconst signals = [tech, fund, sent].filter(s => s && s.agent);\nreturn [{ json: { signals } }];",
-          "mode": "runOnceForAllItems"
-        }
-      }
-    ],
-    "connections": {
-      "Trigger": {
-        "main": [
-          [
-            {
-              "node": "Agent Technical",
-              "type": "main",
-              "index": 0
-            },
-            {
-              "node": "Agent Fundamental",
-              "type": "main",
-              "index": 0
-            },
-            {
-              "node": "Agent Sentiment",
-              "type": "main",
-              "index": 0
-            }
-          ]
-        ]
-      },
-      "Agent Technical": {
-        "main": [
-          []
-        ]
-      },
-      "Agent Fundamental": {
-        "main": [
-          []
-        ]
-      },
-      "Agent Sentiment": {
-        "main": [
-          [
-            {
-              "node": "Collect Signals",
-              "type": "main",
-              "index": 0
-            }
-          ]
-        ]
-      }
-    },
-    "nodeGroups": [],
-    "authors": "Felix Marin Ramirez",
-    "name": null,
-    "description": null,
-    "autosaved": false,
-    "workflowPublishHistory": [
-      {
-        "createdAt": "2026-06-02T09:32:46.105Z",
-        "id": 383,
-        "workflowId": "1rBvOPpAo3qwOKCR",
-        "versionId": "3e9079b8-beee-4596-a942-f1086da4157e",
-        "event": "activated",
-        "userId": "2103296d-fece-47a3-8c4b-99ead91b8c22"
-      },
-      {
-        "createdAt": "2026-06-03T09:29:25.265Z",
-        "id": 400,
-        "workflowId": "1rBvOPpAo3qwOKCR",
-        "versionId": "3e9079b8-beee-4596-a942-f1086da4157e",
-        "event": "activated",
-        "userId": "2103296d-fece-47a3-8c4b-99ead91b8c22"
-      },
-      {
-        "createdAt": "2026-06-02T09:32:46.043Z",
-        "id": 382,
-        "workflowId": "1rBvOPpAo3qwOKCR",
-        "versionId": "3e9079b8-beee-4596-a942-f1086da4157e",
-        "event": "deactivated",
-        "userId": "2103296d-fece-47a3-8c4b-99ead91b8c22"
-      },
-      {
-        "createdAt": "2026-06-03T09:29:25.229Z",
-        "id": 399,
-        "workflowId": "1rBvOPpAo3qwOKCR",
-        "versionId": "3e9079b8-beee-4596-a942-f1086da4157e",
-        "event": "deactivated",
-        "userId": "2103296d-fece-47a3-8c4b-99ead91b8c22"
-      }
-    ]
+  "settings": {
+    "executionOrder": "v0"
   }
 }

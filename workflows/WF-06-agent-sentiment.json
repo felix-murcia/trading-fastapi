@@ -1,1 +1,278 @@
-{"updatedAt":"2026-06-03T09:29:25.663Z","createdAt":"2026-06-01T13:06:48.593Z","id":"6yZU5Ob3S5gr7m2y","name":"WF-06 Agent Sentiment","description":null,"active":true,"isArchived":false,"nodes":[{"id":"b1b43c8c-f23d-4d5a-9407-7eb90fe46a64","name":"Trigger","type":"n8n-nodes-base.executeWorkflowTrigger","typeVersion":1.1,"position":[0,400],"parameters":{"inputSource":"passthrough"}},{"id":"7648aebc-044b-4b5a-bdb6-2aa2bf801c65","name":"Build Prompt","type":"n8n-nodes-base.code","typeVersion":2,"position":[220,400],"parameters":{"jsCode":"\nconst ctx = $input.first().json;\nconst best   = ctx.best_pair || \"EURUSD\";\nconst pos    = ctx.positions || {};\nconst open   = (pos.open    || []).filter(p => p.symbol === best);\nconst longV  = open.filter(p => p.type === \"BUY\" ).reduce((s,p) => s + (p.volume||0), 0);\nconst shortV = open.filter(p => p.type === \"SELL\").reduce((s,p) => s + (p.volume||0), 0);\nconst total  = longV + shortV;\nconst bias   = total > 0 ? ((longV - shortV) / total * 100).toFixed(1) : \"0\";\n\nconst prompt = \"[INST] You are a market sentiment expert.\\n\" +\n  \"Symbol: \" + best + \"\\n\" +\n  \"Open positions: Long \" + longV.toFixed(2) + \" lots, Short \" + shortV.toFixed(2) + \" lots\\n\" +\n  \"Sentiment bias: \" + bias + \"% towards longs\\n\" +\n  \"Extreme positioning (>70% one side) suggests contrarian signal.\\n\" +\n  \"Respond ONLY with JSON:\\n\" +\n  '{\"signal\":\"buy|sell|neutral\",\"confidence\":0.0-1.0,\"reason\":\"one sentence\"} [/INST]';\n\nreturn [{ json: { ...ctx, prompt } }];\n","mode":"runOnceForAllItems"}},{"id":"cc4fb39e-e486-4cc6-ab7c-b1f1ba28652e","name":"Call LLM","type":"n8n-nodes-base.httpRequest","typeVersion":4.4,"position":[440,400],"parameters":{"url":"http://127.0.0.1:8090/v1/llm/signal","method":"POST","sendHeaders":true,"headerParameters":{"parameters":[{"name":"X-Internal-Token","value":"90c42a9448defc1f57K8WGdyb3FYaXgTw00gCVKY9JhfFG1A9tfji"},{"name":"X-Cycle-ID","value":"={{ $input.first().json.cycle_id }}"}]},"sendBody":true,"contentType":"json","specifyBody":"keypair","bodyParameters":{"parameters":[{"name":"agent","value":"sentiment"},{"name":"prompt","value":"={{ $json.prompt }}"}]},"options":{}}}],"connections":{"Trigger":{"main":[[{"node":"Build Prompt","type":"main","index":0}]]},"Build Prompt":{"main":[[{"node":"Call LLM","type":"main","index":0}]]}},"settings":{"executionOrder":"v1","errorWorkflow":"BPv6AwQFgkIja8XW"},"staticData":null,"meta":null,"nodeGroups":[],"pinData":null,"versionId":"22d2e28e-ed05-486f-b77f-e2f2d884b223","activeVersionId":"22d2e28e-ed05-486f-b77f-e2f2d884b223","versionCounter":49,"triggerCount":0,"shared":[{"updatedAt":"2026-06-01T13:06:48.598Z","createdAt":"2026-06-01T13:06:48.598Z","role":"workflow:owner","workflowId":"6yZU5Ob3S5gr7m2y","projectId":"KPFvGBpBmH2Cz9hD","project":{"updatedAt":"2026-03-29T12:09:47.740Z","createdAt":"2026-03-29T12:08:55.913Z","id":"KPFvGBpBmH2Cz9hD","name":"Felix Marin Ramirez <felixmurcia@gmail.com>","type":"personal","icon":null,"description":null,"creatorId":"2103296d-fece-47a3-8c4b-99ead91b8c22"}}],"tags":[],"activeVersion":{"updatedAt":"2026-06-02T13:12:40.585Z","createdAt":"2026-06-02T13:12:40.585Z","versionId":"22d2e28e-ed05-486f-b77f-e2f2d884b223","workflowId":"6yZU5Ob3S5gr7m2y","nodes":[{"id":"b1b43c8c-f23d-4d5a-9407-7eb90fe46a64","name":"Trigger","type":"n8n-nodes-base.executeWorkflowTrigger","typeVersion":1.1,"position":[0,400],"parameters":{"inputSource":"passthrough"}},{"id":"7648aebc-044b-4b5a-bdb6-2aa2bf801c65","name":"Build Prompt","type":"n8n-nodes-base.code","typeVersion":2,"position":[220,400],"parameters":{"jsCode":"\nconst ctx = $input.first().json;\nconst best   = ctx.best_pair || \"EURUSD\";\nconst pos    = ctx.positions || {};\nconst open   = (pos.open    || []).filter(p => p.symbol === best);\nconst longV  = open.filter(p => p.type === \"BUY\" ).reduce((s,p) => s + (p.volume||0), 0);\nconst shortV = open.filter(p => p.type === \"SELL\").reduce((s,p) => s + (p.volume||0), 0);\nconst total  = longV + shortV;\nconst bias   = total > 0 ? ((longV - shortV) / total * 100).toFixed(1) : \"0\";\n\nconst prompt = \"[INST] You are a market sentiment expert.\\n\" +\n  \"Symbol: \" + best + \"\\n\" +\n  \"Open positions: Long \" + longV.toFixed(2) + \" lots, Short \" + shortV.toFixed(2) + \" lots\\n\" +\n  \"Sentiment bias: \" + bias + \"% towards longs\\n\" +\n  \"Extreme positioning (>70% one side) suggests contrarian signal.\\n\" +\n  \"Respond ONLY with JSON:\\n\" +\n  '{\"signal\":\"buy|sell|neutral\",\"confidence\":0.0-1.0,\"reason\":\"one sentence\"} [/INST]';\n\nreturn [{ json: { ...ctx, prompt } }];\n","mode":"runOnceForAllItems"}},{"id":"cc4fb39e-e486-4cc6-ab7c-b1f1ba28652e","name":"Call LLM","type":"n8n-nodes-base.httpRequest","typeVersion":4.4,"position":[440,400],"parameters":{"url":"http://127.0.0.1:8090/v1/llm/signal","method":"POST","sendHeaders":true,"headerParameters":{"parameters":[{"name":"X-Internal-Token","value":"90c42a9448defc1f57K8WGdyb3FYaXgTw00gCVKY9JhfFG1A9tfji"},{"name":"X-Cycle-ID","value":"={{ $input.first().json.cycle_id }}"}]},"sendBody":true,"contentType":"json","specifyBody":"keypair","bodyParameters":{"parameters":[{"name":"agent","value":"sentiment"},{"name":"prompt","value":"={{ $json.prompt }}"}]},"options":{}}}],"connections":{"Trigger":{"main":[[{"node":"Build Prompt","type":"main","index":0}]]},"Build Prompt":{"main":[[{"node":"Call LLM","type":"main","index":0}]]}},"nodeGroups":[],"authors":"Felix Marin Ramirez","name":null,"description":null,"autosaved":false,"workflowPublishHistory":[{"createdAt":"2026-06-02T13:12:40.668Z","id":393,"workflowId":"6yZU5Ob3S5gr7m2y","versionId":"22d2e28e-ed05-486f-b77f-e2f2d884b223","event":"activated","userId":"2103296d-fece-47a3-8c4b-99ead91b8c22"},{"createdAt":"2026-06-03T09:29:25.738Z","id":406,"workflowId":"6yZU5Ob3S5gr7m2y","versionId":"22d2e28e-ed05-486f-b77f-e2f2d884b223","event":"activated","userId":"2103296d-fece-47a3-8c4b-99ead91b8c22"},{"createdAt":"2026-06-02T13:12:40.630Z","id":392,"workflowId":"6yZU5Ob3S5gr7m2y","versionId":"22d2e28e-ed05-486f-b77f-e2f2d884b223","event":"deactivated","userId":"2103296d-fece-47a3-8c4b-99ead91b8c22"},{"createdAt":"2026-06-03T09:29:25.699Z","id":405,"workflowId":"6yZU5Ob3S5gr7m2y","versionId":"22d2e28e-ed05-486f-b77f-e2f2d884b223","event":"deactivated","userId":"2103296d-fece-47a3-8c4b-99ead91b8c22"}]}}
+{
+  "updatedAt": "2026-06-03T09:29:25.663Z",
+  "createdAt": "2026-06-01T13:06:48.593Z",
+  "id": "6yZU5Ob3S5gr7m2y",
+  "name": "WF-06 Agent Sentiment",
+  "description": null,
+  "active": true,
+  "isArchived": false,
+  "nodes": [
+    {
+      "id": "b1b43c8c-f23d-4d5a-9407-7eb90fe46a64",
+      "name": "Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        400
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "7648aebc-044b-4b5a-bdb6-2aa2bf801c65",
+      "name": "Build Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        400
+      ],
+      "parameters": {
+        "jsCode": "const ctx = $input.first().json;\nconst best  = ctx.best_pair || \"EURUSD\";\nconst base  = best.slice(0, 3);\nconst quote = best.slice(3, 6);\n\n// Filtrar noticias por moneda del par; si no hay, usar todas\nconst allNews = (ctx.news || []);\nconst byPair  = allNews.filter(n => {\n  const c = (n.currency || '').toUpperCase();\n  return c === base || c === quote || c === '';\n}).slice(0, 6);\nconst relevant = byPair.length > 0 ? byPair : allNews.slice(0, 6);\n\nconst newsLines = relevant.length > 0\n  ? relevant.map(n => `- [${(n.impact || 'low').toUpperCase()}] ${n.headline}`).join('\\n')\n  : '- No news available';\n\n// Posiciones: array plano, no objeto {open:[]}\nconst positions = Array.isArray(ctx.positions) ? ctx.positions : [];\nconst open   = positions.filter(p => p.symbol === best);\nconst longV  = open.filter(p => p.type === 'BUY' ).reduce((s, p) => s + (p.volume || 0), 0);\nconst shortV = open.filter(p => p.type === 'SELL').reduce((s, p) => s + (p.volume || 0), 0);\nconst total  = longV + shortV;\nconst posInfo = total > 0\n  ? `Long ${longV.toFixed(2)} lots, Short ${shortV.toFixed(2)} lots (${((longV - shortV) / total * 100).toFixed(1)}% long bias)`\n  : 'No open positions';\n\nconst prompt = `[INST] You are a market sentiment analyst for forex trading.\nAnalyze market sentiment for ${best} based on recent news headlines.\n\nSymbol: ${best}\nRecent news:\n${newsLines}\n\nCurrent positioning: ${posInfo}\n\nBased on the news tone and any extreme positioning, determine the market sentiment for ${best}.\nRespond ONLY with valid JSON (no markdown, no extra text):\n{\"signal\":\"buy|sell|neutral\",\"confidence\":0.0-1.0,\"reason\":\"one sentence\"} [/INST]`;\n\nreturn [{ json: { ...ctx, prompt } }];\n",
+        "mode": "runOnceForAllItems"
+      }
+    },
+    {
+      "id": "cc4fb39e-e486-4cc6-ab7c-b1f1ba28652e",
+      "name": "Call LLM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        440,
+        400
+      ],
+      "parameters": {
+        "url": "http://127.0.0.1:8090/v1/llm/signal",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Internal-Token",
+              "value": "90c42a9448defc1f57K8WGdyb3FYaXgTw00gCVKY9JhfFG1A9tfji"
+            },
+            {
+              "name": "X-Cycle-ID",
+              "value": "={{ $input.first().json.cycle_id }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "agent",
+              "value": "sentiment"
+            },
+            {
+              "name": "prompt",
+              "value": "={{ $json.prompt }}"
+            }
+          ]
+        },
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Trigger": {
+      "main": [
+        [
+          {
+            "node": "Build Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Prompt": {
+      "main": [
+        [
+          {
+            "node": "Call LLM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "BPv6AwQFgkIja8XW"
+  },
+  "staticData": null,
+  "meta": null,
+  "nodeGroups": [],
+  "pinData": null,
+  "versionId": "22d2e28e-ed05-486f-b77f-e2f2d884b223",
+  "activeVersionId": "22d2e28e-ed05-486f-b77f-e2f2d884b223",
+  "versionCounter": 49,
+  "triggerCount": 0,
+  "shared": [
+    {
+      "updatedAt": "2026-06-01T13:06:48.598Z",
+      "createdAt": "2026-06-01T13:06:48.598Z",
+      "role": "workflow:owner",
+      "workflowId": "6yZU5Ob3S5gr7m2y",
+      "projectId": "KPFvGBpBmH2Cz9hD",
+      "project": {
+        "updatedAt": "2026-03-29T12:09:47.740Z",
+        "createdAt": "2026-03-29T12:08:55.913Z",
+        "id": "KPFvGBpBmH2Cz9hD",
+        "name": "Felix Marin Ramirez <felixmurcia@gmail.com>",
+        "type": "personal",
+        "icon": null,
+        "description": null,
+        "creatorId": "2103296d-fece-47a3-8c4b-99ead91b8c22"
+      }
+    }
+  ],
+  "tags": [],
+  "activeVersion": {
+    "updatedAt": "2026-06-02T13:12:40.585Z",
+    "createdAt": "2026-06-02T13:12:40.585Z",
+    "versionId": "22d2e28e-ed05-486f-b77f-e2f2d884b223",
+    "workflowId": "6yZU5Ob3S5gr7m2y",
+    "nodes": [
+      {
+        "id": "b1b43c8c-f23d-4d5a-9407-7eb90fe46a64",
+        "name": "Trigger",
+        "type": "n8n-nodes-base.executeWorkflowTrigger",
+        "typeVersion": 1.1,
+        "position": [
+          0,
+          400
+        ],
+        "parameters": {
+          "inputSource": "passthrough"
+        }
+      },
+      {
+        "id": "7648aebc-044b-4b5a-bdb6-2aa2bf801c65",
+        "name": "Build Prompt",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          220,
+          400
+        ],
+        "parameters": {
+          "jsCode": "const ctx = $input.first().json;\nconst best  = ctx.best_pair || \"EURUSD\";\nconst base  = best.slice(0, 3);\nconst quote = best.slice(3, 6);\n\n// Filtrar noticias por moneda del par; si no hay, usar todas\nconst allNews = (ctx.news || []);\nconst byPair  = allNews.filter(n => {\n  const c = (n.currency || '').toUpperCase();\n  return c === base || c === quote || c === '';\n}).slice(0, 6);\nconst relevant = byPair.length > 0 ? byPair : allNews.slice(0, 6);\n\nconst newsLines = relevant.length > 0\n  ? relevant.map(n => `- [${(n.impact || 'low').toUpperCase()}] ${n.headline}`).join('\\n')\n  : '- No news available';\n\n// Posiciones: array plano, no objeto {open:[]}\nconst positions = Array.isArray(ctx.positions) ? ctx.positions : [];\nconst open   = positions.filter(p => p.symbol === best);\nconst longV  = open.filter(p => p.type === 'BUY' ).reduce((s, p) => s + (p.volume || 0), 0);\nconst shortV = open.filter(p => p.type === 'SELL').reduce((s, p) => s + (p.volume || 0), 0);\nconst total  = longV + shortV;\nconst posInfo = total > 0\n  ? `Long ${longV.toFixed(2)} lots, Short ${shortV.toFixed(2)} lots (${((longV - shortV) / total * 100).toFixed(1)}% long bias)`\n  : 'No open positions';\n\nconst prompt = `[INST] You are a market sentiment analyst for forex trading.\nAnalyze market sentiment for ${best} based on recent news headlines.\n\nSymbol: ${best}\nRecent news:\n${newsLines}\n\nCurrent positioning: ${posInfo}\n\nBased on the news tone and any extreme positioning, determine the market sentiment for ${best}.\nRespond ONLY with valid JSON (no markdown, no extra text):\n{\"signal\":\"buy|sell|neutral\",\"confidence\":0.0-1.0,\"reason\":\"one sentence\"} [/INST]`;\n\nreturn [{ json: { ...ctx, prompt } }];\n",
+          "mode": "runOnceForAllItems"
+        }
+      },
+      {
+        "id": "cc4fb39e-e486-4cc6-ab7c-b1f1ba28652e",
+        "name": "Call LLM",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [
+          440,
+          400
+        ],
+        "parameters": {
+          "url": "http://127.0.0.1:8090/v1/llm/signal",
+          "method": "POST",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "X-Internal-Token",
+                "value": "90c42a9448defc1f57K8WGdyb3FYaXgTw00gCVKY9JhfFG1A9tfji"
+              },
+              {
+                "name": "X-Cycle-ID",
+                "value": "={{ $input.first().json.cycle_id }}"
+              }
+            ]
+          },
+          "sendBody": true,
+          "contentType": "json",
+          "specifyBody": "keypair",
+          "bodyParameters": {
+            "parameters": [
+              {
+                "name": "agent",
+                "value": "sentiment"
+              },
+              {
+                "name": "prompt",
+                "value": "={{ $json.prompt }}"
+              }
+            ]
+          },
+          "options": {}
+        }
+      }
+    ],
+    "connections": {
+      "Trigger": {
+        "main": [
+          [
+            {
+              "node": "Build Prompt",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Build Prompt": {
+        "main": [
+          [
+            {
+              "node": "Call LLM",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "nodeGroups": [],
+    "authors": "Felix Marin Ramirez",
+    "name": null,
+    "description": null,
+    "autosaved": false,
+    "workflowPublishHistory": [
+      {
+        "createdAt": "2026-06-02T13:12:40.668Z",
+        "id": 393,
+        "workflowId": "6yZU5Ob3S5gr7m2y",
+        "versionId": "22d2e28e-ed05-486f-b77f-e2f2d884b223",
+        "event": "activated",
+        "userId": "2103296d-fece-47a3-8c4b-99ead91b8c22"
+      },
+      {
+        "createdAt": "2026-06-03T09:29:25.738Z",
+        "id": 406,
+        "workflowId": "6yZU5Ob3S5gr7m2y",
+        "versionId": "22d2e28e-ed05-486f-b77f-e2f2d884b223",
+        "event": "activated",
+        "userId": "2103296d-fece-47a3-8c4b-99ead91b8c22"
+      },
+      {
+        "createdAt": "2026-06-02T13:12:40.630Z",
+        "id": 392,
+        "workflowId": "6yZU5Ob3S5gr7m2y",
+        "versionId": "22d2e28e-ed05-486f-b77f-e2f2d884b223",
+        "event": "deactivated",
+        "userId": "2103296d-fece-47a3-8c4b-99ead91b8c22"
+      },
+      {
+        "createdAt": "2026-06-03T09:29:25.699Z",
+        "id": 405,
+        "workflowId": "6yZU5Ob3S5gr7m2y",
+        "versionId": "22d2e28e-ed05-486f-b77f-e2f2d884b223",
+        "event": "deactivated",
+        "userId": "2103296d-fece-47a3-8c4b-99ead91b8c22"
+      }
+    ]
+  }
+}

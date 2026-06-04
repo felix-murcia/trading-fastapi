@@ -12,26 +12,26 @@
           ]
         }
       },
-      "id": "8a15ab2b-aac5-4f44-bf63-551b6c0f0a91",
+      "id": "b40a00a3-a7df-4b8d-a08b-3d3a5477077c",
       "name": "Cron 5min",
       "type": "n8n-nodes-base.cron",
       "typeVersion": 1,
       "position": [
-        1376,
-        832
+        8992,
+        1728
       ]
     },
     {
       "parameters": {
         "jsCode": "const rand = () => Math.floor(Math.random() * 0xFFFFFFFF).toString(16).padStart(8,\"0\");\nconst cycle_id = rand() + rand() + \"_\" + Date.now();\nreturn [{ json: { cycle_id, started_at: new Date().toISOString() } }];"
       },
-      "id": "54e43209-f5a3-45f9-9976-c3449eb7b766",
+      "id": "52e2e0b0-b03a-4b9c-bc58-ca94e68150d8",
       "name": "Generate Cycle ID",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1632,
-        832
+        9248,
+        1728
       ]
     },
     {
@@ -51,26 +51,26 @@
         },
         "options": {}
       },
-      "id": "6df99913-2b52-4119-baf9-a12d83503471",
+      "id": "f84e7fe8-d811-4161-b4af-2da19a966599",
       "name": "Call Market Data",
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1.3,
       "position": [
-        1856,
-        832
+        9472,
+        1728
       ]
     },
     {
       "parameters": {
         "jsCode": "const market = $input.first().json;\nconst cycleId = $(\"Generate Cycle ID\").first().json.cycle_id;\n\n// Filtrar solo noticias/eventos CON currency\nconst news = (market.news || []).filter(n => n.currency && n.currency.trim());\nconst calendar = (market.calendar || []).filter(c => c.currency && c.currency.trim());\n\nreturn [{\n  json: {\n    ...market,\n    cycle_id: cycleId,\n    blockTrade: market.blockTrade || false,\n    reason: market.reason || 'OK',\n    news,\n    calendar\n  }\n}];\n"
       },
-      "id": "83b3667c-1dde-42dc-973b-fa74bb5123a0",
+      "id": "4c3aeb1d-df2c-44a7-9169-b6cb452b51d8",
       "name": "Merge Cycle ID",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2288,
-        832
+        9904,
+        1728
       ]
     },
     {
@@ -121,13 +121,13 @@
         },
         "options": {}
       },
-      "id": "5eaba034-cb63-4644-a855-65f1b4ea3552",
+      "id": "ad223ee8-9ffa-4f61-b5d5-f04f57641ecb",
       "name": "POST Context Validate",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
       "position": [
-        2544,
-        832
+        10160,
+        1728
       ]
     },
     {
@@ -155,26 +155,26 @@
         },
         "options": {}
       },
-      "id": "faba7525-b396-4858-bf1a-3924a26e016c",
+      "id": "5bb7438b-3b6e-4921-9a09-ddb8c9d6c90e",
       "name": "Is Context Valid?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.3,
       "position": [
-        2816,
-        832
+        10432,
+        1728
       ]
     },
     {
       "parameters": {
         "jsCode": "const r = $input.first().json;\nconsole.log(\"Ciclo saltado:\", r.reason);\nreturn [{ json: { skipped: true, reason: r.reason } }];"
       },
-      "id": "ab350b57-6166-4e6f-8d18-36f00bda6bb5",
+      "id": "1dfc7c79-f2b6-4c87-bc1b-10343ab4ea22",
       "name": "Log Skip",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        3104,
-        1040
+        10720,
+        1936
       ]
     },
     {
@@ -209,13 +209,13 @@
         },
         "options": {}
       },
-      "id": "b462c212-544f-4bf8-83e5-d91f43fd6a18",
+      "id": "d79e4ae0-d3c0-4ef1-a039-8e5fcc14ea35",
       "name": "POST Analysis Pairs",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
       "position": [
-        3104,
-        832
+        10720,
+        1728
       ]
     },
     {
@@ -242,13 +242,13 @@
         },
         "options": {}
       },
-      "id": "55779a42-4149-48e6-8095-9b09994b73df",
+      "id": "ba5b7ed8-2eec-4469-8f55-c6a21e83bd7a",
       "name": "Call LLM Agents",
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1.3,
       "position": [
-        3728,
-        832
+        11344,
+        1728
       ]
     },
     {
@@ -299,13 +299,13 @@
         },
         "options": {}
       },
-      "id": "ceff0acf-d008-4def-846c-104cbb7caf13",
+      "id": "877f1456-cb0e-421a-bc53-8b2f2e5e7360",
       "name": "POST Risk Evaluate",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
       "position": [
-        3952,
-        832
+        11568,
+        1728
       ]
     },
     {
@@ -333,26 +333,26 @@
         },
         "options": {}
       },
-      "id": "c6bbea09-7dcf-4b74-bb92-7803b2a42154",
+      "id": "6c5a24c1-d5d9-4354-8113-855dbc1e95fa",
       "name": "Has Action?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.3,
       "position": [
-        4160,
-        832
+        11776,
+        1728
       ]
     },
     {
       "parameters": {
         "jsCode": "const r = $input.first().json;\nconsole.log(\"Ciclo saltado:\", r.reason);\nreturn [{ json: { skipped: true, reason: r.reason } }];"
       },
-      "id": "be4eec13-46ac-47cc-8243-3dbae1b3c304",
+      "id": "9d7160f2-097f-48f6-9e7b-b1342c73f312",
       "name": "Log Skip Action",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        4384,
-        1040
+        12000,
+        1936
       ]
     },
     {
@@ -407,13 +407,13 @@
         },
         "options": {}
       },
-      "id": "605a4a6b-279e-47ea-9004-a6b22ba7e240",
+      "id": "aa6c6257-92ed-490f-90b9-605cb02cfcd1",
       "name": "POST Order Prepare",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
       "position": [
-        4384,
-        832
+        12000,
+        1728
       ]
     },
     {
@@ -441,26 +441,26 @@
         },
         "options": {}
       },
-      "id": "4b99a3ce-4f44-4fd7-a71c-588c05f435ac",
+      "id": "69cba10c-c74e-49ba-b93a-db2f0541ed0c",
       "name": "Is Approved?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.3,
       "position": [
-        4608,
-        832
+        12224,
+        1728
       ]
     },
     {
       "parameters": {
         "jsCode": "const r = $input.first().json;\nconsole.log(\"Orden rechazada:\", r.rejection_reason);\nreturn [{ json: { rejected: true, reason: r.rejection_reason } }];"
       },
-      "id": "e7d8b7cc-dbbf-4bd9-bcb8-c06185dcf478",
+      "id": "196e874f-9efb-41e4-9af0-7703b7a426d6",
       "name": "Log Rejection",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        4832,
-        1040
+        12448,
+        1936
       ]
     },
     {
@@ -491,13 +491,13 @@
         },
         "options": {}
       },
-      "id": "6bba9afd-833e-439b-b182-6dc8070235c1",
+      "id": "4ff79e38-f5bb-47b7-9a95-52f52261f00c",
       "name": "POST Order Execute",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
       "position": [
-        4832,
-        832
+        12448,
+        1728
       ]
     },
     {
@@ -540,13 +540,13 @@
         },
         "options": {}
       },
-      "id": "6c70651f-1954-467b-ac25-7c70bfa09bc0",
+      "id": "62e06969-b0db-4701-a90d-4eae9fe37a48",
       "name": "POST Order Confirm",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
       "position": [
-        5040,
-        832
+        12656,
+        1728
       ]
     },
     {
@@ -585,26 +585,26 @@
         },
         "options": {}
       },
-      "id": "e08b8521-6abd-43a6-8032-c29b82fed8c9",
+      "id": "8ad03668-e2a9-449b-ab0e-c501bdf143d5",
       "name": "POST Audit Log",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
       "position": [
-        5264,
-        832
+        12880,
+        1728
       ]
     },
     {
       "parameters": {
         "jsCode": "const risk = $(\"POST Risk Evaluate\").first().json;\nconst exec = $(\"POST Order Execute\").first().json;\nconst pair = $(\"POST Analysis Pairs\").first().json;\nconst action = (risk.action || \"\").toUpperCase();\nconst emoji  = action === \"BUY\" ? \"🟢\" : \"🔴\";\nconst text = emoji + \" *ORDEN EJECUTADA*\\n\"\n  + \"──────────────\\n\"\n  + \"Par: `\" + pair.best_pair + \"`\\n\"\n  + \"Tipo: `\" + action + \"`\\n\"\n  + \"Entry: `\" + risk.entry + \"`\\n\"\n  + \"SL: `\" + risk.sl + \"`\\n\"\n  + \"TP: `\" + risk.tp + \"`\\n\"\n  + \"Vol: `\" + risk.volume + \"` lots\\n\"\n  + \"Conf: `\" + ((risk.confidence||0)*100).toFixed(0) + \"%`\\n\"\n  + \"Ticket: `\" + exec.mt5_order_id + \"`\";\nreturn [{ json: { text } }];"
       },
-      "id": "4c64cf61-4a88-4a47-893d-2f3f2bfb6b62",
+      "id": "573912b2-97bf-40f3-83e9-f7583c50bae1",
       "name": "Format Telegram",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        5488,
-        832
+        13104,
+        1728
       ]
     },
     {
@@ -613,13 +613,13 @@
         "text": "={{ $json.text }}",
         "additionalFields": {}
       },
-      "id": "b04018c8-eb1d-462e-bf33-605b17e01634",
+      "id": "8d35c4dc-f083-4fbd-a009-5bd471dbfb86",
       "name": "Send Telegram",
       "type": "n8n-nodes-base.telegram",
       "typeVersion": 1.2,
       "position": [
-        5712,
-        832
+        13328,
+        1728
       ],
       "webhookId": "25a656a6-2ee7-4f7c-af02-c8309cd16911",
       "credentials": {
@@ -636,10 +636,10 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2064,
-        832
+        9680,
+        1728
       ],
-      "id": "85f88ed3-a2e5-456a-98ac-b30841b49667",
+      "id": "4241ea8b-22d7-492b-9540-60015772c2b6",
       "name": "Check High Impact News"
     },
     {
@@ -690,13 +690,13 @@
         },
         "options": {}
       },
-      "id": "post-prepare-llm-context-1",
+      "id": "6c5251bd-901c-41ac-bcc3-a1ac256e679c",
       "name": "POST Prepare LLM Context",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
       "position": [
-        3360,
-        832
+        10976,
+        1728
       ]
     }
   ],
