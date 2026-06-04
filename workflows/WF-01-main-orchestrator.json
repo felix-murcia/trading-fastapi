@@ -289,7 +289,7 @@
             },
             {
               "name": "llm_signals",
-              "value": "={{ $('Call LLM Agents').first().json.signals }}"
+              "value": "={{ ($('Call LLM Agents').first().json.signals || []) }}"
             },
             {
               "name": "positions",
