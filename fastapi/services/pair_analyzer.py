@@ -115,6 +115,15 @@ async def analyze(req: PairsAnalysisRequest) -> PairsAnalysisResponse:
     strength = _currency_strength(candles_map)
     scores: list[PairScore] = []
 
+    # Consultar señales SMC activas para todos los pares ANTES de calcular scores
+    pool = get_pool()
+    # Solo señales activas y recientes (EA envía cada 10s — TTL de 2 min evita señales obsoletas)
+    smc_rows = await pool.fetch(
+        "SELECT symbol, direction FROM smc_signals "
+        "WHERE entry_zone = TRUE AND received_at > NOW() - INTERVAL '2 minutes'",
+    )
+    smc_active_map: dict[str, str] = {r["symbol"]: r["direction"] for r in smc_rows}
+
     for sym in SYMBOLS:
         candles = candles_map.get(sym, [])
         if not candles:
@@ -124,23 +133,22 @@ async def analyze(req: PairsAnalysisRequest) -> PairsAnalysisResponse:
         sma20  = _sma(closes, 20)
         sma200 = _sma(closes, 200)
         base, quote = PAIR_CURRENCIES[sym]
+
+        # Calcular score base
+        base_score = _score(sym, closes, rsi, sma20, sma200, strength)
+
+        # Si el par tiene Entry Zone SMC activa, aumentar score en 1 punto
+        if sym in smc_active_map:
+            base_score += 1.0
+
         scores.append(PairScore(
-            symbol=sym, score=_score(sym, closes, rsi, sma20, sma200, strength),
+            symbol=sym, score=round(base_score, 4),
             strength_base=round(strength.get(base, 0), 4),
             strength_quote=round(strength.get(quote, 0), 4),
         ))
 
     if not scores:
         raise ValueError("Sin candles disponibles para ningún par")
-
-    # Consultar señales SMC activas para todos los pares
-    pool = get_pool()
-    # Solo señales activas y recientes (EA envía cada 10s — TTL de 2 min evita señales obsoletas)
-    smc_rows = await pool.fetch(
-        "SELECT symbol, direction FROM smc_signals "
-        "WHERE entry_zone = TRUE AND received_at > NOW() - INTERVAL '2 minutes'",
-    )
-    smc_active_map: dict[str, str] = {r["symbol"]: r["direction"] for r in smc_rows}
 
     # Prioridad 1: mejor par con SMC activo
     # Prioridad 2: mejor par sin SMC (flujo normal)

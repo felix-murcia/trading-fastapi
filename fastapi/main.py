@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 
 from db.connection import init_pool, close_pool
 from services import mt5_client
-from routers import context, analysis, risk, orders, market, llm, test_simulate, smc
+from routers import context, analysis, risk, orders, market, llm, test_simulate, smc, enrichment
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -42,6 +42,7 @@ app.include_router(risk.router)
 app.include_router(orders.router)
 app.include_router(market.router)
 app.include_router(llm.router)
+app.include_router(enrichment.router)
 app.include_router(test_simulate.router)
 app.include_router(smc.router)
 
