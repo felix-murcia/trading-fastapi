@@ -641,6 +641,63 @@
       ],
       "id": "85f88ed3-a2e5-456a-98ac-b30841b49667",
       "name": "Check High Impact News"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8090/v1/llm/prepare-context",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Internal-Token",
+              "value": "90c42a9448defc1f57K8WGdyb3FYaXgTw00gCVKY9JhfFG1A9tfji"
+            },
+            {
+              "name": "X-Cycle-ID",
+              "value": "={{ $('Generate Cycle ID').first().json.cycle_id }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "cycle_id",
+              "value": "={{ $('Merge Cycle ID').first().json.cycle_id }}"
+            },
+            {
+              "name": "prices",
+              "value": "={{ $('Merge Cycle ID').first().json.prices }}"
+            },
+            {
+              "name": "news",
+              "value": "={{ $('Merge Cycle ID').first().json.news }}"
+            },
+            {
+              "name": "calendar",
+              "value": "={{ $('Merge Cycle ID').first().json.calendar }}"
+            },
+            {
+              "name": "positions",
+              "value": "={{ $('Merge Cycle ID').first().json.positions }}"
+            },
+            {
+              "name": "pair_analysis",
+              "value": "={{ $('POST Analysis Pairs').first().json }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "post-prepare-llm-context-1",
+      "name": "POST Prepare LLM Context",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        3360,
+        832
+      ]
     }
   ],
   "connections": {
@@ -721,7 +778,7 @@
       "main": [
         [
           {
-            "node": "Call LLM Agents",
+            "node": "POST Prepare LLM Context",
             "type": "main",
             "index": 0
           }
@@ -846,6 +903,17 @@
         [
           {
             "node": "Merge Cycle ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "POST Prepare LLM Context": {
+      "main": [
+        [
+          {
+            "node": "Call LLM Agents",
             "type": "main",
             "index": 0
           }

@@ -6,6 +6,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from services.llm_client import call_llm
+from services import llm_context
+from models.llm import LLMContextRequest, LLMContextResponse
 from .deps import verify_token
 
 logger = logging.getLogger(__name__)
@@ -68,3 +70,12 @@ async def get_signal(
 
     confidence = max(0.0, min(1.0, float(p.get("confidence", 0))))
     return LLMSignalResponse(agent=req.agent, signal=signal, confidence=confidence)
+
+
+@router.post("/prepare-context", response_model=LLMContextResponse)
+async def prepare_context(
+    req: LLMContextRequest,
+    _: None = Depends(verify_token),
+) -> LLMContextResponse:
+    """Prepara contexto completo para LLM agents con trazabilidad."""
+    return await llm_context.prepare_context(req)
