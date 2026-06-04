@@ -253,12 +253,18 @@ def enrich_news(raw_news: list[dict]) -> list[dict]:
         if not timestamp or not _is_valid_iso8601(timestamp):
             timestamp = datetime.utcnow().isoformat()
 
+        # Calcular sentiment si no está presente (Parse News no lo genera)
+        sentiment = item.get("sentiment", "")
+        if not sentiment:
+            combined_text = f"{headline} {item.get('summary', '')}"
+            sentiment = _detect_sentiment(combined_text)
+
         enriched.append({
             "headline": headline,
             "currency": item.get("currency", ""),
             "impact": item.get("impact", ""),
-            "summary": item.get("summary", ""),
-            "sentiment": item.get("sentiment", ""),
+            "summary": item.get("summary", headline[:200]) if item.get("summary") else headline[:200],
+            "sentiment": sentiment,
             "source_url": item.get("source_url", ""),
             "timestamp": timestamp,
         })
