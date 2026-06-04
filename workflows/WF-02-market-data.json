@@ -46,7 +46,9 @@
       ]
     },
     {
-      "parameters": {},
+      "parameters": {
+        "numberInputs": 3
+      },
       "id": "f43b47ca-6ce6-44ae-b2af-cb562a5db965",
       "name": "Merge News+Cal",
       "type": "n8n-nodes-base.merge",
@@ -84,7 +86,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const input = $input.first().json;\nconst rawContent = input[0]?.data || input.data || \"\";\nconst CURRENCIES = [\"EUR\",\"USD\",\"GBP\",\"JPY\",\"CHF\",\"AUD\",\"NZD\",\"CAD\"];\nconst sourceUrl = 'https://www.forexlive.com/feed/news';\n\n// Dividir por URLs (que empiezan con [https)\nconst urlPattern = /\\[https:\\/\\/investinglive\\.com\\/news\\/([^\\]]+)\\]/g;\nconst matches = [];\nlet match;\nwhile ((match = urlPattern.exec(rawContent)) !== null) {\n  matches.push(match[1]);\n}\n\nconst news = [];\nfor (const urlSlug of matches.slice(0, 10)) {\n  // Reconstruir headline de la URL (reemplazar guiones por espacios)\n  const headline = urlSlug\n    .split('-')\n    .slice(0, -1)  // remover timestamp YYYYMMDD al final\n    .join(' ')\n    .slice(0, 140);\n\n  if (!headline || headline.length < 10) continue;\n\n  // Buscar moneda en todo el contenido\n  const currency = CURRENCIES.find(c => rawContent.toUpperCase().includes(c)) || \"\";\n\n  // Detectar impact\n  const impact = rawContent.toLowerCase().includes(\"high\") ? \"high\" :\n                 rawContent.toLowerCase().includes(\"medium\") ? \"medium\" : \"low\";\n\n  // Extraer YYYYMMDD de la URL (último componente después de último guión)\n  const lastPart = urlSlug.split('-')[urlSlug.split('-').length - 1];\n  const yyyymmdd = lastPart.match(/\\d{8}/)?.[0] || \"\";  // Extraer números de 8 dígitos\n\n  let timestamp = \"\";\n  if (yyyymmdd) {\n    // Convertir YYYYMMDD a ISO 8601 (usando hora 00:00:00 como default)\n    const yyyy = yyyymmdd.substring(0, 4);\n    const mm = yyyymmdd.substring(4, 6);\n    const dd = yyyymmdd.substring(6, 8);\n    timestamp = `${yyyy}-${mm}-${dd}T00:00:00Z`;\n  }\n\n  news.push({\n    headline: headline.trim(),\n    impact,\n    currency,\n    source_url: sourceUrl,\n    content: headline,\n    timestamp: timestamp,\n  });\n}\n\nreturn [{ json: { news } }];\n"
+        "jsCode": "const input = $input.first().json;\nconst rawContent = input[0]?.data || input.data || \"\";\nconst CURRENCIES = [\"EUR\",\"USD\",\"GBP\",\"JPY\",\"CHF\",\"AUD\",\"NZD\",\"CAD\"];\nconst sourceUrl = 'https://www.forexlive.com/feed/news';\n\nconst urlPattern = /\\[https:\\/\\/investinglive\\.com\\/news\\/([^\\]]+)\\]/g;\nconst matches = [];\nlet match;\nwhile ((match = urlPattern.exec(rawContent)) !== null) {\n  matches.push(match[1]);\n}\n\nconst news = [];\nfor (const urlSlug of matches.slice(0, 10)) {\n  const headline = urlSlug.split('-').slice(0, -1).join(' ').slice(0, 140);\n  if (!headline || headline.length < 10) continue;\n  \n  const currency = CURRENCIES.find(c => rawContent.toUpperCase().includes(c)) || \"\";\n  const impact = rawContent.toLowerCase().includes(\"high\") ? \"high\" : \"medium\" ? \"medium\" : \"low\";\n  \n  const lastPart = urlSlug.split('-')[urlSlug.split('-').length - 1];\n  const yyyymmdd = lastPart.match(/\\d{8}/)?.[0] || \"\";\n  \n  let timestamp = \"\";\n  if (yyyymmdd) {\n    const yyyy = yyyymmdd.substring(0, 4);\n    const mm = yyyymmdd.substring(4, 6);\n    const dd = yyyymmdd.substring(6, 8);\n    timestamp = `${yyyy}-${mm}-${dd}T00:00:00Z`;\n  }\n  \n  news.push({\n    headline: headline.trim(),\n    impact,\n    currency,\n    source_url: sourceUrl,\n    content: headline,\n    timestamp: timestamp,\n  });\n}\n\nreturn [{ json: { news } }];"
       },
       "id": "15f60360-f94c-4c72-8d08-e99fad77b4cf",
       "name": "Parse News",
