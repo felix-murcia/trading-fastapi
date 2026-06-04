@@ -77,11 +77,19 @@ def _extract_currency(text: str) -> str:
     # 3. Búsqueda por país/institución (más específica)
     country_map = {
         r"\b(EURO|EUROZONE|EUROPEAN|ECB|EUROPEAN CENTRAL BANK)\b": "EUR",
-        r"\b(POUND|STERLING|BANK OF ENGLAND|BOE|UK EMPLOYMENT|UK INFLATION)\b": "GBP",
+        r"\b(POUND|STERLING|BANK OF ENGLAND|BOE|UK EMPLOYMENT|UK INFLATION|NATIONWIDE)\b": "GBP",
         r"\b(JAPAN|JAPANESE|BOJ|BANK OF JAPAN|NIKKEI)\b": "JPY",
-        r"\b(SWISS|SWISSIE|SNB|SWISS NATIONAL BANK)\b": "CHF",
+        r"\b(SWISS|SWISSIE|SNB|SWISS NATIONAL BANK|SWITZERLAND)\b": "CHF",
         r"\b(GOLD|PRECIOUS METAL|XAU)\b": "XAU",
-        r"\b(FED|FEDERAL RESERVE|FOMC|US EMPLOYMENT|US INFLATION|NONFARM PAYROLL)\b": "USD",
+        r"\b(AUSTRALIA|AUSTRALIAN|RBA|BANK OF AUSTRALIA)\b": "AUD",
+        r"\b(NEW ZEALAND|RBNZ)\b": "NZD",
+        r"\b(CANADA|CANADIAN|BOC|BANK OF CANADA)\b": "CAD",
+        r"\b(GERMANY|GERMAN|BUNDESBANK)\b": "EUR",
+        r"\b(FRANCE|FRENCH)\b": "EUR",
+        r"\b(SPAIN|SPANISH|ITALY|ITALIAN|IRELAND|DUTCH|NETHERLANDS)\b": "EUR",
+        r"^US\s": "USD",  # "US may..." al inicio
+        r"\bUS\s+(EMPLOYMENT|INFLATION|PAYROLL|CPI|PPI|RETAIL|CONSTRUCTION|ISM|PMI|GDP|JOBLESS|CLAIMS|LAYOFFS|DATA|ECONOMIC)\b": "USD",
+        r"\b(FED|FEDERAL RESERVE|FOMC|NONFARM PAYROLL|CHALLENGER LAYOFFS)\b": "USD",
     }
 
     for pattern, currency in country_map.items():
