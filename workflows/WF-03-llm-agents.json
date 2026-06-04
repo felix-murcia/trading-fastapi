@@ -126,7 +126,7 @@
         400
       ],
       "parameters": {
-        "jsCode": "// Triggered by Agent Sentiment (slowest). All 3 agents have already run.\nconst tech = $('Agent Technical').first().json;\nconst fund = $('Agent Fundamental').first().json;\nconst sent = $('Agent Sentiment').first().json;\nconst signals = [tech, fund, sent].filter(s => s && s.agent);\nreturn [{ json: { signals } }];",
+        "jsCode": "// Collect signals from all 3 agents (execute in parallel)\ntry {\n  const tech = $('Agent Technical').first().json;\n  const fund = $('Agent Fundamental').first().json;\n  const sent = $('Agent Sentiment').first().json;\n  const signals = [tech, fund, sent].filter(s => s && s.agent);\n  return [{ json: { signals } }];\n} catch (e) {\n  throw new Error(`Collect Signals: One or more agents failed. Error: ${e.message}`);\n}\n",
         "mode": "runOnceForAllItems"
       }
     }
