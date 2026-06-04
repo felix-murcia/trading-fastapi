@@ -219,12 +219,22 @@ class CalendarEvent:
         }
 
 
+def _is_valid_iso8601(timestamp: str) -> bool:
+    """Valida que el timestamp sea ISO 8601 válido."""
+    if not timestamp or not isinstance(timestamp, str):
+        return False
+    try:
+        datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+        return True
+    except:
+        return False
+
+
 def enrich_news(raw_news: list[dict]) -> list[dict]:
     """
-    Enriquece lista de noticias con currency e impact derivados.
+    Preserva noticias que Parse News extrajo (ya tienen currency, impact, timestamp).
 
-    In:  [{"headline": "ECB rate hike...", "impact": "low", "currency": ""}]
-    Out: [{"headline": "...", "impact": "high", "currency": "EUR", "sentiment": "...", ...}]
+    Solo filtra noticias SIN currency (geopolíticas irrelevantes para forex).
     """
     enriched = []
 
@@ -233,28 +243,35 @@ def enrich_news(raw_news: list[dict]) -> list[dict]:
         if not headline:
             continue
 
-        news = NewsItem(
-            headline=headline,
-            source_url=item.get("source_url", ""),
-            raw_content=item.get("content", "")
-        )
+        # SKIP si no tiene currency (noticia geopolítica sin impacto forex)
+        if not item.get("currency"):
+            continue
 
-        # Sobrescribir impact si se detectó mejor que antes
-        detected_impact = _extract_impact(headline)
-        if detected_impact != "low":
-            news.impact = detected_impact
+        # Preservar EXACTAMENTE lo que Parse News extrajo
+        # Validar timestamp: si no es ISO 8601 válido, usar fallback
+        timestamp = item.get("timestamp", "")
+        if not timestamp or not _is_valid_iso8601(timestamp):
+            timestamp = datetime.utcnow().isoformat()
 
-        enriched.append(news.to_dict())
+        enriched.append({
+            "headline": headline,
+            "currency": item.get("currency", ""),
+            "impact": item.get("impact", ""),
+            "summary": item.get("summary", ""),
+            "sentiment": item.get("sentiment", ""),
+            "source_url": item.get("source_url", ""),
+            "timestamp": timestamp,
+        })
 
     return enriched
 
 
 def enrich_calendar(raw_calendar: list[dict]) -> list[dict]:
     """
-    Enriquece lista de eventos de calendario.
+    Procesa eventos de calendario (Parse Calendar ya hizo la extracción).
 
-    In:  [{"event": "ECB Rate Decision", "currency": "", "time": "", ...}]
-    Out: [{"event": "ECB Rate Decision", "currency": "EUR", "time": "14:15", ...}]
+    Solo preserva y valida lo que Parse Calendar extrajo.
+    No re-extrae porque Parse Calendar es más preciso con la tabla HTML.
     """
     enriched = []
 
@@ -263,17 +280,20 @@ def enrich_calendar(raw_calendar: list[dict]) -> list[dict]:
         if not event:
             continue
 
-        cal = CalendarEvent(
-            event_name=event,
-            source_url=item.get("source_url", ""),
-            raw_content=item.get("content", "")
-        )
-
-        # Sobrescribir values extraídos si estaban vacíos
-        if not item.get("currency"):
-            pass  # Ya se extrajo en __init__
-
-        enriched.append(cal.to_dict())
+        # Preservar EXACTAMENTE lo que Parse Calendar extrajo
+        enriched.append({
+            "event": event,
+            "currency": item.get("currency", ""),
+            "impact": item.get("impact", ""),
+            "date": item.get("date", ""),
+            "time": item.get("time", ""),
+            "utc_offset": item.get("utc_offset", ""),
+            "forecast": item.get("forecast", ""),
+            "actual": item.get("actual", ""),
+            "previous": item.get("previous", ""),
+            "source_url": item.get("source_url", ""),
+            "timestamp": datetime.utcnow().isoformat(),
+        })
 
     return enriched
 

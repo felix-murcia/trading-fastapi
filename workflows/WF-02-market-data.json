@@ -36,77 +36,90 @@
         },
         "options": {}
       },
-      "id": "7ec88434-d974-48df-a495-04818259b780",
+      "id": "8040f789-4c2b-43e0-852f-4a8f3fa9ed20",
       "name": "POST Enrich Market Data",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
       "position": [
-        4032,
-        1872
+        6112,
+        3264
       ]
     },
     {
       "parameters": {},
-      "id": "07b00b25-482f-4c91-ae01-e85498f0c8d5",
+      "id": "f43b47ca-6ce6-44ae-b2af-cb562a5db965",
       "name": "Merge News+Cal",
       "type": "n8n-nodes-base.merge",
       "typeVersion": 3,
       "position": [
-        3600,
-        1872
+        5680,
+        3264
       ]
     },
     {
       "parameters": {
         "jsCode": "// Triggered by Merge News+Cal (after News+Calendar branches complete).\n// GET Prices and GET Positions completed earlier (faster FastAPI calls).\nconst prices    = $('GET Prices').first().json;\nconst posData   = $('GET Positions').first().json;\nconst positions = (posData.open || []).concat(posData.pending || []);\nconst newsItems = $input.all()\n  .filter(i => i.json.news)\n  .map(i => i.json.news)\n  .flat();\nconst calItems  = $input.all()\n  .filter(i => i.json.calendar)\n  .map(i => i.json.calendar)\n  .flat();\nreturn [{ json: { prices, positions, news: newsItems, calendar: calItems } }];"
       },
-      "id": "b395314d-7148-4c33-b519-b0178c217a97",
+      "id": "7bd81a25-72cb-48d3-bc18-c084c98137d8",
       "name": "Merge All",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        3808,
-        1872
+        5888,
+        3264
       ]
     },
     {
       "parameters": {
-        "jsCode": "const input = $input.first().json;\nconst rawContent = input[0]?.data || input.data || \"\";\nconst CURRENCIES = [\"EUR\",\"USD\",\"GBP\",\"JPY\",\"CHF\",\"AUD\",\"NZD\",\"CAD\",\"CNY\"];\nconst sourceUrl = 'https://www.forexfactory.com/calendar';\n\n// Only FUTURE events\nconst today = new Date('2026-06-04T00:00:00Z');\nconst monthNames = {Jan:1, Feb:2, Mar:3, Apr:4, May:5, Jun:6, Jul:7, Aug:8, Sep:9, Oct:10, Nov:11, Dec:12};\n\nfunction parseEventDate(dateStr) {\n  const match = dateStr.match(/(Sun|Mon|Tue|Wed|Thu|Fri|Sat)\\s(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\s(\\d+)/);\n  if (!match) return null;\n  const [, dow, mon, day] = match;\n  const month = monthNames[mon];\n  const year = month < 6 ? 2026 : 2026;\n  return new Date(Date.UTC(year, month - 1, parseInt(day)));\n}\n\nconst lines = rawContent.split('\\n');\nlet currentDate = '';\nconst calendar = [];\n\nfor (const line of lines) {\n  if (!line.includes('|')) continue;\n  const cells = line.split('|').map(c => c.trim()).filter(c => c !== '');\n\n  if (cells.length < 3 || line.includes('---')) continue;\n  const firstCell = cells[0] || '';\n\n  // Skip headers and junk\n  if (/^(Date|Actual|\\[5:00am|Time)/i.test(firstCell)) continue;\n  if (firstCell === '' && cells.length <= 2) continue;\n\n  // Detect date rows\n  if (firstCell.match(/^(Sun|Mon|Tue|Wed|Thu|Fri|Sat|Tentative)\\s/)) {\n    currentDate = firstCell;\n    const eventDate = parseEventDate(firstCell);\n    // SKIP PAST DATES\n    if (eventDate && eventDate < today) {\n      currentDate = '';\n      continue;\n    }\n    continue;\n  }\n\n  if (!currentDate) continue;\n\n  // Find currency\n  let currencyIdx = -1;\n  for (let i = 0; i < Math.min(4, cells.length); i++) {\n    if (CURRENCIES.some(c => cells[i].includes(c))) {\n      currencyIdx = i;\n      break;\n    }\n  }\n\n  if (currencyIdx === -1) continue;\n\n  let time = currencyIdx > 0 ? cells[currencyIdx - 1] : '';\n  let currency = CURRENCIES.find(c => cells[currencyIdx].includes(c)) || '';\n\n  if (!currency) continue;\n\n  // Extract clean event name\n  let eventName = '';\n  for (let i = currencyIdx + 1; i < cells.length; i++) {\n    let cell = cells[i] || '';\n    cell = cell.replace(/!\\[Image \\d+\\][^\\]]*\\]/g, '');\n    cell = cell.replace(/\\[!\\[Image \\d+\\][^\\]]*\\]\\([^)]*\\)/g, '');\n    cell = cell.replace(/\\[\\(https[^)]*\\)/g, '');\n    cell = cell.trim();\n\n    if (!cell || cell.length < 3) continue;\n    if (cell.match(/^[0-9%.KMBD|-]+$/)) continue;\n    if (/Detail|Graph|Alerts/i.test(cell)) continue;\n    if (cell.startsWith('http')) continue;\n\n    eventName = cell.slice(0, 80);\n    break;\n  }\n\n  if (!eventName) continue;\n\n  const impact = line.includes('ff-impact-red') ? 'high' :\n                 line.includes('ff-impact-ora') ? 'high' :\n                 line.includes('ff-impact-yel') ? 'medium' : 'low';\n\n  // Extract and CLEAN numbers\n  const numValues = [];\n  for (let i = currencyIdx + 1; i < cells.length; i++) {\n    let cell = cells[i];\n    if (cell && cell.match(/^[+-]?[\\d.]+%?[KMBD]?(\\|[\\d.]+)?$/)) {\n      cell = cell.replace(/\\s*!\\[Image[^\\]]*\\]/g, '');\n      cell = cell.trim();\n      if (cell) numValues.push(cell);\n    }\n  }\n\n  let actual = '', forecast = '', previous = '';\n  if (numValues.length >= 3) {\n    actual = numValues[numValues.length - 3];\n    forecast = numValues[numValues.length - 2];\n    previous = numValues[numValues.length - 1];\n  } else if (numValues.length === 2) {\n    forecast = numValues[0];\n    previous = numValues[1];\n  } else if (numValues.length === 1) {\n    forecast = numValues[0];\n  }\n\n  calendar.push({\n    event: eventName,\n    currency,\n    impact,\n    time,\n    date: currentDate,\n    utc_offset: '',\n    forecast,\n    actual,\n    previous,\n    source_url: sourceUrl\n  });\n\n  if (calendar.length >= 10) break;\n}\n\nreturn [{ json: { calendar } }];"
+        "jsCode": "const input = $input.first().json;\nconst rawContent = input[0]?.data || input.data || \"\";\nconst CURRENCIES = [\"EUR\",\"USD\",\"GBP\",\"JPY\",\"CHF\",\"AUD\",\"NZD\",\"CAD\",\"CNY\"];\nconst sourceUrl = 'https://www.forexfactory.com/calendar';\n\nconst today = new Date('2026-06-04T00:00:00Z');\nconst monthNames = {Jan:1, Feb:2, Mar:3, Apr:4, May:5, Jun:6, Jul:7, Aug:8, Sep:9, Oct:10, Nov:11, Dec:12};\n\nfunction parseEventDate(dateStr) {\n  const match = dateStr.match(/(Sun|Mon|Tue|Wed|Thu|Fri|Sat)\\s(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\s(\\d+)/);\n  if (!match) return null;\n  const [, dow, mon, day] = match;\n  const month = monthNames[mon];\n  const year = month < 6 ? 2026 : 2026;\n  return new Date(Date.UTC(year, month - 1, parseInt(day)));\n}\n\nfunction infercurrencyFromEvent(eventName) {\n  const upper = eventName.toUpperCase();\n  const inference = {\n    'ECB|EUROZONE|EUROPEAN CENTRAL': 'EUR',\n    'UK|BRITISH|STERLING|BOE|BANK OF ENGLAND': 'GBP',\n    'JAPAN|BOJ|BANK OF JAPAN': 'JPY',\n    'SWISS|SWISSIE|SNB': 'CHF',\n    'AUSTRALIA|RBA': 'AUD',\n    'NEW ZEALAND|RBNZ': 'NZD',\n    'CANADA|BOC': 'CAD',\n    'FED|FOMC|FEDERAL RESERVE|US EMPLOYMENT|ADP|CHALLENGER|JOBLESS CLAIMS|ISM|NFP': 'USD',\n  };\n  for (const [pattern, currency] of Object.entries(inference)) {\n    if (new RegExp(pattern).test(upper)) return currency;\n  }\n  return '';\n}\n\nconst lines = rawContent.split('\\n');\nlet currentDate = '';\nconst calendar = [];\n\nfor (const line of lines) {\n  if (!line.includes('|')) continue;\n  const cells = line.split('|').map(c => c.trim()).filter(c => c !== '');\n\n  if (cells.length < 3 || line.includes('---')) continue;\n  const firstCell = cells[0] || '';\n\n  if (/^(Date|Actual|\\[5:00am|Time)/i.test(firstCell)) continue;\n  if (firstCell === '' && cells.length <= 2) continue;\n\n  if (firstCell.match(/^(Sun|Mon|Tue|Wed|Thu|Fri|Sat|Tentative)\\s/)) {\n    currentDate = firstCell;\n    const eventDate = parseEventDate(firstCell);\n    if (eventDate && eventDate < today) {\n      currentDate = '';\n      continue;\n    }\n    continue;\n  }\n\n  if (!currentDate) continue;\n\n  // Buscar currency en primeros 4 cells\n  let currencyIdx = -1;\n  for (let i = 0; i < Math.min(4, cells.length); i++) {\n    if (CURRENCIES.some(c => cells[i].includes(c))) {\n      currencyIdx = i;\n      break;\n    }\n  }\n\n  if (currencyIdx === -1) continue;  // No encontró currency\n\n  let currency = CURRENCIES.find(c => cells[currencyIdx].includes(c)) || '';\n  \n  // Buscar time: puede estar en cualquier cell ANTES de currency con formato HH:MM\n  let time = '';\n  for (let i = 0; i < currencyIdx; i++) {\n    if (cells[i]) {\n      const match = cells[i].match(/(\\d{1,2}:\\d{2}(am|pm)?)/i);\n      if (match) {\n        time = match[1];  // SOLO el match, no la celda completa\n        break;\n      }\n    }\n  }\n  \n  // Si no hay time explícito, asumir inicio del día (máxima protección)\n  if (!time) time = '00:00';\n\n  // Event name está DESPUÉS de: Currency (currencyIdx) + Impact Image (currencyIdx+1) = currencyIdx+2\n  let eventName = '';\n  if (currencyIdx + 2 < cells.length) {\n    let cell = cells[currencyIdx + 2].trim();\n    // Limpiar imágenes y markdown junk\n    cell = cell.replace(/!\\[Image \\d+\\]\\([^)]*\\)/g, '');  // ![Image N](...)\n    cell = cell.replace(/\\[!\\[Image \\d+\\][^\\]]*\\]\\([^)]*\\)/g, '');  // [![Image...](...)\n    cell = cell.replace(/\\[\\]\\([^)]*\\)/g, '');  // [](url)\n    cell = cell.trim();\n    if (cell && cell.length > 2) eventName = cell.slice(0, 80);\n  }\n\n  if (!eventName) continue;\n\n  // SI NO ENCONTRÓ CURRENCY EN TABLA, INFERIR DEL NOMBRE\n  if (!currency) {\n    currency = infercurrencyFromEvent(eventName);\n  }\n\n  // SKIP SOLO si no tiene currency después de inferencia\n  if (!currency) continue;\n\n  const impact = line.includes('ff-impact-red') ? 'high' :\n                 line.includes('ff-impact-ora') ? 'high' :\n                 line.includes('ff-impact-yel') ? 'medium' : 'low';\n\n  const numValues = [];\n  for (let i = currencyIdx + 3; i < cells.length; i++) {\n    let cell = cells[i];\n    if (cell && cell.match(/^[+-]?[\\d.]+%?[KMBD]?(\\|[\\d.]+)?$/)) {\n      cell = cell.replace(/\\s*!\\[Image[^\\]]*\\]/g, '');\n      cell = cell.trim();\n      if (cell) numValues.push(cell);\n    }\n  }\n\n  let actual = '', forecast = '', previous = '';\n  if (numValues.length >= 3) {\n    actual = numValues[numValues.length - 3];\n    forecast = numValues[numValues.length - 2];\n    previous = numValues[numValues.length - 1];\n  } else if (numValues.length === 2) {\n    forecast = numValues[0];\n    previous = numValues[1];\n  } else if (numValues.length === 1) {\n    forecast = numValues[0];\n  }\n\n  calendar.push({\n    event: eventName,\n    currency,\n    impact,\n    time,\n    date: currentDate,\n    utc_offset: '',\n    forecast,\n    actual,\n    previous,\n    source_url: sourceUrl\n  });\n\n  if (calendar.length >= 10) break;\n}\n\nreturn [{ json: { calendar } }];"
       },
-      "id": "3cb3b419-9a84-485e-96a9-29c15c7111ce",
+      "id": "c8bf4815-5464-4f14-bf0f-24346e298daf",
       "name": "Parse Calendar",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        3376,
-        1872
+        5088,
+        3584
       ]
     },
     {
       "parameters": {
-        "jsCode": "const input = $input.first().json;\nconst rawContent = input[0]?.data || input.data || \"\";\nconst CURRENCIES = [\"EUR\",\"USD\",\"GBP\",\"JPY\",\"CHF\",\"AUD\",\"NZD\",\"CAD\"];\nconst sourceUrl = 'https://www.forexlive.com/feed/news';\n\n// Dividir por URLs (que empiezan con [https)\nconst urlPattern = /\\[https:\\/\\/investinglive\\.com\\/news\\/([^\\]]+)\\]/g;\nconst matches = [];\nlet match;\nwhile ((match = urlPattern.exec(rawContent)) !== null) {\n  matches.push(match[1]);\n}\n\nconst news = [];\nfor (const urlSlug of matches.slice(0, 10)) {\n  // Reconstruir headline de la URL (reemplazar guiones por espacios, capitalizar)\n  const headline = urlSlug\n    .split('-')\n    .slice(0, -1)  // remover timestamp\n    .join(' ')\n    .slice(0, 140);\n  \n  if (!headline || headline.length < 10) continue;\n  \n  // Buscar moneda en todo el contenido\n  const currency = CURRENCIES.find(c => rawContent.toUpperCase().includes(c)) || \"\";\n  \n  // Detectar impact\n  const impact = rawContent.toLowerCase().includes(\"high\") ? \"high\" : \n                 rawContent.toLowerCase().includes(\"medium\") ? \"medium\" : \"low\";\n  \n  news.push({\n    headline: headline.trim(),\n    impact,\n    currency,\n    source_url: sourceUrl,\n    content: headline\n  });\n}\n\nreturn [{ json: { news } }];"
+        "jsCode": "const input = $input.first().json;\nconst rawContent = input[0]?.data || input.data || \"\";\nconst CURRENCIES = [\"EUR\",\"USD\",\"GBP\",\"JPY\",\"CHF\",\"AUD\",\"NZD\",\"CAD\"];\nconst sourceUrl = 'https://www.forexlive.com/feed/news';\n\n// Dividir por URLs (que empiezan con [https)\nconst urlPattern = /\\[https:\\/\\/investinglive\\.com\\/news\\/([^\\]]+)\\]/g;\nconst matches = [];\nlet match;\nwhile ((match = urlPattern.exec(rawContent)) !== null) {\n  matches.push(match[1]);\n}\n\nconst news = [];\nfor (const urlSlug of matches.slice(0, 10)) {\n  // Reconstruir headline de la URL (reemplazar guiones por espacios)\n  const headline = urlSlug\n    .split('-')\n    .slice(0, -1)  // remover timestamp YYYYMMDD al final\n    .join(' ')\n    .slice(0, 140);\n\n  if (!headline || headline.length < 10) continue;\n\n  // Buscar moneda en todo el contenido\n  const currency = CURRENCIES.find(c => rawContent.toUpperCase().includes(c)) || \"\";\n\n  // Detectar impact\n  const impact = rawContent.toLowerCase().includes(\"high\") ? \"high\" :\n                 rawContent.toLowerCase().includes(\"medium\") ? \"medium\" : \"low\";\n\n  // Extraer YYYYMMDD de la URL (último componente después de último guión)\n  const lastPart = urlSlug.split('-')[urlSlug.split('-').length - 1];\n  const yyyymmdd = lastPart.match(/\\d{8}/)?.[0] || \"\";  // Extraer números de 8 dígitos\n\n  let timestamp = \"\";\n  if (yyyymmdd) {\n    // Convertir YYYYMMDD a ISO 8601 (usando hora 00:00:00 como default)\n    const yyyy = yyyymmdd.substring(0, 4);\n    const mm = yyyymmdd.substring(4, 6);\n    const dd = yyyymmdd.substring(6, 8);\n    timestamp = `${yyyy}-${mm}-${dd}T00:00:00Z`;\n  }\n\n  news.push({\n    headline: headline.trim(),\n    impact,\n    currency,\n    source_url: sourceUrl,\n    content: headline,\n    timestamp: timestamp,\n  });\n}\n\nreturn [{ json: { news } }];\n"
       },
-      "id": "8b9284d3-c6cf-4226-9499-0b965980a063",
+      "id": "15f60360-f94c-4c72-8d08-e99fad77b4cf",
       "name": "Parse News",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        3152,
-        1872
+        4928,
+        2976
       ]
     },
     {
       "parameters": {
-        "url": "https://r.jina.ai/https://www.forexfactory.com/calendar?day=jun4.2026",
+        "jsCode": "const today = new Date();\nconst monthNames = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];\nconst month = monthNames[today.getMonth()];\nconst day = today.getDate();\nconst year = today.getFullYear();\nconst dateParam = `${month}${day}.${year}`;\nreturn [{ json: { dateParam } }];"
+      },
+      "id": "b84c197c-e076-464d-b492-9b43ced68f79",
+      "name": "Calc Calendar Date",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4624,
+        3584
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://r.jina.ai/https://www.forexfactory.com/calendar?day={{$json.dateParam}}",
         "options": {}
       },
-      "id": "7779983a-7b4f-46ff-b167-fc8069499f42",
+      "id": "fd38d0fa-5a5c-4ebb-9ad1-b13c2ca0cb6d",
       "name": "GET Calendar",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
       "position": [
-        2928,
-        1872
+        4864,
+        3584
       ]
     },
     {
@@ -114,13 +127,13 @@
         "url": "https://r.jina.ai/https://www.forexlive.com/feed/news",
         "options": {}
       },
-      "id": "6c5eb039-8c3f-44fc-ae98-d7e77e16e45f",
+      "id": "e72a87a0-90fa-489d-b49f-8777e5195e03",
       "name": "GET News",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
       "position": [
-        2720,
-        1872
+        4688,
+        2976
       ]
     },
     {
@@ -137,13 +150,13 @@
         },
         "options": {}
       },
-      "id": "e09bc657-7672-4403-bfe7-aeddb2ac2318",
+      "id": "a96bfbba-7814-4074-9be4-2af5d27040fe",
       "name": "GET Positions",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
       "position": [
-        2496,
-        1872
+        4880,
+        3264
       ]
     },
     {
@@ -160,26 +173,26 @@
         },
         "options": {}
       },
-      "id": "cc274810-fbc0-4c76-b1cc-fc862ec909d6",
+      "id": "412678fd-d206-45c5-850e-cb78f19e02ea",
       "name": "GET Prices",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
       "position": [
-        2272,
-        1872
+        4656,
+        3264
       ]
     },
     {
       "parameters": {
         "inputSource": "passthrough"
       },
-      "id": "b3836ac9-6ce1-457d-9205-7471b7ce199c",
+      "id": "a9ec7549-438e-42ca-8dd4-0a1659370b7b",
       "name": "Trigger",
       "type": "n8n-nodes-base.executeWorkflowTrigger",
       "typeVersion": 1.1,
       "position": [
-        2048,
-        1872
+        4432,
+        3264
       ]
     }
   ],
@@ -228,6 +241,17 @@
         ]
       ]
     },
+    "Calc Calendar Date": {
+      "main": [
+        [
+          {
+            "node": "GET Calendar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
     "GET Calendar": {
       "main": [
         [
@@ -261,11 +285,22 @@
         ]
       ]
     },
+    "GET Positions": {
+      "main": [
+        [
+          {
+            "node": "Merge News+Cal",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
     "Trigger": {
       "main": [
         [
           {
-            "node": "GET Calendar",
+            "node": "Calc Calendar Date",
             "type": "main",
             "index": 0
           },

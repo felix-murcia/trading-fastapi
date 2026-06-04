@@ -4,7 +4,11 @@ from pydantic import BaseModel
 class NewsItem(BaseModel):
     headline: str = ""
     currency: str = ""
-    impact: str = "low"    # low | medium | high
+    impact: str = "low"
+    summary: str = ""
+    sentiment: str = ""
+    source_url: str = ""
+    timestamp: str = ""
     minutes_to_event: int | None = None
 
 
@@ -12,8 +16,14 @@ class CalendarEvent(BaseModel):
     event: str = ""
     currency: str = ""
     impact: str = "low"
+    date: str = ""
     time: str = ""
+    utc_offset: str = ""
     forecast: str = ""
+    actual: str = ""
+    previous: str = ""
+    source_url: str = ""
+    timestamp: str = ""
 
 
 class Position(BaseModel):

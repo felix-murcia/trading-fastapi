@@ -45,19 +45,70 @@ def _current_session(now: datetime) -> str:
 
 def _has_high_impact_news(req: ContextValidateRequest) -> bool:
     blackout = settings.news_blackout_minutes
-    for item in req.news + [
-        # calendar events treated as news
-        type("N", (), {"impact": e.impact, "minutes_to_event": None, "currency": e.currency})()
-        for e in req.calendar
-    ]:
+    now = datetime.now(timezone.utc)
+    print(f"[DEBUG] Checking high-impact news. Now: {now}, Blackout: {blackout} min")
+
+    for item in req.news:
         if item.impact != "high":
             continue
-        mte = getattr(item, "minutes_to_event", None)
-        if mte is None:
-            # No timing info → treat conservatively as imminent
+
+        # Obtener timestamp del item (puede ser atributo o dict key)
+        timestamp = getattr(item, 'timestamp', None)
+        if not timestamp and hasattr(item, '__getitem__'):
+            timestamp = item.get('timestamp')
+
+        if not timestamp:
+            print(f"[DEBUG] → BLOCKING: High-impact news without timestamp: {getattr(item, 'headline', 'unknown')[:50]}")
             return True
-        if abs(mte) <= blackout:
+
+        print(f"[DEBUG] High-impact news found: {getattr(item, 'headline', 'unknown')[:50]}... timestamp: {timestamp}")
+
+        # Calcular minutos desde timestamp de la noticia
+        try:
+            # timestamp es ISO 8601 string: "2026-06-04T12:54:02.155346"
+            news_time = datetime.fromisoformat(str(timestamp).replace('Z', '+00:00'))
+            mte = (now - news_time).total_seconds() / 60.0
+            print(f"[DEBUG] News time: {news_time}, Minutes elapsed: {mte:.1f}, Blackout: {blackout}")
+            if abs(mte) <= blackout:
+                print(f"[DEBUG] → BLOCKING: News within {blackout} min window")
+                return True
+        except Exception as e:
+            # Si no se puede parsear, asumir inmediato
+            print(f"[DEBUG] → BLOCKING: Failed to parse timestamp '{timestamp}': {e}")
             return True
+
+    # Calendar events: también considerar ventana de blackout si tienen time válido
+    for e in req.calendar:
+        if e.impact != "high":
+            continue
+
+        # Si tiene time válido (NO "00:00"), calcular si está dentro de ventana
+        event_time_str = getattr(e, 'time', '00:00') or '00:00'
+
+        if event_time_str != '00:00':
+            try:
+                # Parse time: "14:30" o "2:30am"
+                time_str = event_time_str.lower().strip()
+                if 'am' in time_str or 'pm' in time_str:
+                    # Parse 12-hour format
+                    event_time = datetime.strptime(time_str, "%I:%M%p").time()
+                else:
+                    # Parse 24-hour format
+                    event_time = datetime.strptime(time_str, "%H:%M").time()
+
+                # Combinar con fecha de hoy (UTC)
+                event_dt = datetime.combine(now.date(), event_time, tzinfo=timezone.utc)
+                mte = (now - event_dt).total_seconds() / 60.0
+                print(f"[DEBUG] Calendar event: {getattr(e, 'event', 'unknown')[:50]}, time: {event_time_str}, minutes: {mte:.1f}")
+                if abs(mte) <= blackout:
+                    print(f"[DEBUG] → BLOCKING: Calendar event within {blackout} min window")
+                    return True
+            except Exception as ex:
+                # Si no se puede parsear time, ignorar este evento
+                print(f"[DEBUG] Failed to parse calendar time '{event_time_str}': {ex}, skipping")
+                continue
+        # else: time="00:00" o inválido, ignorar este evento
+
     return False
 
 
