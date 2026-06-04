@@ -129,6 +129,20 @@
         "jsCode": "// Collect signals from all 3 agents (execute in parallel)\ntry {\n  const tech = $('Agent Technical').first().json;\n  const fund = $('Agent Fundamental').first().json;\n  const sent = $('Agent Sentiment').first().json;\n  const signals = [tech, fund, sent].filter(s => s && s.agent);\n  return [{ json: { signals } }];\n} catch (e) {\n  throw new Error(`Collect Signals: One or more agents failed. Error: ${e.message}`);\n}\n",
         "mode": "runOnceForAllItems"
       }
+    },
+    {
+      "id": "724bf45f-458d-42fc-8121-0e5ef55ae881",
+      "name": "Wait for All Agents",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [
+        600,
+        200
+      ],
+      "parameters": {
+        "waitType": "all",
+        "inputCount": 3
+      }
     }
   ],
   "connections": {
@@ -157,7 +171,7 @@
       "main": [
         [
           {
-            "node": "Collect Signals",
+            "node": "Wait for All Agents",
             "type": "main",
             "index": 0
           }
@@ -168,14 +182,25 @@
       "main": [
         [
           {
-            "node": "Collect Signals",
+            "node": "Wait for All Agents",
             "type": "main",
-            "index": 0
+            "index": 1
           }
         ]
       ]
     },
     "Agent Sentiment": {
+      "main": [
+        [
+          {
+            "node": "Wait for All Agents",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Wait for All Agents": {
       "main": [
         [
           {
