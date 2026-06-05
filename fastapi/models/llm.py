@@ -59,3 +59,4 @@ class LLMContextResponse(BaseModel):
     technical: TechnicalAnalysis
     smc_active: bool
     smc_direction: str
+    pair_context: dict = {}

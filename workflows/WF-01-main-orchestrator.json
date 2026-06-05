@@ -231,9 +231,10 @@
             "cycle_id": "={{ $('Merge Cycle ID').first().json.cycle_id }}",
             "best_pair": "={{ $('POST Analysis Pairs').first().json.best_pair }}",
             "technical": "={{ $('POST Analysis Pairs').first().json.technical }}",
-            "news": "={{ $('Merge Cycle ID').first().json.news }}",
-            "calendar": "={{ $('Merge Cycle ID').first().json.calendar }}",
-            "positions": "={{ $('Merge Cycle ID').first().json.positions }}"
+            "news": "={{ $('POST Prepare LLM Context').first().json.news }}",
+            "calendar": "={{ $('POST Prepare LLM Context').first().json.calendar }}",
+            "positions": "={{ $('Merge Cycle ID').first().json.positions }}",
+            "pair_context": "={{ $('POST Prepare LLM Context').first().json.pair_context }}"
           },
           "matchingColumns": [],
           "schema": [],
