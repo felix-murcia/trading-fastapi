@@ -10,10 +10,14 @@ Verifica:
 """
 
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from models.context import ContextValidateRequest, ContextValidateResponse
 from db.connection import get_pool
 from config import settings
 
+# ForexFactory publica los horarios en Eastern Time (ET = America/New_York)
+# independientemente del timezone del servidor que hace el scraping
+_FF_TZ = ZoneInfo("America/New_York")
 
 _SESSIONS = {
     "london":   (8,  17),   # UTC
@@ -22,6 +26,9 @@ _SESSIONS = {
 }
 
 SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "XAUUSD"]
+
+# Divisas presentes en los pares analizados — eventos de otras divisas no bloquean
+TRACKED_CURRENCIES = {"EUR", "USD", "GBP", "JPY", "CHF", "XAU"}
 
 VALID_RANGES = {
     "EURUSD": (1.05, 1.20),
@@ -45,69 +52,74 @@ def _current_session(now: datetime) -> str:
 
 def _has_high_impact_news(req: ContextValidateRequest) -> bool:
     blackout = settings.news_blackout_minutes
-    now = datetime.now(timezone.utc)
-    print(f"[DEBUG] Checking high-impact news. Now: {now}, Blackout: {blackout} min")
+    now      = datetime.now(timezone.utc)
+    now_et   = datetime.now(_FF_TZ)   # ForexFactory usa Eastern Time
 
+    print(f"[DEBUG] Checking high-impact news. UTC: {now.strftime('%H:%M')}, ET: {now_et.strftime('%H:%M')}, Blackout: {blackout} min")
+
+    # ── Noticias ──────────────────────────────────────────────────────────────
     for item in req.news:
         if item.impact != "high":
             continue
 
-        # Obtener timestamp del item (puede ser atributo o dict key)
-        timestamp = getattr(item, 'timestamp', None)
-        if not timestamp and hasattr(item, '__getitem__'):
-            timestamp = item.get('timestamp')
+        # Filtro de moneda: ignorar si no afecta a ninguno de los pares analizados
+        currency = (getattr(item, 'currency', '') or '').upper()
+        if currency and currency not in TRACKED_CURRENCIES:
+            print(f"[DEBUG] Skipping news for {currency} (not in tracked pairs)")
+            continue
 
+        timestamp = getattr(item, 'timestamp', None)
         if not timestamp:
-            print(f"[DEBUG] → BLOCKING: High-impact news without timestamp: {getattr(item, 'headline', 'unknown')[:50]}")
+            print(f"[DEBUG] → BLOCKING: High-impact news sin timestamp: {getattr(item, 'headline', '')[:50]}")
             return True
 
-        print(f"[DEBUG] High-impact news found: {getattr(item, 'headline', 'unknown')[:50]}... timestamp: {timestamp}")
-
-        # Calcular minutos desde timestamp de la noticia
         try:
-            # timestamp es ISO 8601 string: "2026-06-04T12:54:02.155346"
             news_time = datetime.fromisoformat(str(timestamp).replace('Z', '+00:00'))
             mte = (now - news_time).total_seconds() / 60.0
-            print(f"[DEBUG] News time: {news_time}, Minutes elapsed: {mte:.1f}, Blackout: {blackout}")
+            print(f"[DEBUG] News: {getattr(item,'headline','')[:40]}, elapsed: {mte:.1f} min")
             if abs(mte) <= blackout:
                 print(f"[DEBUG] → BLOCKING: News within {blackout} min window")
                 return True
-        except Exception as e:
-            # Si no se puede parsear, asumir inmediato
-            print(f"[DEBUG] → BLOCKING: Failed to parse timestamp '{timestamp}': {e}")
+        except Exception as exc:
+            print(f"[DEBUG] → BLOCKING: Failed to parse timestamp '{timestamp}': {exc}")
             return True
 
-    # Calendar events: también considerar ventana de blackout si tienen time válido
+    # ── Calendario ────────────────────────────────────────────────────────────
     for e in req.calendar:
         if e.impact != "high":
             continue
 
-        # Si tiene time válido (NO "00:00"), calcular si está dentro de ventana
-        event_time_str = getattr(e, 'time', '00:00') or '00:00'
+        # Filtro de moneda
+        currency = (getattr(e, 'currency', '') or '').upper()
+        if currency and currency not in TRACKED_CURRENCIES:
+            print(f"[DEBUG] Skipping calendar event for {currency} (not in tracked pairs)")
+            continue
 
-        if event_time_str != '00:00':
-            try:
-                # Parse time: "14:30" o "2:30am"
-                time_str = event_time_str.lower().strip()
-                if 'am' in time_str or 'pm' in time_str:
-                    # Parse 12-hour format
-                    event_time = datetime.strptime(time_str, "%I:%M%p").time()
-                else:
-                    # Parse 24-hour format
-                    event_time = datetime.strptime(time_str, "%H:%M").time()
+        event_time_str = (getattr(e, 'time', '') or '').strip()
 
-                # Combinar con fecha de hoy (UTC)
-                event_dt = datetime.combine(now.date(), event_time, tzinfo=timezone.utc)
-                mte = (now - event_dt).total_seconds() / 60.0
-                print(f"[DEBUG] Calendar event: {getattr(e, 'event', 'unknown')[:50]}, time: {event_time_str}, minutes: {mte:.1f}")
-                if abs(mte) <= blackout:
-                    print(f"[DEBUG] → BLOCKING: Calendar event within {blackout} min window")
-                    return True
-            except Exception as ex:
-                # Si no se puede parsear time, ignorar este evento
-                print(f"[DEBUG] Failed to parse calendar time '{event_time_str}': {ex}, skipping")
-                continue
-        # else: time="00:00" o inválido, ignorar este evento
+        # Hora desconocida (00:00 por defecto cuando ForexFactory no la publicó)
+        # → bloquear durante toda la sesión como medida conservadora
+        if not event_time_str or event_time_str == '00:00':
+            print(f"[DEBUG] → BLOCKING: High-impact event con hora desconocida: {getattr(e,'event','')[:50]}")
+            return True
+
+        try:
+            time_str = event_time_str.lower()
+            if 'am' in time_str or 'pm' in time_str:
+                event_time = datetime.strptime(time_str, "%I:%M%p").time()
+            else:
+                event_time = datetime.strptime(time_str, "%H:%M").time()
+
+            # ForexFactory publica en ET — convertir a UTC para comparar
+            event_dt = datetime.combine(now_et.date(), event_time, tzinfo=_FF_TZ).astimezone(timezone.utc)
+            mte = (now - event_dt).total_seconds() / 60.0
+            print(f"[DEBUG] Calendar: {getattr(e,'event','')[:40]}, {event_time_str} Madrid → {event_dt.strftime('%H:%M')} UTC, min: {mte:.1f}")
+            if abs(mte) <= blackout:
+                print(f"[DEBUG] → BLOCKING: Calendar event within {blackout} min window")
+                return True
+        except Exception as ex:
+            print(f"[DEBUG] Failed to parse calendar time '{event_time_str}': {ex}, skipping")
+            continue
 
     return False
 
