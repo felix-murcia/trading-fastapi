@@ -70,8 +70,8 @@ def _has_high_impact_news(req: ContextValidateRequest) -> bool:
 
         timestamp = getattr(item, 'timestamp', None)
         if not timestamp:
-            print(f"[DEBUG] → BLOCKING: High-impact news sin timestamp: {getattr(item, 'headline', '')[:50]}")
-            return True
+            print(f"[DEBUG] Skipping high-impact news sin timestamp: {getattr(item, 'headline', '')[:50]}")
+            continue
 
         try:
             news_time = datetime.fromisoformat(str(timestamp).replace('Z', '+00:00'))
