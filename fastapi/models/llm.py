@@ -33,7 +33,7 @@ class PairAnalysis(BaseModel):
     scores: list[AnalysisScore]
     technical: TechnicalAnalysis
     smc_active: bool
-    smc_direction: str
+    smc_direction: str = ""
 
 
 class LLMContextRequest(BaseModel):
@@ -58,5 +58,5 @@ class LLMContextResponse(BaseModel):
     scores: list[AnalysisScore]
     technical: TechnicalAnalysis
     smc_active: bool
-    smc_direction: str
+    smc_direction: str = ""
     pair_context: dict = {}
