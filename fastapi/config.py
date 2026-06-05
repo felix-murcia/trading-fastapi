@@ -16,8 +16,10 @@ class Settings(BaseSettings):
     llm_agent_timeout: float = 30.0
     news_blackout_minutes: int = 30
     atr_volatility_multiplier: float = 2.0
+    atr_sl_multiplier: float = 1.5   # SL = ATR × este factor (M5)
+    sl_risk_usd: float = 15.0        # riesgo máximo por operación en USD
     order_max_age_hours: int = 48
-    rr_min: float = 1.5
+    rr_min: float = 2.0              # R:R fijo 2:1 → TP siempre el doble del SL
     use_provider: str = "openrouter"
     openrouter_api_key: str = ""
     openrouter_api_url: str = "https://openrouter.ai/api/v1/chat/completions"

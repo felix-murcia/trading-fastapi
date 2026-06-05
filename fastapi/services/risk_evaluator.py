@@ -4,9 +4,9 @@ Decisión de trading y cálculo de riesgo. 100% determinista, sin LLM.
 Responsabilidades:
 - Voting engine: mayoría ponderada de señales LLM (mínimo 2 de 3)
 - Validar confidence >= umbral
-- Calcular entry, SL, TP desde datos técnicos
-- Calcular volumen: equity * 1% / (sl_pips * pip_value)
-- Verificar R/R >= 1.5
+- Calcular SL desde ATR del M5 (ni muy apretado ni muy ancho)
+- Calcular volumen para riesgo fijo en USD (sl_risk_usd)
+- TP siempre = SL × rr_min (R:R fijo, reward = sl_risk_usd × rr_min)
 - Rechazar si ya hay posición en el par
 """
 
@@ -15,7 +15,6 @@ from models.analysis import TechnicalData
 from config import settings
 
 
-# Pip size y valor por lote estándar (100,000 unidades)
 PIP_SIZE = {
     "EURUSD": 0.0001,
     "GBPUSD": 0.0001,
@@ -23,27 +22,27 @@ PIP_SIZE = {
     "USDCHF": 0.0001,
     "XAUUSD": 0.10,
 }
-PIP_VALUE_PER_LOT = 10.0   # USD aproximado para todos los pares
+
+# Rango de SL en pips permitido por símbolo (cota inferior y superior)
+# Debe ser consistente con SL_LIMITS en order_manager.py
+SL_PIPS_BOUNDS: dict[str, tuple[float, float]] = {
+    "USDJPY": (5.0,  80.0),
+    "XAUUSD": (50.0, 800.0),
+}
+_SL_PIPS_DEFAULT = (5.0, 80.0)
 
 
 def _pip_size(symbol: str) -> float:
     return PIP_SIZE.get(symbol, 0.0001)
 
 
-def _sl_pips(symbol: str, entry: float, sl: float) -> float:
-    return abs(entry - sl) / _pip_size(symbol)
-
-
-def _tp_pips(symbol: str, entry: float, tp: float) -> float:
-    return abs(tp - entry) / _pip_size(symbol)
-
-
-def _calc_volume(equity: float, sl_pips: float) -> float:
-    if sl_pips <= 0:
-        return settings.min_volume
-    raw = (equity * settings.risk_per_trade) / (sl_pips * PIP_VALUE_PER_LOT)
-    raw = round(raw / 0.01) * 0.01   # redondear a 0.01
-    return max(settings.min_volume, min(settings.max_volume, raw))
+def _pip_value_per_lot(symbol: str, price: float) -> float:
+    """Valor en USD de 1 pip con 1 lote estándar, usando el precio actual."""
+    if symbol == "USDJPY":
+        return 1000.0 / price   # 1 pip = 1000 JPY / tipo de cambio
+    if symbol == "USDCHF":
+        return 10.0 / price     # 1 pip = 10 CHF / tipo de cambio
+    return 10.0                 # EURUSD, GBPUSD, XAUUSD: fijo $10/lote
 
 
 def _voting(signals: list) -> tuple[str, float]:
@@ -54,14 +53,11 @@ def _voting(signals: list) -> tuple[str, float]:
     """
     threshold = settings.llm_confidence_threshold
 
-    # Señal SMC directa — tiene prioridad y no pasa por votación
     smc = next((s for s in signals if s.agent == "smc_brain"), None)
     if smc and smc.confidence >= threshold and smc.signal in ("buy", "sell"):
         return smc.signal, smc.confidence
 
-    # Votación LLM normal
     valid = [s for s in signals if not s.parse_error and s.confidence >= threshold]
-
     if len(valid) < 2:
         return "skip", 0.0
 
@@ -81,32 +77,49 @@ def _has_position_in_pair(symbol: str, positions: list) -> bool:
     return any(p.symbol == symbol and p.type in active for p in positions)
 
 
-def _derive_levels(direction: str, tech: TechnicalData) -> tuple[float, float, float]:
+def _derive_order(
+    direction: str,
+    symbol: str,
+    tech: TechnicalData,
+) -> tuple[float, float, float, float]:
     """
-    Deriva entry, SL, TP desde datos técnicos del par.
-    Entry  = precio actual
-    SL     = último soporte (BUY) o resistencia (SELL) con margen de ATR
-    TP     = R/R mínimo calculado sobre el SL
-    """
-    price = tech.current_price
-    atr = tech.atr or (price * 0.001)    # fallback: 0.1% del precio
+    Deriva entry, SL, TP y volumen con riesgo fijo en USD.
 
+    SL  = ATR_M5 × atr_sl_multiplier  (acotado a SL_PIPS_BOUNDS)
+    TP  = SL × rr_min  (siempre R:R = rr_min, TP en USD = sl_risk_usd × rr_min)
+    vol = sl_risk_usd / (sl_pips × pip_value_per_lot)
+    """
+    pip  = _pip_size(symbol)
+    ppv  = _pip_value_per_lot(symbol, tech.current_price)
+    atr  = tech.atr or (tech.current_price * 0.001)
+
+    # SL en pips basado en ATR del M5
+    atr_pips = atr / pip
+    sl_pips  = atr_pips * settings.atr_sl_multiplier
+
+    # Acotar a los límites del símbolo
+    lo, hi  = SL_PIPS_BOUNDS.get(symbol, _SL_PIPS_DEFAULT)
+    sl_pips = max(lo, min(hi, sl_pips))
+
+    sl_dist = round(sl_pips * pip, 5)
+    tp_dist = round(sl_dist * settings.rr_min, 5)
+
+    price = tech.current_price
     if direction == "buy":
         entry = price
-        # Anclar SL en min(support, entry) para evitar que un soporte histórico
-        # por encima del precio actual produzca un SL demasiado ajustado
-        sl_anchor = min(tech.support, price)
-        sl = round(sl_anchor - atr * 0.5, 5)
-        sl_dist = entry - sl
-        tp = round(entry + sl_dist * settings.rr_min, 5)
+        sl    = round(entry - sl_dist, 5)
+        tp    = round(entry + tp_dist, 5)
     else:
         entry = price
-        # SL para SELL: precio + ATR×0.5 (sin ancla en resistencia — evita SL muy lejano)
-        sl = round(price + atr * 0.5, 5)
-        sl_dist = sl - entry
-        tp = round(entry - sl_dist * settings.rr_min, 5)
+        sl    = round(entry + sl_dist, 5)
+        tp    = round(entry - tp_dist, 5)
 
-    return entry, sl, tp
+    # Volumen para riesgo exacto en USD
+    raw_vol = settings.sl_risk_usd / (sl_pips * ppv)
+    raw_vol = round(raw_vol / 0.01) * 0.01   # paso mínimo de 0.01
+    volume  = max(settings.min_volume, min(settings.max_volume, raw_vol))
+
+    return entry, sl, tp, volume
 
 
 def evaluate(req: RiskEvaluateRequest, equity: float) -> RiskEvaluateResponse:
@@ -125,21 +138,8 @@ def evaluate(req: RiskEvaluateRequest, equity: float) -> RiskEvaluateResponse:
             confidence=avg_conf, reason="position_already_open",
         )
 
-    # 3. Derivar niveles
-    entry, sl, tp = _derive_levels(direction, req.technical)
-
-    # 4. Verificar R/R
-    sl_p = _sl_pips(req.best_pair, entry, sl)
-    tp_p = _tp_pips(req.best_pair, entry, tp)
-    if sl_p <= 0 or round(tp_p / sl_p, 4) < settings.rr_min:
-        return RiskEvaluateResponse(
-            action="skip", entry=entry, sl=sl, tp=tp, volume=0,
-            confidence=avg_conf,
-            reason=f"rr_insufficient:{round(tp_p/sl_p, 2) if sl_p > 0 else 0}",
-        )
-
-    # 5. Calcular volumen
-    volume = _calc_volume(equity, sl_p)
+    # 3. Derivar niveles y volumen
+    entry, sl, tp, volume = _derive_order(direction, req.best_pair, req.technical)
 
     return RiskEvaluateResponse(
         action=direction,
