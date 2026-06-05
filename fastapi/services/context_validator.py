@@ -97,11 +97,10 @@ def _has_high_impact_news(req: ContextValidateRequest) -> bool:
 
         event_time_str = (getattr(e, 'time', '') or '').strip()
 
-        # Hora desconocida (00:00 por defecto cuando ForexFactory no la publicó)
-        # → bloquear durante toda la sesión como medida conservadora
+        # Hora desconocida → descartar (no bloquear)
         if not event_time_str or event_time_str == '00:00':
-            print(f"[DEBUG] → BLOCKING: High-impact event con hora desconocida: {getattr(e,'event','')[:50]}")
-            return True
+            print(f"[DEBUG] Skipping high-impact calendar event sin hora: {getattr(e,'event','')[:50]}")
+            continue
 
         try:
             time_str = event_time_str.lower()
