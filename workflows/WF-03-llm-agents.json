@@ -122,6 +122,62 @@
         -272,
         2240
       ]
+    },
+    {
+      "id": "debate-build-001",
+      "name": "Build Debate Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -32,
+        2240
+      ],
+      "parameters": {
+        "jsCode": "const ctx = $input.first().json;\nconst signals  = ctx.signals || [];\nconst tech     = $('Trigger').first().json.technical || {};\nconst pc       = $('Trigger').first().json.pair_context || {};\nconst news     = $('Trigger').first().json.news || [];\nconst calendar = $('Trigger').first().json.calendar || [];\n\nconst newsSummary = news\n  .filter(n => n.impact === 'high' || n.currency)\n  .slice(0, 3)\n  .map(n => n.headline)\n  .join('; ');\n\nconst calSummary = calendar\n  .filter(c => c.impact === 'high')\n  .slice(0, 3)\n  .map(c => `${c.event} (${c.currency} ${c.time})`)\n  .join('; ');\n\nreturn [{\n  json: {\n    cycle_id:          $('Trigger').first().json.cycle_id,\n    best_pair:         $('Trigger').first().json.best_pair,\n    price:             $('Trigger').first().json.price,\n    rsi:               tech.rsi || 50,\n    trend:             tech.trend || '',\n    atr:               tech.atr || 0,\n    signals,\n    news_summary:      newsSummary,\n    calendar_summary:  calSummary,\n    drivers:           pc.drivers || '',\n    fundamental_hint:  pc.fundamental_hint || '',\n    sentiment_hint:    pc.sentiment_hint || '',\n  }\n}];"
+      }
+    },
+    {
+      "id": "debate-post-001",
+      "name": "POST Debate",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        208,
+        2240
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8090/v1/llm/debate",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Internal-Token",
+              "value": "90c42a9448defc1f57K8WGdyb3FYaXgTw00gCVKY9JhfFG1A9tfji"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($input.first().json) }}",
+        "options": {
+          "timeout": 45000
+        }
+      }
+    },
+    {
+      "id": "debate-fmt-001",
+      "name": "Format Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        2240
+      ],
+      "parameters": {
+        "jsCode": "const debate  = $('POST Debate').first().json;\nconst signals = $('Collect Signals').first().json.signals || [];\nreturn [{\n  json: {\n    signals,\n    debate: {\n      signal:     debate.signal,\n      confidence: debate.confidence,\n      reasoning:  debate.reasoning || '',\n    }\n  }\n}];"
+      }
     }
   ],
   "connections": {
@@ -184,6 +240,39 @@
         [
           {
             "node": "Collect Signals",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect Signals": {
+      "main": [
+        [
+          {
+            "node": "Build Debate Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Debate Payload": {
+      "main": [
+        [
+          {
+            "node": "POST Debate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "POST Debate": {
+      "main": [
+        [
+          {
+            "node": "Format Output",
             "type": "main",
             "index": 0
           }

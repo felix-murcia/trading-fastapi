@@ -123,13 +123,17 @@ def _derive_order(
 
 
 def evaluate(req: RiskEvaluateRequest, equity: float) -> RiskEvaluateResponse:
-    # 1. Voting engine
-    direction, avg_conf = _voting(req.llm_signals)
-    if direction == "skip":
-        return RiskEvaluateResponse(
-            action="skip", entry=0, sl=0, tp=0, volume=0,
-            confidence=avg_conf, reason="voting_no_majority",
-        )
+    # 1. Señal: debate (si disponible) o voting engine como fallback
+    if req.debate and req.debate.signal in ("buy", "sell"):
+        direction = req.debate.signal
+        avg_conf  = req.debate.confidence
+    else:
+        direction, avg_conf = _voting(req.llm_signals)
+        if direction == "skip":
+            return RiskEvaluateResponse(
+                action="skip", entry=0, sl=0, tp=0, volume=0,
+                confidence=avg_conf, reason="voting_no_majority",
+            )
 
     # 2. Posición existente en el par
     if _has_position_in_pair(req.best_pair, req.positions):

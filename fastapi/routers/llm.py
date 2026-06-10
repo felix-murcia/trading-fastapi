@@ -6,8 +6,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from services.llm_client import call_llm
-from services import llm_context
+from services import llm_context, debate_engine
 from models.llm import LLMContextRequest, LLMContextResponse
+from models.debate import DebateRequest, DebateResponse
 from .deps import verify_token
 
 logger = logging.getLogger(__name__)
@@ -79,3 +80,18 @@ async def prepare_context(
 ) -> LLMContextResponse:
     """Prepara contexto completo para LLM agents con trazabilidad."""
     return await llm_context.prepare_context(req)
+
+
+@router.post("/debate", response_model=DebateResponse)
+async def debate(
+    req: DebateRequest,
+    _: None = Depends(verify_token),
+) -> DebateResponse:
+    """Debate bull/bear + juez. Devuelve veredicto final con razonamiento."""
+    try:
+        return await debate_engine.run_debate(req)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        logger.error("debate failed cycle=%s: %s", req.cycle_id, exc)
+        raise HTTPException(status_code=502, detail=f"debate_failed:{exc}")

@@ -295,6 +295,10 @@
             {
               "name": "positions",
               "value": "={{ $('Merge Cycle ID').first().json.positions }}"
+            },
+            {
+              "name": "debate",
+              "value": "={{ $('Call LLM Agents').first().json.debate || null }}"
             }
           ]
         },
@@ -597,7 +601,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const risk = $(\"POST Risk Evaluate\").first().json;\nconst exec = $(\"POST Order Execute\").first().json;\nconst pair = $(\"POST Analysis Pairs\").first().json;\nconst action = (risk.action || \"\").toUpperCase();\nconst emoji  = action === \"BUY\" ? \"🟢\" : \"🔴\";\nconst text = emoji + \" *ORDEN EJECUTADA*\\n\"\n  + \"──────────────\\n\"\n  + \"Par: `\" + pair.best_pair + \"`\\n\"\n  + \"Tipo: `\" + action + \"`\\n\"\n  + \"Entry: `\" + risk.entry + \"`\\n\"\n  + \"SL: `\" + risk.sl + \"`\\n\"\n  + \"TP: `\" + risk.tp + \"`\\n\"\n  + \"Vol: `\" + risk.volume + \"` lots\\n\"\n  + \"Conf: `\" + ((risk.confidence||0)*100).toFixed(0) + \"%`\\n\"\n  + \"Ticket: `\" + exec.mt5_order_id + \"`\";\nreturn [{ json: { text } }];"
+        "jsCode": "const risk = $(\"POST Risk Evaluate\").first().json;\nconst exec = $(\"POST Order Execute\").first().json;\nconst pair = $(\"POST Analysis Pairs\").first().json;\nconst action = (risk.action || \"\").toUpperCase();\nconst emoji  = action === \"BUY\" ? \"\ud83d\udfe2\" : \"\ud83d\udd34\";\nconst text = emoji + \" *ORDEN EJECUTADA*\\n\"\n  + \"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\\n\"\n  + \"Par: `\" + pair.best_pair + \"`\\n\"\n  + \"Tipo: `\" + action + \"`\\n\"\n  + \"Entry: `\" + risk.entry + \"`\\n\"\n  + \"SL: `\" + risk.sl + \"`\\n\"\n  + \"TP: `\" + risk.tp + \"`\\n\"\n  + \"Vol: `\" + risk.volume + \"` lots\\n\"\n  + \"Conf: `\" + ((risk.confidence||0)*100).toFixed(0) + \"%`\\n\"\n  + \"Ticket: `\" + exec.mt5_order_id + \"`\";\nreturn [{ json: { text } }];"
       },
       "id": "573912b2-97bf-40f3-83e9-f7583c50bae1",
       "name": "Format Telegram",

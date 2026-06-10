@@ -10,6 +10,12 @@ class LLMSignal(BaseModel):
     parse_error: bool = False
 
 
+class DebateVerdict(BaseModel):
+    signal: str
+    confidence: float
+    reasoning: str = ""
+
+
 class RiskEvaluateRequest(BaseModel):
     cycle_id: str
     best_pair: str
@@ -17,6 +23,7 @@ class RiskEvaluateRequest(BaseModel):
     technical: TechnicalData
     llm_signals: list[LLMSignal]
     positions: list[Position] = []
+    debate: DebateVerdict | None = None
 
 
 class RiskEvaluateResponse(BaseModel):
