@@ -281,6 +281,10 @@
               "value": "={{ $('POST Analysis Pairs').first().json.best_pair }}"
             },
             {
+              "name": "best_pair_score",
+              "value": "={{ $('POST Analysis Pairs').first().json.scores?.[0]?.score ?? 0 }}"
+            },
+            {
               "name": "price",
               "value": "={{ $('POST Analysis Pairs').first().json.price }}"
             },

@@ -20,4 +20,4 @@ async def evaluate_risk(
     if equity <= 0:
         raise HTTPException(status_code=422, detail="equity_zero_or_negative")
 
-    return risk_evaluator.evaluate(req, equity)
+    return await risk_evaluator.evaluate(req, equity)

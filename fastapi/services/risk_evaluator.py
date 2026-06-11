@@ -10,9 +10,14 @@ Responsabilidades:
 - Rechazar si ya hay posición en el par
 """
 
+import logging
+
 from models.risk import RiskEvaluateRequest, RiskEvaluateResponse
 from models.analysis import TechnicalData
+from db.connection import get_pool
 from config import settings
+
+logger = logging.getLogger(__name__)
 
 
 PIP_SIZE = {
@@ -119,11 +124,26 @@ def _derive_order(
     raw_vol = round(raw_vol / 0.01) * 0.01   # paso mínimo de 0.01
     volume  = max(settings.min_volume, min(settings.max_volume, raw_vol))
 
+    logger.info(
+        "[RISK] %s atr=%.5f atr_pips=%.1f sl_pips=%.1f sl_dist=%.5f vol=%.2f ppv=%.4f risk_usd=%.2f",
+        symbol, atr, atr_pips, sl_pips, sl_dist, volume, ppv, volume * sl_pips * ppv,
+    )
+
     return entry, sl, tp, volume
 
 
-def evaluate(req: RiskEvaluateRequest, equity: float) -> RiskEvaluateResponse:
-    # 1. Señal: debate (si disponible) o voting engine como fallback
+async def evaluate(req: RiskEvaluateRequest, equity: float) -> RiskEvaluateResponse:
+    pool = get_pool()
+
+    # 1. Score mínimo del par (filtro de calidad)
+    if req.best_pair_score < settings.min_pair_score:
+        return RiskEvaluateResponse(
+            action="skip", entry=0, sl=0, tp=0, volume=0,
+            confidence=0.0,
+            reason=f"pair_score_too_low:{round(req.best_pair_score, 3)}",
+        )
+
+    # 2. Señal: debate (si disponible) o voting engine como fallback
     if req.debate and req.debate.signal in ("buy", "sell"):
         direction = req.debate.signal
         avg_conf  = req.debate.confidence
@@ -135,14 +155,25 @@ def evaluate(req: RiskEvaluateRequest, equity: float) -> RiskEvaluateResponse:
                 confidence=avg_conf, reason="voting_no_majority",
             )
 
-    # 2. Posición existente en el par
+    # 3. Posición existente — doble check: MT5 (tiempo real) + DB (contra race condition)
     if _has_position_in_pair(req.best_pair, req.positions):
         return RiskEvaluateResponse(
             action="skip", entry=0, sl=0, tp=0, volume=0,
             confidence=avg_conf, reason="position_already_open",
         )
 
-    # 3. Derivar niveles y volumen
+    db_open = await pool.fetchval(
+        "SELECT id FROM orders WHERE symbol=$1 AND status IN ('pending','placed') LIMIT 1",
+        req.best_pair,
+    )
+    if db_open:
+        logger.info("[RISK] Blocked by DB: open order for %s (id=%s)", req.best_pair, db_open)
+        return RiskEvaluateResponse(
+            action="skip", entry=0, sl=0, tp=0, volume=0,
+            confidence=avg_conf, reason="position_already_open_db",
+        )
+
+    # 4. Derivar niveles y volumen
     entry, sl, tp, volume = _derive_order(direction, req.best_pair, req.technical)
 
     return RiskEvaluateResponse(

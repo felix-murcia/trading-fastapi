@@ -19,6 +19,7 @@ class DebateVerdict(BaseModel):
 class RiskEvaluateRequest(BaseModel):
     cycle_id: str
     best_pair: str
+    best_pair_score: float = 0.0
     price: float
     technical: TechnicalData
     llm_signals: list[LLMSignal]
