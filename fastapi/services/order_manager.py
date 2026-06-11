@@ -44,7 +44,7 @@ PIP_SIZE = {
 # (min_pips, max_pips) por símbolo — debe coincidir con SL_PIPS_BOUNDS en risk_evaluator
 SL_LIMITS: dict[str, tuple[float, float]] = {
     "USDJPY": (5.0,  80.0),
-    "XAUUSD": (50.0, 800.0),
+    "XAUUSD": (15.0, 800.0),
 }
 _SL_DEFAULT = (5.0, 80.0)
 

@@ -1,6 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from db.connection import get_pool
+from services import simple_pipeline
+from config import settings
 from .deps import verify_token
 
 router = APIRouter(prefix="/v1/smc", tags=["smc"])
@@ -14,6 +16,7 @@ class SMCSignalIn(BaseModel):
     zone_low: float | None = None
     timeframe: str | None = None
     source: str = "brain_smc_ultimate"
+    signal_id: str | None = None   # nombre del objeto del gráfico (p.ej. QT_L_B_1781172300)
 
 
 class SMCSignalOut(BaseModel):
@@ -49,6 +52,19 @@ async def upsert_signal(
         req.symbol, req.entry_zone, req.direction,
         req.zone_high, req.zone_low, req.timeframe, req.source,
     )
+
+    # Flujo simple: señal → orden directa (sin LLM)
+    # Las protecciones (idempotencia por signal_id, cooldown, validaciones)
+    # están dentro de process_signal — nunca lanza, no rompe el POST del EA.
+    if (
+        settings.simple_pipeline_enabled
+        and req.entry_zone
+        and req.direction in ("buy", "sell")
+    ):
+        await simple_pipeline.process_signal(
+            req.symbol, req.direction, req.signal_id, req.zone_high,
+        )
+
     return SMCSignalOut(**{**dict(row), "received_at": row["received_at"].isoformat()})
 
 

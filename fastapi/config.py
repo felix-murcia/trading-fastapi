@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     atr_sl_multiplier: float = 1.5   # SL = ATR × este factor (M5)
     sl_risk_usd: float = 15.0        # riesgo máximo por operación en USD
     min_pair_score: float = 0.3      # score mínimo del par para operar
+    simple_pipeline_enabled: bool = False   # flujo simple señal → orden (workflowsimple)
+    signal_cooldown_minutes: int = 15       # máx 1 orden por símbolo en esta ventana
+    fixed_volume: float = 0.05              # volumen fijo del flujo simple (todos los pares)
     order_max_age_hours: int = 48
     rr_min: float = 2.0              # R:R fijo 2:1 → TP siempre el doble del SL
     use_provider: str = "openrouter"
