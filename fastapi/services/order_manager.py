@@ -21,16 +21,26 @@ from config import settings
 VALID_RANGES = {
     "EURUSD": (1.05, 1.20),
     "GBPUSD": (1.20, 1.45),
+    "AUDUSD": (0.55, 0.90),
+    "NZDUSD": (0.50, 0.80),
     "USDJPY": (130.0, 175.0),
     "USDCHF": (0.75, 1.05),
+    "USDCAD": (1.20, 1.55),
+    "USDCNH": (6.50, 8.50),
+    "USDSEK": (8.00, 12.00),
     "XAUUSD": (2000.0, 8000.0),
 }
 
 PIP_SIZE = {
     "EURUSD": 0.0001,
     "GBPUSD": 0.0001,
+    "AUDUSD": 0.0001,
+    "NZDUSD": 0.0001,
     "USDJPY": 0.01,
     "USDCHF": 0.0001,
+    "USDCAD": 0.0001,
+    "USDCNH": 0.0001,
+    "USDSEK": 0.0001,
     "XAUUSD": 0.10,
 }
 

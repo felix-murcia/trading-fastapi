@@ -17,12 +17,23 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 PIP_SIZE = {
+    # Forex majors/minors (quote=USD → pip_value fijo $10)
     "EURUSD": 0.0001,
     "GBPUSD": 0.0001,
+    "AUDUSD": 0.0001,
+    "NZDUSD": 0.0001,
+    # Forex (base=USD → pip_value = 10/price)
     "USDJPY": 0.01,
     "USDCHF": 0.0001,
+    "USDCAD": 0.0001,
+    "USDCNH": 0.0001,
+    "USDSEK": 0.0001,
+    # Materias primas
     "XAUUSD": 0.10,
 }
+
+# Pares donde base=USD → pip_value = 10 / price
+_USD_BASE = {"USDJPY", "USDCHF", "USDCAD", "USDCNH", "USDSEK"}
 
 
 def is_supported(symbol: str) -> bool:
@@ -30,11 +41,9 @@ def is_supported(symbol: str) -> bool:
 
 
 def pip_value_per_lot(symbol: str, price: float) -> float:
-    if symbol == "USDJPY":
-        return 1000.0 / price
-    if symbol == "USDCHF":
+    if symbol in _USD_BASE:
         return 10.0 / price
-    return 10.0
+    return 10.0      # quote=USD (EURUSD, GBPUSD, AUDUSD, NZDUSD, XAUUSD)
 
 
 def derive_order(direction: str, symbol: str, price: float) -> tuple[float, float, float, float]:
