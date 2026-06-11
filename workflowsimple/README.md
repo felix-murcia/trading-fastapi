@@ -87,6 +87,90 @@ Distancias resultantes con volumen 0.05:
 
 Sin límite global de posiciones: la exposición queda acotada por el cooldown.
 
+## Endpoint de entrada
+
+**`POST /v1/smc/signal`**
+
+- **Host:** `http://localhost:8090` (desde la red local) o `http://trading-fastapi:8000` (desde Docker)
+- **Header:** `X-Internal-Token: <valor de INTERNAL_TOKEN en .env>`
+- **Content-Type:** `application/json`
+
+### Ejemplo BUY (curl)
+
+```bash
+curl -X POST http://localhost:8090/v1/smc/signal \
+  -H "Content-Type: application/json" \
+  -H "X-Internal-Token: tu_token_aqui" \
+  -d '{
+    "symbol":     "EURUSD",
+    "entry_zone": true,
+    "direction":  "buy",
+    "zone_high":  1.15367,
+    "zone_low":   1.15367,
+    "timeframe":  "M5",
+    "source":     "crystal_liquidity",
+    "signal_id":  "QT_L_B_1781172300"
+  }'
+```
+
+### Ejemplo SELL (curl)
+
+```bash
+curl -X POST http://localhost:8090/v1/smc/signal \
+  -H "Content-Type: application/json" \
+  -H "X-Internal-Token: tu_token_aqui" \
+  -d '{
+    "symbol":     "EURUSD",
+    "entry_zone": true,
+    "direction":  "sell",
+    "zone_high":  1.15379,
+    "zone_low":   1.15379,
+    "timeframe":  "M5",
+    "source":     "crystal_liquidity",
+    "signal_id":  "QT_L_S_1781183400"
+  }'
+```
+
+### Respuesta exitosa (`200 OK`)
+
+```json
+{
+  "symbol":      "EURUSD",
+  "entry_zone":  true,
+  "direction":   "buy",
+  "zone_high":   1.15367,
+  "zone_low":    1.15367,
+  "timeframe":   "M5",
+  "source":      "crystal_liquidity",
+  "received_at": "2026-06-11T10:32:45.123456"
+}
+```
+
+La respuesta es siempre el estado guardado en `smc_signals`. La ejecución de la
+orden es asíncrona: consulta los logs o `audit_log` para confirmar el resultado.
+
+### Respuestas de error
+
+| Código | Causa |
+|--------|-------|
+| `401`  | Token ausente o incorrecto |
+| `422`  | Body malformado (campo requerido ausente o tipo incorrecto) |
+| `500`  | Error interno — revisar `docker logs trading-fastapi` |
+
+### Logs esperados tras una señal ejecutada
+
+```
+[SIZING] EURUSD buy entry=1.15367 sl_pips=30.0 sl=1.15067 tp=1.15967 vol=0.05
+[SIMPLE] ORDER PLACED EURUSD buy ticket=12345 cycle=smc_QT_L_B_1781172300
+```
+
+Si la señal fue descartada (cooldown, duplicado, símbolo no soportado):
+```
+[SIMPLE] REJECTED EURUSD buy reason=cooldown_active
+```
+
+---
+
 ## Activación
 
 Desactivado por defecto. En `.env`:

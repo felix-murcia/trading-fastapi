@@ -1,16 +1,11 @@
 """
 Flujo simple: señal del indicador → orden. Sin LLM, sin candles, sin prices.
 
-Se dispara desde POST /v1/smc/signal (push del EA SignalBridge) cuando
-settings.simple_pipeline_enabled = True. El precio de entrada viene en
-la propia señal (zone_high).
-
 Protecciones (en orden):
-1. Símbolo soportado (tiene pip size definido)
+1. Símbolo soportado
 2. Precio presente en la señal
-3. Idempotencia por signal_id: cycle_id = "smc_<signal_id>" — la misma
-   señal nunca genera dos órdenes (check en order_manager.prepare)
-4. Cooldown por símbolo: máximo 1 orden cada signal_cooldown_minutes
+3. Idempotencia: mismo signal_id nunca genera dos órdenes
+4. Cooldown en memoria: máximo 1 intento por símbolo cada signal_cooldown_minutes
 5. Validación geométrica + SL en rango + duplicado ±1 pip (order_manager)
 """
 
@@ -24,6 +19,9 @@ from services import mt5_client, order_manager, position_sizing
 from config import settings
 
 logger = logging.getLogger(__name__)
+
+# Cooldown en memoria: {symbol: timestamp_ultimo_intento}
+_last_attempt: dict[str, float] = {}
 
 
 async def _audit(cycle_id: str, event: str, data: dict) -> None:
@@ -41,8 +39,8 @@ async def process_signal(
     symbol: str, direction: str, signal_id: str | None, price: float | None,
 ) -> dict:
     """Procesa una señal buy/sell. Devuelve dict con el resultado (nunca lanza)."""
-    pool = get_pool()
-    cycle_id = f"smc_{signal_id}" if signal_id else f"smc_{symbol}_{int(time.time())}"
+    # Incluir símbolo en el cycle_id: el Crystal reutiliza el mismo timestamp en distintos pares
+    cycle_id = f"smc_{symbol}_{signal_id}" if signal_id else f"smc_{symbol}_{int(time.time())}"
 
     try:
         # 1. Símbolo soportado
@@ -54,19 +52,18 @@ async def process_signal(
             await _audit(cycle_id, "simple_skip", {"reason": "no_price_in_signal", "symbol": symbol})
             return {"action": "skip", "reason": "no_price_in_signal"}
 
-        # 3. Cooldown por símbolo
-        recent = await pool.fetchval(
-            "SELECT id FROM orders WHERE symbol=$1 "
-            "AND created_at > NOW() - ($2 || ' minutes')::INTERVAL LIMIT 1",
-            symbol, str(settings.signal_cooldown_minutes),
-        )
-        if recent:
+        # 3. Cooldown en memoria (cubre intentos rechazados, fallidos y exitosos)
+        cooldown_secs = settings.signal_cooldown_minutes * 60
+        last = _last_attempt.get(symbol, 0)
+        if time.time() - last < cooldown_secs:
             return {"action": "skip", "reason": "cooldown_active"}
+        _last_attempt[symbol] = time.time()
 
         # 4. Niveles con riesgo monetario fijo (15€ SL / 30€ TP)
         entry, sl, tp, volume = position_sizing.derive_order(direction, symbol, price)
 
         # 5. Validación + registro en DB (idempotencia, geometría, SL, duplicado)
+        pool = get_pool()
         prep = await order_manager.prepare(OrderPrepareRequest(
             cycle_id=cycle_id, symbol=symbol, type=direction.upper(),
             entry=entry, sl=sl, tp=tp, volume=volume,

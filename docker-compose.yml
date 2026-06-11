@@ -1,34 +1,4 @@
-version: '3.8'
-
-# Topología de red:
-#   n8n       → network_mode: host  → llama a FastAPI en http://localhost:8000
-#   fastapi   → trading-net, puerto 8000 publicado solo en 127.0.0.1
-#   postgres  → trading-net, sin puerto expuesto al host
-#   MT5 EA    → corre en Windows/host, fastapi lo alcanza via host.docker.internal:9999
-
 services:
-  n8n:
-    build: .
-    container_name: n8n
-    restart: unless-stopped
-    network_mode: host
-    environment:
-      - N8N_PORT=5678
-      - N8N_HOST=n8n.nbes.blog
-      - N8N_PROTOCOL=https
-      - WEBHOOK_URL=https://n8n.nbes.blog
-      - N8N_PROXY_TRUST=1
-      - MASSIVE_API_KEY=${MASSIVE_API_KEY}
-      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
-      - N8N_BLOCK_ENV_ACCESS_IN_FUNCTION_NODES=false
-      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
-      - FASTAPI_URL=http://localhost:8090
-      - FASTAPI_INTERNAL_TOKEN=${INTERNAL_TOKEN}
-    env_file:
-      - .env
-    volumes:
-      - n8n_data:/home/node/.n8n
-
   fastapi:
     build: ./fastapi
     container_name: trading-fastapi
@@ -36,7 +6,7 @@ services:
     networks:
       - trading-net
     ports:
-      - "0.0.0.0:8090:8000"             # LAN + localhost; protegido por X-Internal-Token
+      - "0.0.0.0:8090:8000"
     env_file:
       - .env
     environment:
@@ -45,7 +15,7 @@ services:
       - HMAC_SECRET=${HMAC_SECRET}
       - MT5_HTTP_URL=${MT5_HTTP_URL}
     extra_hosts:
-      - "host.docker.internal:host-gateway"   # Linux: resuelve la IP del host
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
@@ -74,5 +44,4 @@ networks:
     driver: bridge
 
 volumes:
-  n8n_data:
   postgres_data:
