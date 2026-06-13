@@ -1,12 +1,14 @@
 """
-Flujo simple: señal del indicador → orden. Sin LLM, sin candles, sin prices.
+Flujo simple: señal del indicador → orden. Sin LLM.
 
-Protecciones (en orden):
+Flujo:
 1. Símbolo soportado
 2. Precio presente en la señal
-3. Idempotencia: mismo signal_id nunca genera dos órdenes
-4. Cooldown en memoria: máximo 1 intento por símbolo cada signal_cooldown_minutes
-5. Validación geométrica + SL en rango + duplicado ±1 pip (order_manager)
+3. Cooldown en memoria: máximo 1 intento por símbolo cada signal_cooldown_minutes
+4. Obtener apertura de vela H1 actual → calcular SL/TP anclados al inicio de vela
+5. Cerrar posición abierta en el símbolo si la hay (señal contraria = flip)
+6. Validación geométrica + registro en DB
+7. Enviar orden a MT5
 """
 
 import json
@@ -59,11 +61,29 @@ async def process_signal(
             return {"action": "skip", "reason": "cooldown_active"}
         _last_attempt[symbol] = time.time()
 
-        # 4. Niveles con riesgo monetario fijo (15€ SL / 30€ TP)
-        entry, sl, tp, volume = position_sizing.derive_order(direction, symbol, price)
+        # 4. Apertura de vela H1 actual → SL al inicio de vela, TP el doble
+        candle_open = await mt5_client.get_candle_open(symbol, timeframe="H1")
+        entry, sl, tp, volume = position_sizing.derive_order_from_candle_open(
+            direction, symbol, price, candle_open
+        )
 
-        # 5. Validación + registro en DB (idempotencia, geometría, SL, duplicado)
+        # 5. Cerrar posición abierta en el símbolo si la hay (flip de señal)
         pool = get_pool()
+        try:
+            positions = await mt5_client.get_positions()
+            open_pos = [p for p in positions.get("open", []) if p["symbol"] == symbol]
+            if open_pos:
+                await mt5_client.close_positions_by_symbol(symbol)
+                await _audit(cycle_id, "simple_position_closed", {
+                    "symbol": symbol, "reason": "signal_flip", "direction": direction,
+                    "closed_tickets": [p["ticket"] for p in open_pos],
+                })
+                logger.info("[SIMPLE] CLOSED %d position(s) on %s before %s entry",
+                            len(open_pos), symbol, direction)
+        except Exception as exc:
+            logger.warning("[SIMPLE] close existing position failed %s: %s", symbol, exc)
+
+        # 6. Validación + registro en DB
         prep = await order_manager.prepare(OrderPrepareRequest(
             cycle_id=cycle_id, symbol=symbol, type=direction.upper(),
             entry=entry, sl=sl, tp=tp, volume=volume,
@@ -74,7 +94,7 @@ async def process_signal(
             })
             return {"action": "skip", "reason": prep.rejection_reason}
 
-        # 6. Enviar a MT5
+        # 7. Enviar orden a MT5
         try:
             result = await mt5_client.place_order(
                 symbol=symbol, order_type=direction.upper(), volume=volume,
@@ -95,6 +115,7 @@ async def process_signal(
         await _audit(cycle_id, "simple_order_placed", {
             "symbol": symbol, "direction": direction, "entry": entry,
             "sl": sl, "tp": tp, "volume": volume, "ticket": ticket,
+            "candle_open": candle_open,
         })
         logger.info("[SIMPLE] ORDER PLACED %s %s entry=%.5f sl=%.5f tp=%.5f vol=%.2f ticket=%s",
                     symbol, direction, entry, sl, tp, volume, ticket)

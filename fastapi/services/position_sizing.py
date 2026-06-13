@@ -41,9 +41,46 @@ def is_supported(symbol: str) -> bool:
 
 
 def pip_value_per_lot(symbol: str, price: float) -> float:
+    if symbol == "USDJPY":
+        return 1000.0 / price   # pip=0.01 → 0.01×100000/price = 1000/price
     if symbol in _USD_BASE:
-        return 10.0 / price
-    return 10.0      # quote=USD (EURUSD, GBPUSD, AUDUSD, NZDUSD, XAUUSD)
+        return 10.0 / price     # pip=0.0001 → 0.0001×100000/price = 10/price
+    return 10.0                 # quote=USD (EURUSD, GBPUSD, AUDUSD, NZDUSD, XAUUSD)
+
+
+def derive_order_from_candle_open(
+    direction: str, symbol: str, entry: float, candle_open: float,
+) -> tuple[float, float, float, float]:
+    """SL = apertura de vela H1. TP = doble. Volumen para riesgo = sl_risk_usd."""
+    pip = PIP_SIZE[symbol]
+    ppv = pip_value_per_lot(symbol, entry)
+
+    sl_dist = abs(entry - candle_open)
+    if sl_dist < pip:
+        sl_dist = pip  # mínimo 1 pip
+
+    sl_pips = sl_dist / pip
+    volume  = settings.sl_risk_usd / (sl_pips * ppv)
+    volume  = max(settings.min_volume, min(settings.max_volume, round(volume, 2)))
+
+    sl_dist = round(sl_pips * pip, 5)
+    tp_dist = round(sl_dist * settings.rr_min, 5)
+
+    if direction == "buy":
+        sl = round(entry - sl_dist, 5)
+        tp = round(entry + tp_dist, 5)
+    else:
+        sl = round(entry + sl_dist, 5)
+        tp = round(entry - tp_dist, 5)
+
+    actual_risk   = round(volume * sl_pips * ppv, 2)
+    actual_reward = round(actual_risk * settings.rr_min, 2)
+
+    logger.info(
+        "[SIZING] %s %s entry=%.5f candle_open=%.5f sl_pips=%.1f vol=%.2f risk=$%.2f reward=$%.2f",
+        symbol, direction, entry, candle_open, sl_pips, volume, actual_risk, actual_reward,
+    )
+    return entry, sl, tp, volume
 
 
 def derive_order(direction: str, symbol: str, price: float) -> tuple[float, float, float, float]:

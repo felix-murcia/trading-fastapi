@@ -120,6 +120,19 @@ async def cancel_order(ticket: int) -> dict:
     return await _delete(f"/api/v1/order/pending/{ticket}")
 
 
+async def get_candle_open(symbol: str, timeframe: str = "H1") -> float:
+    """Devuelve el precio de apertura de la vela actual."""
+    candles = await get_candles(symbol, timeframe, 1)
+    if not candles:
+        raise ValueError(f"No se pudo obtener vela actual para {symbol}")
+    return candles[0]["open"]
+
+
+async def close_positions_by_symbol(symbol: str) -> dict:
+    """Cierra todas las posiciones abiertas de un símbolo."""
+    return await _delete(f"/api/v1/positions/symbol/{symbol}")
+
+
 # ── Normalización ──────────────────────────────────────────────────────────────
 
 def _normalize_positions(raw: list) -> list[dict]:
