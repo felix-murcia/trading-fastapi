@@ -48,16 +48,20 @@ def pip_value_per_lot(symbol: str, price: float) -> float:
     return 10.0                 # quote=USD (EURUSD, GBPUSD, AUDUSD, NZDUSD, XAUUSD)
 
 
+SL_MIN_SPREAD_MULT = 3  # el SL nunca puede quedar a menos de N x spread vigente
+
+
 def derive_order_from_candle_open(
-    direction: str, symbol: str, entry: float, candle_open: float,
+    direction: str, symbol: str, entry: float, candle_open: float, spread: float,
 ) -> tuple[float, float, float, float]:
     """SL = apertura de vela H1. TP = doble. Volumen para riesgo = sl_risk_usd."""
     pip = PIP_SIZE[symbol]
     ppv = pip_value_per_lot(symbol, entry)
 
     sl_dist = abs(entry - candle_open)
-    if sl_dist < pip:
-        sl_dist = pip  # mínimo 1 pip
+    sl_floor = max(pip, SL_MIN_SPREAD_MULT * spread)
+    if sl_dist < sl_floor:
+        sl_dist = sl_floor
 
     sl_pips = sl_dist / pip
     volume  = settings.sl_risk_usd / (sl_pips * ppv)

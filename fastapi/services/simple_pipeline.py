@@ -63,8 +63,9 @@ async def process_signal(
 
         # 4. Apertura de vela H1 actual → SL al inicio de vela, TP el doble
         candle_open = await mt5_client.get_candle_open(symbol, timeframe="H1")
+        spread = await mt5_client.get_spread(symbol)
         entry, sl, tp, volume = position_sizing.derive_order_from_candle_open(
-            direction, symbol, price, candle_open
+            direction, symbol, price, candle_open, spread
         )
 
         # 5. Cerrar posición abierta en el símbolo si la hay (flip de señal)

@@ -56,6 +56,11 @@ async def get_prices() -> dict:
     return result
 
 
+async def get_spread(symbol: str) -> float:
+    data = await _get(f"/api/v1/market/price/{symbol}")
+    return float(data.get("ask", 0.0)) - float(data.get("bid", 0.0))
+
+
 async def get_candles(symbol: str, timeframe: str, count: int) -> list[dict]:
     data = await _get("/api/v1/market/candles/latest", params={
         "symbol_name": symbol, "timeframe": timeframe, "count": count,
