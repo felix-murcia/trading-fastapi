@@ -123,6 +123,6 @@ async def process_signal(
         return {"action": direction, "ticket": ticket, "entry": entry, "sl": sl, "tp": tp, "volume": volume}
 
     except Exception as exc:
-        logger.error("[SIMPLE] pipeline failed %s %s: %s", symbol, direction, exc)
+        logger.error("[SIMPLE] pipeline failed %s %s: %s", symbol, direction, exc, exc_info=True)
         await _audit(cycle_id, "simple_pipeline_error", {"symbol": symbol, "error": str(exc)})
         return {"action": "error", "reason": str(exc)}

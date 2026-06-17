@@ -13,7 +13,7 @@ input string InternalToken    = "90c42a9448defc1f57K8WGdyb3FYaXgTw00gCVKY9JhfFG1
 input int    SendIntervalSec  = 10;
 input string Timeframe        = "H1";
 input string IndicatorName    = "Accurate Buy Sell System";
-input int    EmaPeriod        = 50;
+input int    EmaPeriod        = 9;
 input bool   DiagMode         = false;
 
 //--- Buffers del indicador (descubiertos por diagnóstico)
