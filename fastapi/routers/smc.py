@@ -1,9 +1,13 @@
+import json
+import logging
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from db.connection import get_pool
-from services import simple_pipeline
+from services import simple_pipeline, mt5_client
 from config import settings
 from .deps import verify_token
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/smc", tags=["smc"])
 
@@ -67,6 +71,35 @@ async def upsert_signal(
         )
 
     return SMCSignalOut(**{**dict(row), "received_at": row["received_at"].isoformat()})
+
+
+class CloseRequest(BaseModel):
+    symbol: str
+    reason: str = "ema_cross"
+
+
+@router.post("/close")
+async def close_position(req: CloseRequest, _: None = Depends(verify_token)):
+    try:
+        positions = await mt5_client.get_positions()
+        open_pos = [p for p in positions.get("open", []) if p["symbol"] == req.symbol]
+        if not open_pos:
+            return {"action": "skip", "reason": "no_open_position"}
+        await mt5_client.close_positions_by_symbol(req.symbol)
+        pool = get_pool()
+        await pool.execute(
+            "INSERT INTO audit_log(cycle_id, event, data) VALUES($1,$2,$3)",
+            f"close_{req.symbol}_{req.reason}",
+            "position_closed_ema",
+            json.dumps({"symbol": req.symbol, "reason": req.reason,
+                        "closed_tickets": [p["ticket"] for p in open_pos]}),
+        )
+        logger.info("[CLOSE] %s closed %d position(s) reason=%s",
+                    req.symbol, len(open_pos), req.reason)
+        return {"action": "closed", "tickets": [p["ticket"] for p in open_pos]}
+    except Exception as exc:
+        logger.error("[CLOSE] failed %s: %s", req.symbol, exc, exc_info=True)
+        return {"action": "error", "reason": str(exc)}
 
 
 @router.get("/signal", response_model=SMCSignalOut)

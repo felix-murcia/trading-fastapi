@@ -24,6 +24,9 @@ input bool   DiagMode         = false;
 int    indicatorHandle = INVALID_HANDLE;
 int    emaHandle       = INVALID_HANDLE;
 string lastSentSignalId = "";
+string activeDir       = "";   // "buy" o "sell" si hay posición abierta por este EA
+string activeSymbol    = "";
+bool   closeRequestSent = false;
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -56,7 +59,57 @@ void OnDeinit(const int reason)
    if(emaHandle       != INVALID_HANDLE) IndicatorRelease(emaHandle);
   }
 
-void OnTimer() { SendCurrentSignal(); }
+void OnTimer() { CheckEmaExit(); SendCurrentSignal(); }
+
+//+------------------------------------------------------------------+
+void CheckEmaExit()
+  {
+   if(activeDir == "" || closeRequestSent) return;
+
+   double emaVal[1];
+   if(CopyBuffer(emaHandle, 0, 1, 1, emaVal) <= 0) return;
+   double closeVal = iClose(Symbol(), Period(), 1);
+
+   bool exitBuy  = (activeDir == "buy"  && closeVal < emaVal[0]);
+   bool exitSell = (activeDir == "sell" && closeVal > emaVal[0]);
+
+   if(!exitBuy && !exitSell) return;
+
+   PrintFormat("AccurateBuySellBridge: EXIT %s — close=%.5f ema=%.5f (cruce contra-EMA)",
+               activeDir, closeVal, emaVal[0]);
+
+   int httpCode = PostClose(Symbol(), "ema_cross");
+   if(httpCode == 200)
+     {
+      closeRequestSent = true;
+      activeDir = "";
+      PrintFormat("AccurateBuySellBridge: cierre enviado OK para %s", Symbol());
+     }
+   else
+      PrintFormat("AccurateBuySellBridge: cierre ERROR HTTP %d", httpCode);
+  }
+
+//+------------------------------------------------------------------+
+int PostClose(string symbol, string reason)
+  {
+   char   postData[];
+   char   result[];
+   string headers = "Content-Type: application/json\r\n"
+                    "X-Internal-Token: " + InternalToken + "\r\n";
+
+   string body = StringFormat("{\"symbol\":\"%s\",\"reason\":\"%s\"}", symbol, reason);
+   StringToCharArray(body, postData, 0, StringLen(body));
+   ArrayResize(postData, StringLen(body));
+
+   string url = FastAPI_URL + "/v1/smc/close";
+   string responseHeaders;
+
+   int res = WebRequest("POST", url, headers, 5000, postData, result, responseHeaders);
+   if(res == -1)
+      PrintFormat("AccurateBuySellBridge ERROR: WebRequest close falló code=%d", GetLastError());
+   return res;
+  }
+
 
 //+------------------------------------------------------------------+
 void SendCurrentSignal()
@@ -149,6 +202,9 @@ void SendCurrentSignal()
    if(httpCode == 200)
      {
       lastSentSignalId = signalId;
+      activeDir = dir;
+      activeSymbol = Symbol();
+      closeRequestSent = false;
       PrintFormat("AccurateBuySellBridge: OK — signal_id=%s", signalId);
      }
    else
