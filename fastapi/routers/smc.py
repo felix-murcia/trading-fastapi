@@ -63,6 +63,7 @@ async def upsert_signal(
     ):
         await simple_pipeline.process_signal(
             req.symbol, req.direction, req.signal_id, req.zone_high,
+            signal_price=req.zone_low,
         )
 
     return SMCSignalOut(**{**dict(row), "received_at": row["received_at"].isoformat()})

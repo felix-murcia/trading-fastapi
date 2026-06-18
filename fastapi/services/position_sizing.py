@@ -50,6 +50,13 @@ def pip_value_per_lot(symbol: str, price: float) -> float:
 
 SL_MIN_SPREAD_MULT = 3  # el SL nunca puede quedar a menos de N x spread vigente
 
+# Mínimo de SL en pips por símbolo — coherente con SL_LIMITS de order_manager
+SL_MIN_PIPS: dict[str, float] = {
+    "USDJPY": 5.0,
+    "XAUUSD": 10.0,
+}
+_SL_MIN_PIPS_DEFAULT = 3.0
+
 
 def derive_order_from_candle_open(
     direction: str, symbol: str, entry: float, candle_open: float, spread: float,
@@ -59,7 +66,8 @@ def derive_order_from_candle_open(
     ppv = pip_value_per_lot(symbol, entry)
 
     sl_dist = abs(entry - candle_open)
-    sl_floor = max(pip, SL_MIN_SPREAD_MULT * spread)
+    min_pips = SL_MIN_PIPS.get(symbol, _SL_MIN_PIPS_DEFAULT)
+    sl_floor = max(min_pips * pip, SL_MIN_SPREAD_MULT * spread)
     if sl_dist < sl_floor:
         sl_dist = sl_floor
 

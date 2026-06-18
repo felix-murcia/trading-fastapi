@@ -128,6 +128,7 @@ void SendCurrentSignal()
                        ? SymbolInfoDouble(Symbol(), SYMBOL_ASK)
                        : SymbolInfoDouble(Symbol(), SYMBOL_BID);
 
+   //--- zone_high = precio de entrada, zone_low = precio de la flecha (nivel SL natural)
    string body = StringFormat(
      "{\"symbol\":\"%s\",\"entry_zone\":true,\"direction\":\"%s\","
       "\"zone_high\":%.5f,\"zone_low\":%.5f,"
@@ -136,7 +137,7 @@ void SendCurrentSignal()
      Symbol(),
      dir,
      entryPrice,
-     entryPrice,
+     signalVal,
      Timeframe,
      signalId
    );

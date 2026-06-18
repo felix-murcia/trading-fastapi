@@ -39,6 +39,7 @@ async def _audit(cycle_id: str, event: str, data: dict) -> None:
 
 async def process_signal(
     symbol: str, direction: str, signal_id: str | None, price: float | None,
+    signal_price: float | None = None,
 ) -> dict:
     """Procesa una señal buy/sell. Devuelve dict con el resultado (nunca lanza)."""
     # Incluir símbolo en el cycle_id: el Crystal reutiliza el mismo timestamp en distintos pares
@@ -61,11 +62,14 @@ async def process_signal(
             return {"action": "skip", "reason": "cooldown_active"}
         _last_attempt[symbol] = time.time()
 
-        # 4. Apertura de vela H1 actual → SL al inicio de vela, TP el doble
-        candle_open = await mt5_client.get_candle_open(symbol, timeframe="H1")
+        # 4. SL anclado al precio de la flecha del indicador (si disponible),
+        #    fallback a apertura de vela H1 actual.
+        sl_anchor = signal_price if signal_price and signal_price > 0 else None
+        if not sl_anchor:
+            sl_anchor = await mt5_client.get_candle_open(symbol, timeframe="H1")
         spread = await mt5_client.get_spread(symbol)
         entry, sl, tp, volume = position_sizing.derive_order_from_candle_open(
-            direction, symbol, price, candle_open, spread
+            direction, symbol, price, sl_anchor, spread
         )
 
         # 5. Cerrar posición abierta en el símbolo si la hay (flip de señal)
