@@ -14,6 +14,8 @@ input int    SendIntervalSec  = 10;
 input string Timeframe        = "H1";
 input string IndicatorName    = "Accurate Buy Sell System";
 input int    EmaPeriod        = 50;
+input int    AdxPeriod        = 14;
+input double AdxMinLevel      = 20.0;
 input bool   DiagMode         = false;
 
 //--- Buffers del indicador (descubiertos por diagnóstico)
@@ -24,6 +26,7 @@ input bool   DiagMode         = false;
 int    indicatorHandle = INVALID_HANDLE;
 int    emaHandle       = INVALID_HANDLE;
 int    emaH4Handle     = INVALID_HANDLE;
+int    adxHandle       = INVALID_HANDLE;
 string lastSentSignalId = "";
 string activeDir       = "";   // "buy" o "sell" si hay posición abierta por este EA
 string activeSymbol    = "";
@@ -56,8 +59,17 @@ int OnInit()
       return INIT_FAILED;
      }
 
+   adxHandle = iADX(Symbol(), Period(), AdxPeriod);
+   if(adxHandle == INVALID_HANDLE)
+     {
+      PrintFormat("AccurateBuySellBridge: ERROR no se pudo crear handle ADX(%d) — code=%d",
+                  AdxPeriod, GetLastError());
+      return INIT_FAILED;
+     }
+
    EventSetTimer(SendIntervalSec);
-   Print("AccurateBuySellBridge v1.0 iniciado en ", Symbol(), " TF=", Timeframe, " EMA=", EmaPeriod, " +H4 filter");
+   Print("AccurateBuySellBridge v2.0 iniciado en ", Symbol(), " TF=", Timeframe,
+         " EMA=", EmaPeriod, " +H4 +ADX(", AdxPeriod, ")>", AdxMinLevel);
    return INIT_SUCCEEDED;
   }
 
@@ -67,6 +79,7 @@ void OnDeinit(const int reason)
    if(indicatorHandle != INVALID_HANDLE) IndicatorRelease(indicatorHandle);
    if(emaHandle       != INVALID_HANDLE) IndicatorRelease(emaHandle);
    if(emaH4Handle     != INVALID_HANDLE) IndicatorRelease(emaH4Handle);
+   if(adxHandle       != INVALID_HANDLE) IndicatorRelease(adxHandle);
   }
 
 void OnTimer() { CheckEmaExit(); SendCurrentSignal(); }
@@ -193,6 +206,20 @@ void SendCurrentSignal()
      {
       if(DiagMode) PrintFormat("AccurateBuySellBridge: SELL descartado por filtro EMA H4 (price=%.5f >= emaH4=%.5f)",
                                 priceNow, emaH4Val[0]);
+      return;
+     }
+
+   //--- Filtro ADX: no operar en mercado lateral
+   double adxVal[1];
+   if(CopyBuffer(adxHandle, 0, 1, 1, adxVal) <= 0)
+     {
+      if(DiagMode) Print("AccurateBuySellBridge: sin datos de ADX, señal descartada");
+      return;
+     }
+   if(adxVal[0] < AdxMinLevel)
+     {
+      if(DiagMode) PrintFormat("AccurateBuySellBridge: señal descartada por ADX bajo (%.1f < %.1f) — mercado lateral",
+                                adxVal[0], AdxMinLevel);
       return;
      }
 
