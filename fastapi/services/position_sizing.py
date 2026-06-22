@@ -57,6 +57,10 @@ _SL_MIN_PIPS_DEFAULT = 3.0
 
 SL_EMERGENCY_MULT = 3  # SL de emergencia = N × distancia de la flecha
 
+SL_RISK_OVERRIDE: dict[str, float] = {
+    "XAUUSD": 15.0,
+}
+
 
 def derive_order_from_candle_open(
     direction: str, symbol: str, entry: float, candle_open: float, spread: float,
@@ -73,7 +77,8 @@ def derive_order_from_candle_open(
 
     sl_dist = round(base_dist * SL_EMERGENCY_MULT, 5)
     sl_pips = sl_dist / pip
-    volume  = settings.sl_risk_usd / (sl_pips * ppv)
+    risk_usd = SL_RISK_OVERRIDE.get(symbol, settings.sl_risk_usd)
+    volume  = risk_usd / (sl_pips * ppv)
     volume  = max(settings.min_volume, min(settings.max_volume, round(volume, 2)))
 
     if direction == "buy":

@@ -31,6 +31,9 @@ string lastSentSignalId = "";
 string activeDir       = "";   // "buy" o "sell" si hay posición abierta por este EA
 string activeSymbol    = "";
 bool   closeRequestSent = false;
+double activeEntry     = 0;    // precio de entrada de la posición activa
+double activeTrailDist = 0;    // distancia de trailing = abs(entry - signalVal)
+bool   breakEvenDone   = false;
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -82,7 +85,116 @@ void OnDeinit(const int reason)
    if(adxHandle       != INVALID_HANDLE) IndicatorRelease(adxHandle);
   }
 
-void OnTimer() { CheckEmaExit(); SendCurrentSignal(); }
+void OnTimer() { ManageTrailing(); CheckEmaExit(); SendCurrentSignal(); }
+
+//+------------------------------------------------------------------+
+void ManageTrailing()
+  {
+   if(activeDir == "" || activeTrailDist <= 0) return;
+
+   double bid = SymbolInfoDouble(Symbol(), SYMBOL_BID);
+   double ask = SymbolInfoDouble(Symbol(), SYMBOL_ASK);
+   double point = SymbolInfoDouble(Symbol(), SYMBOL_POINT);
+
+   //--- Buscar la posición abierta por este EA
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      if(PositionGetSymbol(i) != Symbol()) continue;
+
+      ulong  ticket   = PositionGetInteger(POSITION_TICKET);
+      double posSL    = PositionGetDouble(POSITION_SL);
+      double posTP    = PositionGetDouble(POSITION_TP);
+      long   posType  = PositionGetInteger(POSITION_TYPE);
+
+      if(activeDir == "buy" && posType == POSITION_TYPE_BUY)
+        {
+         double profit = bid - activeEntry;
+
+         //--- Fase 1: breakeven cuando profit >= trailDist
+         if(!breakEvenDone && profit >= activeTrailDist)
+           {
+            double newSL = activeEntry + point;  // 1 point por encima para cubrir spread
+            if(newSL > posSL)
+              {
+               MqlTradeRequest  req = {};
+               MqlTradeResult   res = {};
+               req.action    = TRADE_ACTION_SLTP;
+               req.position  = ticket;
+               req.symbol    = Symbol();
+               req.sl        = NormalizeDouble(newSL, (int)SymbolInfoInteger(Symbol(), SYMBOL_DIGITS));
+               req.tp        = posTP;
+               if(OrderSend(req, res))
+                 {
+                  breakEvenDone = true;
+                  PrintFormat("AccurateBuySellBridge: BREAKEVEN BUY sl=%.5f", newSL);
+                 }
+              }
+           }
+
+         //--- Fase 2: trailing — arrastrar SL manteniendo trailDist detrás del precio
+         if(breakEvenDone && profit > activeTrailDist)
+           {
+            double newSL = NormalizeDouble(bid - activeTrailDist, (int)SymbolInfoInteger(Symbol(), SYMBOL_DIGITS));
+            if(newSL > posSL + point)
+              {
+               MqlTradeRequest  req = {};
+               MqlTradeResult   res = {};
+               req.action    = TRADE_ACTION_SLTP;
+               req.position  = ticket;
+               req.symbol    = Symbol();
+               req.sl        = newSL;
+               req.tp        = posTP;
+               if(OrderSend(req, res))
+                  PrintFormat("AccurateBuySellBridge: TRAIL BUY sl=%.5f (bid=%.5f)", newSL, bid);
+              }
+           }
+        }
+
+      if(activeDir == "sell" && posType == POSITION_TYPE_SELL)
+        {
+         double profit = activeEntry - ask;
+
+         if(!breakEvenDone && profit >= activeTrailDist)
+           {
+            double newSL = activeEntry - point;
+            if(newSL < posSL)
+              {
+               MqlTradeRequest  req = {};
+               MqlTradeResult   res = {};
+               req.action    = TRADE_ACTION_SLTP;
+               req.position  = ticket;
+               req.symbol    = Symbol();
+               req.sl        = NormalizeDouble(newSL, (int)SymbolInfoInteger(Symbol(), SYMBOL_DIGITS));
+               req.tp        = posTP;
+               if(OrderSend(req, res))
+                 {
+                  breakEvenDone = true;
+                  PrintFormat("AccurateBuySellBridge: BREAKEVEN SELL sl=%.5f", newSL);
+                 }
+              }
+           }
+
+         if(breakEvenDone && profit > activeTrailDist)
+           {
+            double newSL = NormalizeDouble(ask + activeTrailDist, (int)SymbolInfoInteger(Symbol(), SYMBOL_DIGITS));
+            if(newSL < posSL - point)
+              {
+               MqlTradeRequest  req = {};
+               MqlTradeResult   res = {};
+               req.action    = TRADE_ACTION_SLTP;
+               req.position  = ticket;
+               req.symbol    = Symbol();
+               req.sl        = newSL;
+               req.tp        = posTP;
+               if(OrderSend(req, res))
+                  PrintFormat("AccurateBuySellBridge: TRAIL SELL sl=%.5f (ask=%.5f)", newSL, ask);
+              }
+           }
+        }
+      break;  // solo gestionamos una posición por símbolo
+     }
+  }
+
 
 //+------------------------------------------------------------------+
 void CheckEmaExit()
@@ -264,6 +376,9 @@ void SendCurrentSignal()
       activeDir = dir;
       activeSymbol = Symbol();
       closeRequestSent = false;
+      activeEntry = entryPrice;
+      activeTrailDist = MathAbs(entryPrice - signalVal);
+      breakEvenDone = false;
       PrintFormat("AccurateBuySellBridge: OK — signal_id=%s", signalId);
      }
    else
