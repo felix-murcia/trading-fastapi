@@ -13,7 +13,7 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "XAUUSD"]
+SYMBOLS = ["EURUSD", "GBPUSD", "AUDUSD", "NZDUSD", "USDJPY", "USDCHF", "XAUUSD"]
 
 
 async def _get(path: str, params: dict | None = None) -> any:

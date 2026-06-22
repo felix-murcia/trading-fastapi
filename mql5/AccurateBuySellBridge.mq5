@@ -13,7 +13,7 @@ input string InternalToken    = "90c42a9448defc1f57K8WGdyb3FYaXgTw00gCVKY9JhfFG1
 input int    SendIntervalSec  = 10;
 input string Timeframe        = "H1";
 input string IndicatorName    = "Accurate Buy Sell System";
-input int    EmaPeriod        = 9;
+input int    EmaPeriod        = 50;
 input bool   DiagMode         = false;
 
 //--- Buffers del indicador (descubiertos por diagnóstico)
@@ -23,6 +23,7 @@ input bool   DiagMode         = false;
 //--- Estado interno
 int    indicatorHandle = INVALID_HANDLE;
 int    emaHandle       = INVALID_HANDLE;
+int    emaH4Handle     = INVALID_HANDLE;
 string lastSentSignalId = "";
 string activeDir       = "";   // "buy" o "sell" si hay posición abierta por este EA
 string activeSymbol    = "";
@@ -47,8 +48,16 @@ int OnInit()
       return INIT_FAILED;
      }
 
+   emaH4Handle = iMA(Symbol(), PERIOD_H4, EmaPeriod, 0, MODE_EMA, PRICE_CLOSE);
+   if(emaH4Handle == INVALID_HANDLE)
+     {
+      PrintFormat("AccurateBuySellBridge: ERROR no se pudo crear handle EMA H4(%d) — code=%d",
+                  EmaPeriod, GetLastError());
+      return INIT_FAILED;
+     }
+
    EventSetTimer(SendIntervalSec);
-   Print("AccurateBuySellBridge v1.0 iniciado en ", Symbol(), " TF=", Timeframe, " EMA=", EmaPeriod);
+   Print("AccurateBuySellBridge v1.0 iniciado en ", Symbol(), " TF=", Timeframe, " EMA=", EmaPeriod, " +H4 filter");
    return INIT_SUCCEEDED;
   }
 
@@ -57,6 +66,7 @@ void OnDeinit(const int reason)
    EventKillTimer();
    if(indicatorHandle != INVALID_HANDLE) IndicatorRelease(indicatorHandle);
    if(emaHandle       != INVALID_HANDLE) IndicatorRelease(emaHandle);
+   if(emaH4Handle     != INVALID_HANDLE) IndicatorRelease(emaH4Handle);
   }
 
 void OnTimer() { CheckEmaExit(); SendCurrentSignal(); }
@@ -160,10 +170,32 @@ void SendCurrentSignal()
      }
    if(dir == "sell" && closeVal >= emaVal[0])
      {
-      if(DiagMode) PrintFormat("AccurateBuySellBridge: SELL descartado por filtro EMA (close=%.5f >= ema=%.5f)",
+      if(DiagMode) PrintFormat("AccurateBuySellBridge: SELL descartado por filtro EMA H1 (close=%.5f >= ema=%.5f)",
                                 closeVal, emaVal[0]);
       return;
      }
+
+   //--- Filtro EMA H4: la tendencia del timeframe superior debe confirmar la dirección
+   double emaH4Val[1];
+   if(CopyBuffer(emaH4Handle, 0, 0, 1, emaH4Val) <= 0)
+     {
+      if(DiagMode) Print("AccurateBuySellBridge: sin datos de EMA H4, señal descartada");
+      return;
+     }
+   double priceNow = SymbolInfoDouble(Symbol(), SYMBOL_BID);
+   if(dir == "buy" && priceNow <= emaH4Val[0])
+     {
+      if(DiagMode) PrintFormat("AccurateBuySellBridge: BUY descartado por filtro EMA H4 (price=%.5f <= emaH4=%.5f)",
+                                priceNow, emaH4Val[0]);
+      return;
+     }
+   if(dir == "sell" && priceNow >= emaH4Val[0])
+     {
+      if(DiagMode) PrintFormat("AccurateBuySellBridge: SELL descartado por filtro EMA H4 (price=%.5f >= emaH4=%.5f)",
+                                priceNow, emaH4Val[0]);
+      return;
+     }
+
    datetime barTime  = iTime(Symbol(), Period(), 1);
 
    //--- signal_id único por vela+dirección (equivalente al nombre de objeto en Crystal)

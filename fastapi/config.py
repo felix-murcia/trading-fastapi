@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     signal_cooldown_minutes: int = 60     # H1: 1 vela = 60 min
     sl_risk_usd: float = 15.0
     sl_pct: float = 0.001                 # SL = 0.1% del precio de entrada
-    rr_min: float = 2.0
+    rr_min: float = 1.0
 
     class Config:
         env_file = "/app/.env"

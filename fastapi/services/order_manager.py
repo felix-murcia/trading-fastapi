@@ -79,12 +79,16 @@ async def prepare(req: OrderPrepareRequest) -> OrderPrepareResponse:
     if not (lo <= req.entry <= hi):
         return _reject(f"entry_out_of_range:{req.entry}")
 
-    # 3. Geometría
+    # 3. Geometría (tp=0 = sin take profit, permitido)
     if req.type == "BUY":
-        if not (req.sl < req.entry < req.tp):
+        if not (req.sl < req.entry):
+            return _reject("invalid_geometry_buy")
+        if req.tp != 0 and req.tp <= req.entry:
             return _reject("invalid_geometry_buy")
     elif req.type == "SELL":
-        if not (req.tp < req.entry < req.sl):
+        if not (req.entry < req.sl):
+            return _reject("invalid_geometry_sell")
+        if req.tp != 0 and req.tp >= req.entry:
             return _reject("invalid_geometry_sell")
     else:
         return _reject(f"unknown_order_type:{req.type}")
