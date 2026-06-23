@@ -208,17 +208,35 @@ void CheckEmaExit()
    bool exitBuy  = (activeDir == "buy"  && closeVal < emaVal[0]);
    bool exitSell = (activeDir == "sell" && closeVal > emaVal[0]);
 
-   if(!exitBuy && !exitSell) return;
+   //--- Salida por ADX: tendencia agotada (<20) o sobreextendida (>50)
+   string exitReason = "";
+   if(exitBuy || exitSell)
+     {
+      exitReason = "ema_cross";
+     }
+   else
+     {
+      double adxVal[1];
+      if(CopyBuffer(adxHandle, 0, 1, 1, adxVal) > 0)
+        {
+         if(adxVal[0] < AdxMinLevel)
+            exitReason = StringFormat("adx_low_%.1f", adxVal[0]);
+         else if(adxVal[0] > 50.0)
+            exitReason = StringFormat("adx_high_%.1f", adxVal[0]);
+        }
+     }
 
-   PrintFormat("AccurateBuySellBridge: EXIT %s — close=%.5f ema=%.5f (cruce contra-EMA)",
-               activeDir, closeVal, emaVal[0]);
+   if(exitReason == "") return;
 
-   int httpCode = PostClose(Symbol(), "ema_cross");
+   PrintFormat("AccurateBuySellBridge: EXIT %s — reason=%s close=%.5f ema=%.5f",
+               activeDir, exitReason, closeVal, emaVal[0]);
+
+   int httpCode = PostClose(Symbol(), exitReason);
    if(httpCode == 200)
      {
       closeRequestSent = true;
       activeDir = "";
-      PrintFormat("AccurateBuySellBridge: cierre enviado OK para %s", Symbol());
+      PrintFormat("AccurateBuySellBridge: cierre enviado OK para %s reason=%s", Symbol(), exitReason);
      }
    else
       PrintFormat("AccurateBuySellBridge: cierre ERROR HTTP %d", httpCode);
