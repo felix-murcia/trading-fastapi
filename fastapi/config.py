@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     sl_risk_usd: float = 15.0
     sl_pct: float = 0.001                 # SL = 0.1% del precio de entrada
     rr_min: float = 1.0
+    news_filter_enabled: bool = True
+    news_blackout_minutes: int = 15       # ±N min alrededor de noticias High impact
 
     class Config:
         env_file = "/app/.env"

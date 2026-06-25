@@ -5,10 +5,11 @@ Flujo:
 1. Símbolo soportado
 2. Precio presente en la señal
 3. Cooldown en memoria: máximo 1 intento por símbolo cada signal_cooldown_minutes
-4. Obtener apertura de vela H1 actual → calcular SL/TP anclados al inicio de vela
-5. Cerrar posición abierta en el símbolo si la hay (señal contraria = flip)
-6. Validación geométrica + registro en DB
-7. Enviar orden a MT5
+4. Filtro de noticias fundamentales (±news_blackout_minutes)
+5. Obtener apertura de vela H1 actual → calcular SL/TP anclados al inicio de vela
+6. Cerrar posición abierta en el símbolo si la hay (señal contraria = flip)
+7. Validación geométrica + registro en DB
+8. Enviar orden a MT5
 """
 
 import json
@@ -17,7 +18,7 @@ import time
 
 from db.connection import get_pool
 from models.orders import OrderPrepareRequest
-from services import mt5_client, order_manager, position_sizing
+from services import mt5_client, order_manager, position_sizing, news_filter
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -62,7 +63,16 @@ async def process_signal(
             return {"action": "skip", "reason": "cooldown_active"}
         _last_attempt[symbol] = time.time()
 
-        # 4. SL anclado al precio de la flecha del indicador (si disponible),
+        # 4. Filtro de noticias fundamentales
+        blackout, event_name = await news_filter.is_news_blackout(symbol)
+        if blackout:
+            await _audit(cycle_id, "simple_skip", {
+                "reason": "news_blackout", "event": event_name, "symbol": symbol,
+            })
+            logger.info("[SIMPLE] SKIP %s — news blackout: %s", symbol, event_name)
+            return {"action": "skip", "reason": f"news_blackout:{event_name}"}
+
+        # 5. SL anclado al precio de la flecha del indicador (si disponible),
         #    fallback a apertura de vela H1 actual.
         sl_anchor = signal_price if signal_price and signal_price > 0 else None
         if not sl_anchor:
@@ -72,7 +82,7 @@ async def process_signal(
             direction, symbol, price, sl_anchor, spread
         )
 
-        # 5. Cerrar posición abierta en el símbolo si la hay (flip de señal)
+        # 6. Cerrar posición abierta en el símbolo si la hay (flip de señal)
         pool = get_pool()
         try:
             positions = await mt5_client.get_positions()
@@ -88,7 +98,7 @@ async def process_signal(
         except Exception as exc:
             logger.warning("[SIMPLE] close existing position failed %s: %s", symbol, exc)
 
-        # 6. Validación + registro en DB
+        # 7. Validación + registro en DB
         prep = await order_manager.prepare(OrderPrepareRequest(
             cycle_id=cycle_id, symbol=symbol, type=direction.upper(),
             entry=entry, sl=sl, tp=tp, volume=volume,
@@ -99,7 +109,7 @@ async def process_signal(
             })
             return {"action": "skip", "reason": prep.rejection_reason}
 
-        # 7. Enviar orden a MT5
+        # 8. Enviar orden a MT5
         try:
             result = await mt5_client.place_order(
                 symbol=symbol, order_type=direction.upper(), volume=volume,
@@ -120,7 +130,7 @@ async def process_signal(
         await _audit(cycle_id, "simple_order_placed", {
             "symbol": symbol, "direction": direction, "entry": entry,
             "sl": sl, "tp": tp, "volume": volume, "ticket": ticket,
-            "candle_open": candle_open,
+            "sl_anchor": sl_anchor,
         })
         logger.info("[SIMPLE] ORDER PLACED %s %s entry=%.5f sl=%.5f tp=%.5f vol=%.2f ticket=%s",
                     symbol, direction, entry, sl, tp, volume, ticket)

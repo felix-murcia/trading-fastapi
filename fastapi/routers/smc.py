@@ -1,9 +1,10 @@
 import json
 import logging
+import time
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from db.connection import get_pool
-from services import simple_pipeline, mt5_client
+from services import simple_pipeline, mt5_client, news_filter
 from config import settings
 from .deps import verify_token
 
@@ -100,6 +101,55 @@ async def close_position(req: CloseRequest, _: None = Depends(verify_token)):
     except Exception as exc:
         logger.error("[CLOSE] failed %s: %s", req.symbol, exc, exc_info=True)
         return {"action": "error", "reason": str(exc)}
+
+
+@router.post("/news-check")
+async def news_check(_: None = Depends(verify_token)):
+    """Cierre proactivo de posiciones antes de noticias de alto impacto.
+    Llamar desde n8n cada 5 min."""
+    if not settings.news_filter_enabled:
+        return {"action": "skip", "reason": "news_filter_disabled"}
+
+    try:
+        positions = await mt5_client.get_positions()
+        open_symbols = list({p["symbol"] for p in positions.get("open", [])})
+    except Exception as exc:
+        logger.error("[NEWS-CHECK] Failed to get positions: %s", exc)
+        return {"action": "error", "reason": str(exc)}
+
+    if not open_symbols:
+        return {"action": "skip", "reason": "no_open_positions"}
+
+    upcoming = await news_filter.get_upcoming_news(open_symbols)
+    if not upcoming:
+        return {"action": "skip", "reason": "no_upcoming_news"}
+
+    closed = []
+    for event in upcoming:
+        for sym in event["affected_symbols"]:
+            if sym not in open_symbols:
+                continue
+            try:
+                await mt5_client.close_positions_by_symbol(sym)
+                pool = get_pool()
+                await pool.execute(
+                    "INSERT INTO audit_log(cycle_id, event, data) VALUES($1,$2,$3)",
+                    f"news_close_{sym}_{int(time.time())}",
+                    "position_closed_news",
+                    json.dumps({"symbol": sym, "event": event["title"],
+                                "time_utc": event["time_utc"],
+                                "minutes_until": event["minutes_until"]}),
+                )
+                closed.append({"symbol": sym, "event": event["title"],
+                               "minutes_until": event["minutes_until"]})
+                open_symbols.remove(sym)
+                logger.info("[NEWS-CHECK] Closed %s — '%s' in %.0f min",
+                            sym, event["title"], event["minutes_until"])
+            except Exception as exc:
+                logger.error("[NEWS-CHECK] Failed to close %s: %s", sym, exc)
+
+    return {"action": "closed" if closed else "skip",
+            "closed": closed, "upcoming_events": upcoming}
 
 
 @router.get("/signal", response_model=SMCSignalOut)

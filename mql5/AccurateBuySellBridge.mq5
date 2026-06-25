@@ -34,6 +34,8 @@ bool   closeRequestSent = false;
 double activeEntry     = 0;    // precio de entrada de la posición activa
 double activeTrailDist = 0;    // distancia de trailing = abs(entry - signalVal)
 bool   breakEvenDone   = false;
+int    newsCheckCounter = 0;   // contador para llamar news-check cada ~5 min
+#define NEWS_CHECK_INTERVAL 30 // cada 30 ticks × 10s = 5 min
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -85,7 +87,7 @@ void OnDeinit(const int reason)
    if(adxHandle       != INVALID_HANDLE) IndicatorRelease(adxHandle);
   }
 
-void OnTimer() { ManageTrailing(); CheckEmaExit(); SendCurrentSignal(); }
+void OnTimer() { ManageTrailing(); CheckNewsExit(); CheckEmaExit(); SendCurrentSignal(); }
 
 //+------------------------------------------------------------------+
 void ManageTrailing()
@@ -195,6 +197,50 @@ void ManageTrailing()
      }
   }
 
+
+//+------------------------------------------------------------------+
+void CheckNewsExit()
+  {
+   newsCheckCounter++;
+   if(newsCheckCounter < NEWS_CHECK_INTERVAL) return;
+   newsCheckCounter = 0;
+
+   char   postData[];
+   char   result[];
+   string headers = "Content-Type: application/json\r\n"
+                    "X-Internal-Token: " + InternalToken + "\r\n";
+
+   // POST vacío — el endpoint no necesita body
+   string body = "{}";
+   StringToCharArray(body, postData, 0, StringLen(body));
+   ArrayResize(postData, StringLen(body));
+
+   string url = FastAPI_URL + "/v1/smc/news-check";
+   string responseHeaders;
+
+   int res = WebRequest("POST", url, headers, 5000, postData, result, responseHeaders);
+   if(res == 200)
+     {
+      string response = CharArrayToString(result);
+      // Si el servidor cerró posiciones, resetear estado del EA
+      if(StringFind(response, "\"action\":\"closed\"") >= 0)
+        {
+         PrintFormat("AccurateBuySellBridge: NEWS-CHECK cerró posiciones — reset estado");
+         activeDir = "";
+         activeSymbol = "";
+         closeRequestSent = false;
+         activeEntry = 0;
+         activeTrailDist = 0;
+         breakEvenDone = false;
+        }
+      else if(DiagMode)
+         PrintFormat("AccurateBuySellBridge: NEWS-CHECK ok — %s", response);
+     }
+   else if(res == -1)
+      PrintFormat("AccurateBuySellBridge: NEWS-CHECK WebRequest falló code=%d", GetLastError());
+   else if(DiagMode)
+      PrintFormat("AccurateBuySellBridge: NEWS-CHECK HTTP %d", res);
+  }
 
 //+------------------------------------------------------------------+
 void CheckEmaExit()
