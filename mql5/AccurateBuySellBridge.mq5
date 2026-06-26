@@ -16,6 +16,7 @@ input string IndicatorName    = "Accurate Buy Sell System";
 input int    EmaPeriod        = 50;
 input int    AdxPeriod        = 14;
 input double AdxMinLevel      = 20.0;
+input bool   UseEmaH4Filter   = false;   // Filtro EMA H4: false = deshabilitado
 input bool   DiagMode         = false;
 
 //--- Buffers del indicador (descubiertos por diagnóstico)
@@ -73,8 +74,9 @@ int OnInit()
      }
 
    EventSetTimer(SendIntervalSec);
-   Print("AccurateBuySellBridge v2.0 iniciado en ", Symbol(), " TF=", Timeframe,
-         " EMA=", EmaPeriod, " +H4 +ADX(", AdxPeriod, ")>", AdxMinLevel);
+   Print("AccurateBuySellBridge v2.1 iniciado en ", Symbol(), " TF=", Timeframe,
+         " EMA=", EmaPeriod, (UseEmaH4Filter ? " +H4" : " H4=OFF"),
+         " +ADX(", AdxPeriod, ")>", AdxMinLevel);
    return INIT_SUCCEEDED;
   }
 
@@ -365,24 +367,27 @@ void SendCurrentSignal()
      }
 
    //--- Filtro EMA H4: la tendencia del timeframe superior debe confirmar la dirección
-   double emaH4Val[1];
-   if(CopyBuffer(emaH4Handle, 0, 0, 1, emaH4Val) <= 0)
+   if(UseEmaH4Filter)
      {
-      if(DiagMode) Print("AccurateBuySellBridge: sin datos de EMA H4, señal descartada");
-      return;
-     }
-   double priceNow = SymbolInfoDouble(Symbol(), SYMBOL_BID);
-   if(dir == "buy" && priceNow <= emaH4Val[0])
-     {
-      if(DiagMode) PrintFormat("AccurateBuySellBridge: BUY descartado por filtro EMA H4 (price=%.5f <= emaH4=%.5f)",
-                                priceNow, emaH4Val[0]);
-      return;
-     }
-   if(dir == "sell" && priceNow >= emaH4Val[0])
-     {
-      if(DiagMode) PrintFormat("AccurateBuySellBridge: SELL descartado por filtro EMA H4 (price=%.5f >= emaH4=%.5f)",
-                                priceNow, emaH4Val[0]);
-      return;
+      double emaH4Val[1];
+      if(CopyBuffer(emaH4Handle, 0, 0, 1, emaH4Val) <= 0)
+        {
+         if(DiagMode) Print("AccurateBuySellBridge: sin datos de EMA H4, señal descartada");
+         return;
+        }
+      double priceNow = SymbolInfoDouble(Symbol(), SYMBOL_BID);
+      if(dir == "buy" && priceNow <= emaH4Val[0])
+        {
+         if(DiagMode) PrintFormat("AccurateBuySellBridge: BUY descartado por filtro EMA H4 (price=%.5f <= emaH4=%.5f)",
+                                   priceNow, emaH4Val[0]);
+         return;
+        }
+      if(dir == "sell" && priceNow >= emaH4Val[0])
+        {
+         if(DiagMode) PrintFormat("AccurateBuySellBridge: SELL descartado por filtro EMA H4 (price=%.5f >= emaH4=%.5f)",
+                                   priceNow, emaH4Val[0]);
+         return;
+        }
      }
 
    //--- Filtro ADX: no operar en mercado lateral
