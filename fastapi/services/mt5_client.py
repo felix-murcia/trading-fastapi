@@ -100,18 +100,14 @@ async def get_positions() -> dict:
 async def place_order(symbol: str, order_type: str, volume: float,
                       price: float, sl: float, tp: float,
                       comment: str = "") -> dict:
-    # /api/v1/order/market tiene un bug en el servidor (stop_loss kwarg no reconocido).
-    # Usamos /api/v1/order/pending con el precio actual del EA: MT5 ejecuta
-    # inmediatamente una BUY_LIMIT/SELL_LIMIT al precio de mercado.
     body = {
         "symbol":      symbol,
         "type":        order_type,
         "volume":      volume,
-        "price":       price,
         "stop_loss":   sl,
         "take_profit": tp,
     }
-    result = await _post("/api/v1/order/pending", body)
+    result = await _post("/api/v1/order/market", body)
     data = result.get("data", [])
     ticket = data[2] if isinstance(data, list) and len(data) > 2 else result.get("id", result.get("ticket", 0))
     return {"ticket": ticket}
