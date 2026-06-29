@@ -1,3 +1,5 @@
+name: trading
+
 services:
   fastapi:
     build: ./fastapi

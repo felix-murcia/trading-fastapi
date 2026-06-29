@@ -106,7 +106,7 @@ async def close_position(req: CloseRequest, _: None = Depends(verify_token)):
 @router.post("/news-check")
 async def news_check(_: None = Depends(verify_token)):
     """Cierre proactivo de posiciones antes de noticias de alto impacto.
-    Llamar desde n8n cada 5 min."""
+    El EA llama a este endpoint cada ~5 min."""
     if not settings.news_filter_enabled:
         return {"action": "skip", "reason": "news_filter_disabled"}
 

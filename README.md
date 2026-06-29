@@ -1,7 +1,7 @@
 # Sistema de Trading Automatizado
 
 Pipeline directo: **EA (MQL5) → FastAPI → MetaTrader MCP Server**.
-Sin n8n, sin LLM, sin orquestador externo.
+Sin orquestador externo, sin LLM.
 
 ## Arquitectura
 
