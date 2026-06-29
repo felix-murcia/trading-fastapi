@@ -5,7 +5,7 @@ class Settings(BaseSettings):
     database_url: str
     internal_token: str
     hmac_secret: str
-    mt5_http_url: str = "http://100.81.112.95:8000"
+    mt5_http_url: str = "http://localhost:8000"
     mt5_http_timeout: float = 10.0
     min_volume: float = 0.01
     max_volume: float = 0.50

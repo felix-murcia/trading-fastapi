@@ -7,8 +7,8 @@
 #property strict
 
 //--- Parámetros configurables
-input string FastAPI_URL      = "http://100.91.167.17:8090";
-input string InternalToken    = "90c42a9448defc1f57K8WGdyb3FYaXgTw00gCVKY9JhfFG1A9tfji";
+input string FastAPI_URL      = "http://YOUR_FASTAPI_IP:8090";
+input string InternalToken    = "YOUR_INTERNAL_TOKEN";
 input int    SendIntervalSec  = 10;
 input string Timeframe        = "M5";
 input int    MaxSignalAgeSec  = 120;   // Señal ignorada si el candle tiene más de N segundos

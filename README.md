@@ -1,5 +1,7 @@
 # Sistema de Trading Automatizado
 
+Sistema de trading automatizado que conecta un Expert Advisor (MQL5) con MetaTrader 5 a través de una API FastAPI. El EA lee señales del indicador "Accurate Buy Sell System", aplica filtros técnicos (EMA, ADX) y envía las señales a FastAPI, que gestiona el sizing, validación, filtro de noticias fundamentales y ejecución de órdenes vía el MetaTrader MCP Server.
+
 Pipeline directo: **EA (MQL5) → FastAPI → MetaTrader MCP Server**.
 Sin orquestador externo, sin LLM.
 
@@ -165,7 +167,7 @@ MIN_VOLUME=0.01
 MAX_VOLUME=0.50
 NEWS_FILTER_ENABLED=true
 NEWS_BLACKOUT_MINUTES=15
-MT5_HTTP_URL=http://100.81.112.95:8000
+MT5_HTTP_URL=http://YOUR_MT5_MCP_IP:8000
 ```
 
 ## Auditoría
