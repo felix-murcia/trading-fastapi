@@ -17,6 +17,8 @@ input int    EmaPeriod        = 50;
 input int    AdxPeriod        = 14;
 input double AdxMinLevel      = 20.0;
 input bool   UseEmaH4Filter   = false;   // Filtro EMA H4: false = deshabilitado
+input int    EmaExitBuffer    = 10;      // Pips bajo EMA necesarios para salir (0 = sin buffer)
+input bool   EmaExitConfirm2  = true;    // Requerir 2 velas consecutivas cruzando EMA para salir
 input bool   DiagMode         = false;
 
 //--- Buffers del indicador (descubiertos por diagnóstico)
@@ -32,10 +34,11 @@ string lastSentSignalId = "";
 string activeDir       = "";   // "buy" o "sell" si hay posición abierta por este EA
 string activeSymbol    = "";
 bool   closeRequestSent = false;
-double activeEntry     = 0;    // precio de entrada de la posición activa
-double activeTrailDist = 0;    // distancia de trailing = abs(entry - signalVal)
-bool   breakEvenDone   = false;
-int    newsCheckCounter = 0;   // contador para llamar news-check cada ~5 min
+double activeEntry      = 0;    // precio de entrada de la posición activa
+double activeSlBase     = 0;    // SL original puesto por FastAPI al abrir la posición
+datetime lastTrailBar   = 0;    // última vela procesada para trailing
+bool   emaCrossedOnce   = false; // primera vela que cruzó la EMA (para confirmación 2 velas)
+int    newsCheckCounter = 0;    // contador para llamar news-check cada ~5 min
 #define NEWS_CHECK_INTERVAL 30 // cada 30 ticks × 10s = 5 min
 
 //+------------------------------------------------------------------+
@@ -94,108 +97,66 @@ void OnTimer() { ManageTrailing(); CheckNewsExit(); CheckEmaExit(); SendCurrentS
 //+------------------------------------------------------------------+
 void ManageTrailing()
   {
-   if(activeDir == "" || activeTrailDist <= 0) return;
+   if(activeDir == "") return;
 
-   double bid = SymbolInfoDouble(Symbol(), SYMBOL_BID);
-   double ask = SymbolInfoDouble(Symbol(), SYMBOL_ASK);
-   double point = SymbolInfoDouble(Symbol(), SYMBOL_POINT);
+   //--- Solo actuar al cierre de una nueva vela (índice 1 = última cerrada)
+   datetime barTime = iTime(Symbol(), Period(), 1);
+   if(barTime == lastTrailBar) return;
+   lastTrailBar = barTime;
 
-   //--- Buscar la posición abierta por este EA
+   double closeVal = iClose(Symbol(), Period(), 1);
+   int    digits   = (int)SymbolInfoInteger(Symbol(), SYMBOL_DIGITS);
+
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
       if(PositionGetSymbol(i) != Symbol()) continue;
 
-      ulong  ticket   = PositionGetInteger(POSITION_TICKET);
-      double posSL    = PositionGetDouble(POSITION_SL);
-      double posTP    = PositionGetDouble(POSITION_TP);
-      long   posType  = PositionGetInteger(POSITION_TYPE);
+      ulong  ticket  = PositionGetInteger(POSITION_TICKET);
+      double posSL   = PositionGetDouble(POSITION_SL);
+      double posTP   = PositionGetDouble(POSITION_TP);
+      long   posType = PositionGetInteger(POSITION_TYPE);
+
+      //--- Inicializar SL base la primera vez que vemos la posición
+      if(activeSlBase == 0)
+         activeSlBase = posSL;
+
+      double newSL = posSL;
 
       if(activeDir == "buy" && posType == POSITION_TYPE_BUY)
         {
-         double profit = bid - activeEntry;
-
-         //--- Fase 1: breakeven cuando profit >= trailDist
-         if(!breakEvenDone && profit >= activeTrailDist)
+         //--- La vela cerró por encima de la entrada: mover SL proporcionalmente
+         if(closeVal > activeEntry)
            {
-            double newSL = activeEntry + point;  // 1 point por encima para cubrir spread
-            if(newSL > posSL)
-              {
-               MqlTradeRequest  req = {};
-               MqlTradeResult   res = {};
-               req.action    = TRADE_ACTION_SLTP;
-               req.position  = ticket;
-               req.symbol    = Symbol();
-               req.sl        = NormalizeDouble(newSL, (int)SymbolInfoInteger(Symbol(), SYMBOL_DIGITS));
-               req.tp        = posTP;
-               if(OrderSend(req, res))
-                 {
-                  breakEvenDone = true;
-                  PrintFormat("AccurateBuySellBridge: BREAKEVEN BUY sl=%.5f", newSL);
-                 }
-              }
+            double profit = closeVal - activeEntry;
+            newSL = NormalizeDouble(activeSlBase + profit, digits);
+            if(newSL <= posSL) break;  // SL solo sube, nunca baja
            }
-
-         //--- Fase 2: trailing — arrastrar SL manteniendo trailDist detrás del precio
-         if(breakEvenDone && profit > activeTrailDist)
-           {
-            double newSL = NormalizeDouble(bid - activeTrailDist, (int)SymbolInfoInteger(Symbol(), SYMBOL_DIGITS));
-            if(newSL > posSL + point)
-              {
-               MqlTradeRequest  req = {};
-               MqlTradeResult   res = {};
-               req.action    = TRADE_ACTION_SLTP;
-               req.position  = ticket;
-               req.symbol    = Symbol();
-               req.sl        = newSL;
-               req.tp        = posTP;
-               if(OrderSend(req, res))
-                  PrintFormat("AccurateBuySellBridge: TRAIL BUY sl=%.5f (bid=%.5f)", newSL, bid);
-              }
-           }
+         else break;  // vela sin beneficio, sin movimiento
         }
-
-      if(activeDir == "sell" && posType == POSITION_TYPE_SELL)
+      else if(activeDir == "sell" && posType == POSITION_TYPE_SELL)
         {
-         double profit = activeEntry - ask;
-
-         if(!breakEvenDone && profit >= activeTrailDist)
+         //--- La vela cerró por debajo de la entrada: mover SL proporcionalmente
+         if(closeVal < activeEntry)
            {
-            double newSL = activeEntry - point;
-            if(newSL < posSL)
-              {
-               MqlTradeRequest  req = {};
-               MqlTradeResult   res = {};
-               req.action    = TRADE_ACTION_SLTP;
-               req.position  = ticket;
-               req.symbol    = Symbol();
-               req.sl        = NormalizeDouble(newSL, (int)SymbolInfoInteger(Symbol(), SYMBOL_DIGITS));
-               req.tp        = posTP;
-               if(OrderSend(req, res))
-                 {
-                  breakEvenDone = true;
-                  PrintFormat("AccurateBuySellBridge: BREAKEVEN SELL sl=%.5f", newSL);
-                 }
-              }
+            double profit = activeEntry - closeVal;
+            newSL = NormalizeDouble(activeSlBase - profit, digits);
+            if(newSL >= posSL) break;  // SL solo baja, nunca sube
            }
-
-         if(breakEvenDone && profit > activeTrailDist)
-           {
-            double newSL = NormalizeDouble(ask + activeTrailDist, (int)SymbolInfoInteger(Symbol(), SYMBOL_DIGITS));
-            if(newSL < posSL - point)
-              {
-               MqlTradeRequest  req = {};
-               MqlTradeResult   res = {};
-               req.action    = TRADE_ACTION_SLTP;
-               req.position  = ticket;
-               req.symbol    = Symbol();
-               req.sl        = newSL;
-               req.tp        = posTP;
-               if(OrderSend(req, res))
-                  PrintFormat("AccurateBuySellBridge: TRAIL SELL sl=%.5f (ask=%.5f)", newSL, ask);
-              }
-           }
+         else break;  // vela sin beneficio, sin movimiento
         }
-      break;  // solo gestionamos una posición por símbolo
+      else break;
+
+      MqlTradeRequest req = {};
+      MqlTradeResult  res = {};
+      req.action   = TRADE_ACTION_SLTP;
+      req.position = ticket;
+      req.symbol   = Symbol();
+      req.sl       = newSL;
+      req.tp       = posTP;
+      if(OrderSend(req, res))
+         PrintFormat("AccurateBuySellBridge: TRAIL %s close=%.5f sl: %.5f → %.5f",
+                     activeDir, closeVal, posSL, newSL);
+      break;
      }
   }
 
@@ -232,8 +193,9 @@ void CheckNewsExit()
          activeSymbol = "";
          closeRequestSent = false;
          activeEntry = 0;
-         activeTrailDist = 0;
-         breakEvenDone = false;
+         activeSlBase = 0;
+         lastTrailBar = 0;
+         emaCrossedOnce = false;
         }
       else if(DiagMode)
          PrintFormat("AccurateBuySellBridge: NEWS-CHECK ok — %s", response);
@@ -251,18 +213,57 @@ void CheckEmaExit()
 
    double emaVal[1];
    if(CopyBuffer(emaHandle, 0, 1, 1, emaVal) <= 0) return;
-   double closeVal = iClose(Symbol(), Period(), 1);
+   double closeVal  = iClose(Symbol(), Period(), 1);
+   double pip       = SymbolInfoDouble(Symbol(), SYMBOL_POINT) * 10;
+   double bufferDist = EmaExitBuffer * pip;
 
-   bool exitBuy  = (activeDir == "buy"  && closeVal < emaVal[0]);
-   bool exitSell = (activeDir == "sell" && closeVal > emaVal[0]);
+   //--- Cruce de EMA con buffer: el cierre debe estar X pips al otro lado
+   bool emaCross = false;
+   if(activeDir == "buy")
+      emaCross = (closeVal < emaVal[0] - bufferDist);
+   else if(activeDir == "sell")
+      emaCross = (closeVal > emaVal[0] + bufferDist);
 
-   //--- Salida por ADX: tendencia agotada (<20) o sobreextendida (>50)
    string exitReason = "";
-   if(exitBuy || exitSell)
+
+   if(emaCross)
      {
-      exitReason = "ema_cross";
+      if(EmaExitConfirm2)
+        {
+         if(!emaCrossedOnce)
+           {
+            //--- Primera vela que cruza: marcar y esperar la siguiente
+            emaCrossedOnce = true;
+            if(DiagMode)
+               PrintFormat("AccurateBuySellBridge: EMA cruzada (1/2) close=%.5f ema=%.5f buffer=%.5f",
+                           closeVal, emaVal[0], bufferDist);
+            //--- Seguir hacia la comprobación de ADX
+           }
+         else
+           {
+            //--- Segunda vela consecutiva cruzando: salir
+            exitReason = "ema_cross";
+           }
+        }
+      else
+        {
+         exitReason = "ema_cross";
+        }
      }
    else
+     {
+      //--- Vela sin cruce: resetear contador de confirmación
+      if(emaCrossedOnce)
+        {
+         emaCrossedOnce = false;
+         if(DiagMode)
+            PrintFormat("AccurateBuySellBridge: EMA cruce cancelado (precio recuperó) close=%.5f ema=%.5f",
+                        closeVal, emaVal[0]);
+        }
+     }
+
+   //--- Salida por ADX (no requiere buffer ni confirmación)
+   if(exitReason == "")
      {
       double adxVal[1];
       if(CopyBuffer(adxHandle, 0, 1, 1, adxVal) > 0)
@@ -284,6 +285,7 @@ void CheckEmaExit()
      {
       closeRequestSent = true;
       activeDir = "";
+      emaCrossedOnce = false;
       PrintFormat("AccurateBuySellBridge: cierre enviado OK para %s reason=%s", Symbol(), exitReason);
      }
    else
@@ -446,8 +448,9 @@ void SendCurrentSignal()
       activeSymbol = Symbol();
       closeRequestSent = false;
       activeEntry = entryPrice;
-      activeTrailDist = MathAbs(entryPrice - signalVal);
-      breakEvenDone = false;
+      activeSlBase = 0;     // se inicializa en ManageTrailing() al leer el SL real de MT5
+      lastTrailBar = 0;
+      emaCrossedOnce = false;
       PrintFormat("AccurateBuySellBridge: OK — signal_id=%s", signalId);
      }
    else
