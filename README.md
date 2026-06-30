@@ -1,112 +1,168 @@
 # Sistema de Trading Automatizado
 
-Sistema de trading automatizado que conecta un Expert Advisor (MQL5) con MetaTrader 5 a través de una API FastAPI. El EA lee señales del indicador "Accurate Buy Sell System", aplica filtros técnicos (EMA, ADX) y envía las señales a FastAPI, que gestiona el sizing, validación, filtro de noticias fundamentales y ejecución de órdenes vía el MetaTrader MCP Server.
+Sistema de trading automatizado que conecta Expert Advisors (MQL5) con MetaTrader 5
+a través de una API FastAPI. Los EAs detectan señales basadas en estructura de mercado
+y liquidez usando indicadores nativos de MT5, y envían las señales a FastAPI, que
+gestiona el sizing, validación, filtro de noticias y ejecución vía el MetaTrader MCP Server.
 
 Pipeline directo: **EA (MQL5) → FastAPI → MetaTrader MCP Server**.
 Sin orquestador externo, sin LLM.
 
+## Expert Advisors
+
+El sistema tiene dos EAs especializados, cada uno con su propia estrategia de entrada:
+
+| EA | Estrategia | Pares |
+|----|-----------|-------|
+| `StructureBreakBridge.mq5` | Rotura de estructura + volumen | EURUSD, GBPUSD, USDJPY, USDCHF, AUDUSD, NZDUSD |
+| `LiquidityGrabBridge.mq5` | Captura de liquidez (stop hunt + reversión) | XAUUSD |
+
+Ambos comparten la misma lógica de gestión: trailing stop por cierre de vela, salida
+por EMA/ADX y filtro de noticias fundamentales.
+
 ## Arquitectura
 
 ```
-MT5: Accurate Buy Sell System (buffers 2=BUY, 3=SELL)
-        │
-        ▼
-EA AccurateBuySellBridge.mq5        cada 10s (OnTimer)
-        │  ┌─ ManageTrailing()      trailing SL por cierre de vela
-        │  ├─ CheckNewsExit()       POST /v1/smc/news-check (cada ~5 min)
-        │  ├─ CheckEmaExit()        cierre por cruce EMA (con buffer) / ADX agotado
-        │  └─ SendCurrentSignal()   POST /v1/smc/signal
-        │
-        │  Filtros del EA (vela cerrada, índice 1):
-        │  ├─ EMA 50 H1:  BUY solo si close > EMA, SELL solo si close < EMA
-        │  ├─ EMA 50 H4:  confirmación timeframe superior (desactivable)
-        │  ├─ ADX(14) entre 20 y 50: descarta lateral y sobreextensión
-        │  └─ Deduplicación por signal_id (ABS_<symbol>_<dir>_<bartime>)
-        │
-        ▼
-FastAPI (Python)                    POST /v1/smc/signal
-        │  1. Símbolo soportado
-        │  2. Precio presente en la señal
-        │  3. Cooldown por símbolo (60 min)
-        │  4. Filtro de noticias fundamentales (±15 min)
-        │  5. SL = distancia flecha × SL_MULT, sin TP (salida por señal/EMA)
-        │  6. Cerrar posición existente si hay flip de señal
-        │  7. Validación geométrica + rango + duplicados (order_manager)
-        │  8. Enviar orden a mercado (market order)
-        │
-        ▼
-MetaTrader MCP Server               http://<MT5_HTTP_URL>/api/v1/...
-        └─ REST API: precios, velas, órdenes, posiciones
+StructureBreakBridge.mq5          LiquidityGrabBridge.mq5
+(pares FX, H1)                    (XAUUSD, H1)
+        │                                 │
+        └──────────────┬──────────────────┘
+                       ▼
+            cada 10s (OnTimer)
+            ├─ ManageTrailing()    trailing SL por cierre de vela
+            ├─ CheckNewsExit()     POST /v1/smc/news-check (cada ~5 min)
+            ├─ CheckEmaExit()      cierre por cruce EMA / ADX agotado
+            └─ SendCurrentSignal() POST /v1/smc/signal
+                       │
+                       ▼
+        FastAPI (Python)           POST /v1/smc/signal
+            │  1. Símbolo soportado
+            │  2. Precio presente en la señal
+            │  3. Cooldown por símbolo (60 min)
+            │  4. Filtro de noticias (vela H1 completa bloqueada)
+            │  5. SL = base_dist × SL_MULT, sin TP
+            │  6. Cerrar posición existente si hay flip de señal
+            │  7. Validación geométrica + rango + duplicados
+            │  8. Enviar orden a mercado
+                       │
+                       ▼
+        MetaTrader MCP Server      http://<MT5_HTTP_URL>/api/v1/...
+            └─ REST API: precios, velas, órdenes, posiciones
 ```
 
-## Gestión de Posiciones (EA)
+## Estrategias de Entrada
+
+### StructureBreakBridge — Rotura de Estructura
+
+Detecta cuando el precio cierra **por encima del máximo** (BUY) o **por debajo del mínimo**
+(SELL) de las últimas N velas, confirmado por volumen elevado.
+
+**Ventaja sobre indicadores externos**: la señal dispara al inicio del nuevo movimiento,
+no al final. El gap entre señal y entrada es mínimo (solo la distancia desde el nivel
+roto hasta el cierre de la vela de rotura).
+
+```
+Condiciones BUY:
+  close[1] > max(high[2..N+1])     rotura del swing anterior
+  volume[1] > avg(volume) × 1.5    participación institucional
+  close[1] > EMA50[1]              tendencia alcista
+  20 < ADX[1] < 50                 mercado en tendencia, no sobreextendido
+
+SL anchor = low[1] de la vela de rotura
+```
+
+```
+Ejemplo GBPUSD — swing previo en 1.32400, rotura a cierre 1.32450:
+  entry   = 1.32452 (apertura siguiente vela, gap mínimo ~2 pips)
+  base_dist = |1.32452 - 1.32200|  (entry - low de la vela de rotura)
+  sl_dist = base_dist × 1.5
+  SL      = entry - sl_dist
+```
+
+### LiquidityGrabBridge — Captura de Liquidez
+
+Detecta "stop hunts": el precio hace un spike por encima/debajo de un swing previo
+(barriendo los stops acumulados en ese nivel) y luego revierte cerrando al otro lado.
+Indica que los institucionales recogieron liquidez y empujarán en la dirección contraria.
+
+```
+Condiciones SELL (bearish grab):
+  high[1] > max(high[2..N+1])          spike sobre el swing previo
+  close[1] < max(high[2..N+1])         cierra de vuelta por debajo
+  (high[1] - close[1]) / range ≥ 0.5  mecha de rechazo ≥ 50% del rango
+  (high[1] - prevHigh) ≥ 20 pips      spike mínimo significativo
+  volume[1] > avg(volume) × 2.0        volumen elevado confirma institucional
+  15 < ADX[1] < 65
+
+SL anchor = high[1] (el extremo del spike — nivel que invalida el grab)
+```
+
+```
+Ejemplo XAUUSD — swing previo en 2050, spike hasta 2065, cierre en 2042:
+  bearish grab detectado: spike=15pts, wick=65%, vol=2.3×avg
+  entry     = 2042 (BID en apertura siguiente vela)
+  base_dist = |2042 - 2065| = 23 pts  (entry vs extremo del spike)
+  sl_dist   = 23 × 1.5 = 34.5 pts
+  SL        = 2042 + 34.5 = 2076.5    (por encima del spike)
+```
+
+## Gestión de Posiciones (común a ambos EAs)
 
 ### Trailing Stop por cierre de vela
 
 En cada cierre de vela H1, el SL se desplaza proporcionalmente a los pips ganados
 respecto al precio de entrada. Solo se mueve en dirección favorable, nunca en contra.
 
-**Ejemplo BUY** — entry 1.32414, SL base 1.32041:
 ```
-Vela 1 cierra en 1.32460 (+46 pips sobre entry) → SL sube 46 pips → 1.32087
-Vela 2 cierra en 1.32390 (bajo entry)           → sin movimiento
-Vela 3 cierra en 1.32500 (+86 pips sobre entry) → SL sube a 1.32127
+BUY entry 1.32452, SL base 1.32080:
+  Vela 1 cierra 1.32500 (+4.8 pips) → SL sube 4.8 pips → 1.32128
+  Vela 2 cierra 1.32430 (bajo entry) → sin movimiento
+  Vela 3 cierra 1.32600 (+14.8 pips) → SL sube a 1.32228
 ```
 
-El SL base se lee directamente de MT5 al abrirse la posición (refleja el SL real
-calculado por FastAPI). No hay fase de breakeven separada: el SL cruza
-automáticamente el precio de entrada cuando el profit supera la distancia original.
+Si la posición es cerrada por SL en MT5 (stop hit), el EA lo detecta
+automáticamente en el siguiente tick y resetea el estado interno.
 
 ### Salida por EMA / ADX
 
-El EA cierra posiciones vía `POST /v1/smc/close` con tolerancia configurable:
+El EA cierra posiciones vía `POST /v1/smc/close`:
 
-- **EMA cross + buffer**: el cierre debe estar `EmaExitBuffer` pips al otro lado de
-  la EMA (default 10). Filtra roces puntuales que no son reversiones reales.
-- **Confirmación de 2 velas** (`EmaExitConfirm2=true`): se requieren dos cierres
-  consecutivos cruzando la EMA con buffer para ejecutar el cierre.
-- **ADX < 20**: tendencia agotada (sin buffer, cierre inmediato)
-- **ADX > 50**: tendencia sobreextendida (sin buffer, cierre inmediato)
+- **EMA cross + buffer**: el cierre debe estar `EmaExitBuffer` pips al otro lado
+  de la EMA. Filtra roces puntuales.
+- **Confirmación 2 velas** (`EmaExitConfirm2=true`): dos cierres consecutivos
+  cruzando la EMA con buffer. Si el precio recupera, se cancela la confirmación.
+- **ADX < AdxMinLevel**: tendencia agotada → cierre inmediato
+- **ADX > AdxMaxLevel**: tendencia sobreextendida → cierre inmediato
 
-**Flujo de salida EMA con ambas protecciones activas:**
 ```
 Vela N+1: cierra 3 pips bajo EMA  → buffer no alcanzado, ignora
-Vela N+2: cierra 12 pips bajo EMA → cruza buffer (1ª confirmación), espera
+Vela N+2: cierra 12 pips bajo EMA → 1ª confirmación, espera
 Vela N+3: cierra 15 pips bajo EMA → 2ª confirmación → CIERRA
     ó
-Vela N+3: recupera y cierra sobre EMA → resetea contador, posición sigue abierta
+Vela N+3: recupera sobre EMA → resetea contador, posición sigue abierta
 ```
 
 ## Filtro de Noticias Fundamentales
 
-Bloquea operaciones y cierra posiciones cuando hay una noticia de alto impacto en la vela H1 actual.
+Bloquea operaciones y cierra posiciones cuando hay una noticia High o Medium
+impact en la vela H1 actual.
 
-- **Fuente**: Forex Factory (mirror JSON `nfs.faireconomy.media`)
-- **Cache**: eventos High Impact descargados cada 4h
+- **Fuente**: Forex Factory (mirror `nfs.faireconomy.media`) — impacto High + Medium
+- **Cache**: eventos descargados y renovados cada 4h
 - **Unidad de exclusión**: la vela H1 completa que contiene la noticia
-- **Mapeo automático**: noticia USD → afecta EURUSD, GBPUSD, USDJPY, XAUUSD, etc.
+- **Mapeo automático**: noticia USD → afecta todos los pares USD
 
 | Mecanismo | Dónde | Qué hace |
 |-----------|-------|----------|
-| Bloqueo de nuevas entradas | `simple_pipeline.py` paso 4 | Si hay noticia en vela actual → `skip: news_blackout` |
-| Cierre proactivo | `POST /v1/smc/news-check` | Cierra posiciones abiertas en pares afectados |
+| Bloqueo de nuevas entradas | `simple_pipeline.py` paso 4 | Noticia en vela actual → `skip: news_blackout` |
+| Cierre proactivo | `POST /v1/smc/news-check` | Cierra posiciones en pares afectados |
 
-**Lógica de la vela completa**: si la noticia cae en cualquier momento de la vela H1, toda
-esa vela queda bloqueada. No se abre ninguna posición desde el inicio de la vela hasta
-que cierra, independientemente de cuándo dentro de la hora ocurra la noticia.
-
-**Ejemplo — noticia a las 15:45:**
 ```
-15:00  Vela H1 abre → FastAPI detecta "Core PCE" a las 15:45 (misma vela) → BLOQUEADO
-15:00  Señal BUY XAUUSD → rechazada: "news_blackout:Core PCE Price Index"
-15:00  EA llama /news-check → cierra posiciones USD abiertas
-16:00  Vela siguiente abre sin noticias → operativa normal
-```
-
-**Comparativa con política anterior (±15 min):**
-```
-Antes: noticia 15:45 → bloqueado 15:30–16:00, operación a las 15:00 PERMITIDA (error)
-Ahora: noticia 15:45 → bloqueado 15:00–16:00 completo (vela entera)
+Ejemplo — noticia a las 15:45 UTC:
+  15:00  Vela H1 abre → FastAPI detecta noticia a las 15:45 (misma vela) → BLOQUEADO
+  15:00  Señal BUY EURUSD → rechazada: news_blackout
+  15:00  EA llama /news-check → cierra posiciones USD abiertas
+  16:00  Vela siguiente sin noticias → operativa normal
 ```
 
 ## Health Check del MCP Server
@@ -123,33 +179,48 @@ Solo logea cuando hay cambio de estado:
 
 ## Sizing y Riesgo
 
-- **SL**: `distancia flecha × SL_MULT` (default 1.5). Mínimo: max(3 pips, 3× spread)
-- **TP**: 0 — sin take profit fijo; salida por señal contraria, EMA/ADX, o news
+- **SL**: `base_dist × SL_MULT` (default 1.5). `base_dist` = distancia entre entry y SL anchor
+- **TP**: 0 — sin take profit fijo; salida por EMA/ADX, flip de señal o noticias
 - **Volume**: `SL_RISK_USD / (sl_pips × pip_value_per_lot)`, clamped a [MIN_VOLUME, MAX_VOLUME]
-- **Órdenes**: market order directo (no pending)
+- **Órdenes**: market order directo
 
-**Ejemplo GBPUSD con SL_MULT=1.5:**
-```
-Arrow en 1.32165, entry en 1.32414 → base_dist = 24.9 pips
-sl_dist = 24.9 × 1.5 = 37.4 pips → SL en 1.32040
-volume  = $15 / (37.4 pips × $10) = 0.04 lotes
-```
+## Parámetros de los EAs
 
-## Parámetros del EA (configurables sin recompilar)
+### Comunes a ambos EAs
 
 | Parámetro | Default | Descripción |
 |-----------|---------|-------------|
-| `FastAPI_URL` | — | URL del servidor FastAPI |
+| `FastAPI_URL` | — | URL del servidor FastAPI (`http://<IP>:8090`) |
 | `InternalToken` | — | Token de autenticación |
-| `SendIntervalSec` | 10 | Frecuencia del timer en segundos |
+| `SendIntervalSec` | 10 | Frecuencia del timer (segundos) |
+| `Timeframe` | H1 | Timeframe de operación |
 | `EmaPeriod` | 50 | Período de la EMA |
 | `AdxPeriod` | 14 | Período del ADX |
-| `AdxMinLevel` | 20.0 | ADX mínimo para considerar tendencia |
-| `AdxMaxLevel` | 50.0 | ADX máximo para entrar (evita tendencias sobreextendidas) |
-| `UseEmaH4Filter` | false | Activar filtro EMA en H4 |
-| `EmaExitBuffer` | 10 | Pips bajo la EMA para considerar cruce válido |
+| `EmaExitBuffer` | 10 | Pips al otro lado de la EMA para salir |
 | `EmaExitConfirm2` | true | Exigir 2 velas consecutivas para cerrar por EMA |
-| `DiagMode` | false | Logs detallados de filtros |
+| `VolumePeriod` | 20 | Velas para calcular volumen medio |
+| `DiagMode` | false | Logs detallados en el journal de MT5 |
+
+### StructureBreakBridge (FX)
+
+| Parámetro | Default | Descripción |
+|-----------|---------|-------------|
+| `StructurePeriod` | 20 | Velas hacia atrás para determinar swing high/low |
+| `VolumeMult` | 1.5 | Volumen mínimo = promedio × VolumeMult |
+| `AdxMinLevel` | 20.0 | ADX mínimo de entrada |
+| `AdxMaxLevel` | 50.0 | ADX máximo de entrada |
+
+### LiquidityGrabBridge (XAUUSD)
+
+| Parámetro | Default | Descripción |
+|-----------|---------|-------------|
+| `LiquidityPeriod` | 20 | Velas para determinar el swing previo |
+| `WickRatio` | 0.5 | Mecha mínima como fracción del rango total |
+| `MinSpikePips` | 20 | Pips mínimos que debe superar el swing (tamaño del spike) |
+| `VolumeMult` | 2.0 | Volumen mínimo = promedio × VolumeMult (más estricto en XAUUSD) |
+| `AdxMinLevel` | 15.0 | ADX mínimo (más permisivo para XAUUSD) |
+| `AdxMaxLevel` | 65.0 | ADX máximo |
+| `EmaExitBuffer` | 20 | Pips buffer EMA para salida (mayor en XAUUSD) |
 
 ## Configuración (.env)
 
@@ -168,29 +239,30 @@ SIGNAL_COOLDOWN_MINUTES=60
 
 # Sizing
 SL_RISK_USD=15.0
-SL_MULT=1.5        # multiplicador sobre distancia flecha (menor = SL más cercano, más volumen)
+SL_MULT=1.5
 MIN_VOLUME=0.01
 MAX_VOLUME=0.50
 
-# Noticias
+# Noticias (High + Medium impact)
 NEWS_FILTER_ENABLED=true
-NEWS_BLACKOUT_MINUTES=15
 ```
 
 ## Protecciones
 
 | # | Guard | Dónde |
 |---|-------|-------|
-| 1 | Filtros técnicos (EMA H1, EMA H4 opcional, ADX) | EA |
-| 2 | Deduplicación por signal_id | EA + FastAPI |
-| 3 | Cooldown por símbolo (60 min) | FastAPI |
-| 4 | Blackout noticias fundamentales (±15 min) | FastAPI |
-| 5 | Cierre proactivo pre-noticias | FastAPI (news-check) |
-| 6 | Salida EMA con buffer + confirmación 2 velas | EA |
-| 7 | Geometría (sl < entry < tp) | order_manager |
-| 8 | Rango de precio válido | order_manager |
-| 9 | Duplicado ±1 pip | order_manager |
-| 10 | SL mínimo/máximo en pips | order_manager |
+| 1 | Volumen mínimo en vela de señal | EA (entry filter) |
+| 2 | EMA H1 + ADX rango 20–50 | EA (entry filter) |
+| 3 | No re-entrar en misma dirección con posición activa | EA |
+| 4 | Detección de cierre externo por SL (auto-reset estado) | EA |
+| 5 | Deduplicación por signal_id (una señal por vela) | EA + FastAPI |
+| 6 | Cooldown por símbolo (60 min) | FastAPI |
+| 7 | Blackout noticias — vela H1 completa bloqueada | FastAPI |
+| 8 | Cierre proactivo pre-noticias | FastAPI (news-check) |
+| 9 | Salida EMA con buffer + confirmación 2 velas | EA (exit) |
+| 10 | Geometría (sl < entry para BUY, sl > entry para SELL) | order_manager |
+| 11 | Duplicado ±1 pip | order_manager |
+| 12 | SL mínimo/máximo en pips | order_manager |
 
 ## Auditoría
 
@@ -210,15 +282,17 @@ Cada decisión queda en `audit_log` con `cycle_id`:
 
 ```
 mql5/
-  AccurateBuySellBridge.mq5       EA principal: señales, filtros, trailing, exits
+  StructureBreakBridge.mq5    EA para FX: rotura de estructura + volumen
+  LiquidityGrabBridge.mq5     EA para XAUUSD: captura de liquidez (stop hunt)
+  AccurateBuySellBridge.mq5   EA legado (deprecado)
 
 fastapi/
-  main.py                         App FastAPI + health check MCP en background
-  config.py                       Settings (pydantic-settings, .env)
-  routers/smc.py                  Endpoints: signal, close, news-check
-  services/simple_pipeline.py     Pipeline: señal → orden (8 pasos)
-  services/position_sizing.py     SL/TP a riesgo monetario fijo (SL_MULT)
-  services/order_manager.py       Validación final + registro en DB
-  services/mt5_client.py          Cliente HTTP para MetaTrader MCP Server
-  services/news_filter.py         Filtro de noticias (Forex Factory)
+  main.py                     App FastAPI + health check MCP en background
+  config.py                   Settings (pydantic-settings, .env)
+  routers/smc.py              Endpoints: signal, close, news-check
+  services/simple_pipeline.py Pipeline: señal → orden (8 pasos)
+  services/position_sizing.py SL/TP a riesgo monetario fijo (SL_MULT)
+  services/order_manager.py   Validación final + registro en DB
+  services/mt5_client.py      Cliente HTTP para MetaTrader MCP Server
+  services/news_filter.py     Filtro de noticias (Forex Factory High+Medium)
 ```
