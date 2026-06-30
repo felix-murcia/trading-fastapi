@@ -4,7 +4,7 @@
 //| 3=SELL) y las envía a FastAPI, igual que SignalBridge.mq5.        |
 //+------------------------------------------------------------------+
 #property copyright "Trading System"
-#property version   "1.0"
+#property version   "2.2"
 #property strict
 
 //--- Parámetros configurables
@@ -16,6 +16,7 @@ input string IndicatorName    = "Accurate Buy Sell System";
 input int    EmaPeriod        = 50;
 input int    AdxPeriod        = 14;
 input double AdxMinLevel      = 20.0;
+input double AdxMaxLevel      = 50.0;   // ADX máximo para entrar (evita sobreextensión)
 input bool   UseEmaH4Filter   = false;   // Filtro EMA H4: false = deshabilitado
 input int    EmaExitBuffer    = 10;      // Pips bajo EMA necesarios para salir (0 = sin buffer)
 input bool   EmaExitConfirm2  = true;    // Requerir 2 velas consecutivas cruzando EMA para salir
@@ -77,7 +78,7 @@ int OnInit()
      }
 
    EventSetTimer(SendIntervalSec);
-   Print("AccurateBuySellBridge v2.1 iniciado en ", Symbol(), " TF=", Timeframe,
+   Print("AccurateBuySellBridge v2.2 iniciado en ", Symbol(), " TF=", Timeframe,
          " EMA=", EmaPeriod, (UseEmaH4Filter ? " +H4" : " H4=OFF"),
          " +ADX(", AdxPeriod, ")>", AdxMinLevel);
    return INIT_SUCCEEDED;
@@ -98,6 +99,22 @@ void OnTimer() { ManageTrailing(); CheckNewsExit(); CheckEmaExit(); SendCurrentS
 void ManageTrailing()
   {
    if(activeDir == "") return;
+
+   //--- Detectar cierre externo de la posición (SL hit, cierre manual en MT5)
+   bool posFound = false;
+   for(int k = PositionsTotal() - 1; k >= 0; k--)
+      if(PositionGetSymbol(k) == Symbol()) { posFound = true; break; }
+   if(!posFound)
+     {
+      PrintFormat("AccurateBuySellBridge: posición %s cerrada externamente (SL/manual) — reset estado", activeDir);
+      activeDir      = "";
+      activeSymbol   = "";
+      activeSlBase   = 0;
+      lastTrailBar   = 0;
+      emaCrossedOnce = false;
+      closeRequestSent = false;
+      return;
+     }
 
    //--- Solo actuar al cierre de una nueva vela (índice 1 = última cerrada)
    datetime barTime = iTime(Symbol(), Period(), 1);
@@ -201,9 +218,9 @@ void CheckNewsExit()
          PrintFormat("AccurateBuySellBridge: NEWS-CHECK ok — %s", response);
      }
    else if(res == -1)
-      PrintFormat("AccurateBuySellBridge: NEWS-CHECK WebRequest falló code=%d", GetLastError());
+      PrintFormat("AccurateBuySellBridge: NEWS-CHECK WebRequest falló code=%d url=%s", GetLastError(), url);
    else if(DiagMode)
-      PrintFormat("AccurateBuySellBridge: NEWS-CHECK HTTP %d", res);
+      PrintFormat("AccurateBuySellBridge: NEWS-CHECK HTTP %d url=%s", res, url);
   }
 
 //+------------------------------------------------------------------+
@@ -270,7 +287,7 @@ void CheckEmaExit()
         {
          if(adxVal[0] < AdxMinLevel)
             exitReason = StringFormat("adx_low_%.1f", adxVal[0]);
-         else if(adxVal[0] > 50.0)
+         else if(adxVal[0] > AdxMaxLevel)
             exitReason = StringFormat("adx_high_%.1f", adxVal[0]);
         }
      }
@@ -369,25 +386,25 @@ void SendCurrentSignal()
      }
 
    //--- Filtro EMA H4: la tendencia del timeframe superior debe confirmar la dirección
+   //    Usa la misma vela cerrada (índice 1) que el filtro H1 para consistencia
    if(UseEmaH4Filter)
      {
       double emaH4Val[1];
-      if(CopyBuffer(emaH4Handle, 0, 0, 1, emaH4Val) <= 0)
+      if(CopyBuffer(emaH4Handle, 0, 1, 1, emaH4Val) <= 0)
         {
          if(DiagMode) Print("AccurateBuySellBridge: sin datos de EMA H4, señal descartada");
          return;
         }
-      double priceNow = SymbolInfoDouble(Symbol(), SYMBOL_BID);
-      if(dir == "buy" && priceNow <= emaH4Val[0])
+      if(dir == "buy" && closeVal <= emaH4Val[0])
         {
-         if(DiagMode) PrintFormat("AccurateBuySellBridge: BUY descartado por filtro EMA H4 (price=%.5f <= emaH4=%.5f)",
-                                   priceNow, emaH4Val[0]);
+         if(DiagMode) PrintFormat("AccurateBuySellBridge: BUY descartado por filtro EMA H4 (close=%.5f <= emaH4=%.5f)",
+                                   closeVal, emaH4Val[0]);
          return;
         }
-      if(dir == "sell" && priceNow >= emaH4Val[0])
+      if(dir == "sell" && closeVal >= emaH4Val[0])
         {
-         if(DiagMode) PrintFormat("AccurateBuySellBridge: SELL descartado por filtro EMA H4 (price=%.5f >= emaH4=%.5f)",
-                                   priceNow, emaH4Val[0]);
+         if(DiagMode) PrintFormat("AccurateBuySellBridge: SELL descartado por filtro EMA H4 (close=%.5f >= emaH4=%.5f)",
+                                   closeVal, emaH4Val[0]);
          return;
         }
      }
@@ -403,6 +420,20 @@ void SendCurrentSignal()
      {
       if(DiagMode) PrintFormat("AccurateBuySellBridge: señal descartada por ADX bajo (%.1f < %.1f) — mercado lateral",
                                 adxVal[0], AdxMinLevel);
+      return;
+     }
+   if(adxVal[0] > AdxMaxLevel)
+     {
+      if(DiagMode) PrintFormat("AccurateBuySellBridge: señal descartada por ADX alto (%.1f > %.1f) — tendencia sobreextendida",
+                                adxVal[0], AdxMaxLevel);
+      return;
+     }
+
+   //--- No re-entrar en la misma dirección si ya hay posición activa
+   //    Evita corromper activeEntry/activeSlBase cuando FastAPI devuelve skip (cooldown)
+   if(activeDir != "" && activeDir == dir)
+     {
+      if(DiagMode) PrintFormat("AccurateBuySellBridge: señal %s descartada — posición %s ya activa", dir, activeDir);
       return;
      }
 

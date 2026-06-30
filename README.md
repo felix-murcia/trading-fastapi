@@ -20,7 +20,7 @@ EA AccurateBuySellBridge.mq5        cada 10s (OnTimer)
         │  Filtros del EA (vela cerrada, índice 1):
         │  ├─ EMA 50 H1:  BUY solo si close > EMA, SELL solo si close < EMA
         │  ├─ EMA 50 H4:  confirmación timeframe superior (desactivable)
-        │  ├─ ADX(14) > 20: descarta mercado lateral
+        │  ├─ ADX(14) entre 20 y 50: descarta lateral y sobreextensión
         │  └─ Deduplicación por signal_id (ABS_<symbol>_<dir>_<bartime>)
         │
         ▼
@@ -79,23 +79,34 @@ Vela N+3: recupera y cierra sobre EMA → resetea contador, posición sigue abie
 
 ## Filtro de Noticias Fundamentales
 
-Bloquea operaciones y cierra posiciones alrededor de noticias de alto impacto (3 estrellas).
+Bloquea operaciones y cierra posiciones cuando hay una noticia de alto impacto en la vela H1 actual.
 
 - **Fuente**: Forex Factory (mirror JSON `nfs.faireconomy.media`)
 - **Cache**: eventos High Impact descargados cada 4h
-- **Ventana de exclusión**: ±`NEWS_BLACKOUT_MINUTES` (default 15 min)
+- **Unidad de exclusión**: la vela H1 completa que contiene la noticia
 - **Mapeo automático**: noticia USD → afecta EURUSD, GBPUSD, USDJPY, XAUUSD, etc.
 
 | Mecanismo | Dónde | Qué hace |
 |-----------|-------|----------|
-| Bloqueo de nuevas entradas | `simple_pipeline.py` paso 4 | Si hay blackout → `skip: news_blackout` |
+| Bloqueo de nuevas entradas | `simple_pipeline.py` paso 4 | Si hay noticia en vela actual → `skip: news_blackout` |
 | Cierre proactivo | `POST /v1/smc/news-check` | Cierra posiciones abiertas en pares afectados |
 
-**Ejemplo — noticias a las 15:30:**
+**Lógica de la vela completa**: si la noticia cae en cualquier momento de la vela H1, toda
+esa vela queda bloqueada. No se abre ninguna posición desde el inicio de la vela hasta
+que cierra, independientemente de cuándo dentro de la hora ocurra la noticia.
+
+**Ejemplo — noticia a las 15:45:**
 ```
-15:15  EA llama /news-check → FastAPI detecta "Core PCE" en 15 min → cierra posiciones USD
-15:15  Señal BUY XAUUSD llega → bloqueada: "news_blackout:Core PCE Price Index"
-15:45  Ventana expira → operativa normal
+15:00  Vela H1 abre → FastAPI detecta "Core PCE" a las 15:45 (misma vela) → BLOQUEADO
+15:00  Señal BUY XAUUSD → rechazada: "news_blackout:Core PCE Price Index"
+15:00  EA llama /news-check → cierra posiciones USD abiertas
+16:00  Vela siguiente abre sin noticias → operativa normal
+```
+
+**Comparativa con política anterior (±15 min):**
+```
+Antes: noticia 15:45 → bloqueado 15:30–16:00, operación a las 15:00 PERMITIDA (error)
+Ahora: noticia 15:45 → bloqueado 15:00–16:00 completo (vela entera)
 ```
 
 ## Health Check del MCP Server
@@ -134,6 +145,7 @@ volume  = $15 / (37.4 pips × $10) = 0.04 lotes
 | `EmaPeriod` | 50 | Período de la EMA |
 | `AdxPeriod` | 14 | Período del ADX |
 | `AdxMinLevel` | 20.0 | ADX mínimo para considerar tendencia |
+| `AdxMaxLevel` | 50.0 | ADX máximo para entrar (evita tendencias sobreextendidas) |
 | `UseEmaH4Filter` | false | Activar filtro EMA en H4 |
 | `EmaExitBuffer` | 10 | Pips bajo la EMA para considerar cruce válido |
 | `EmaExitConfirm2` | true | Exigir 2 velas consecutivas para cerrar por EMA |

@@ -51,7 +51,7 @@ async def _fetch_calendar() -> list[dict]:
 
         high_impact = []
         for ev in events:
-            if ev.get("impact") != "High":
+            if ev.get("impact") not in ("High", "Medium"):
                 continue
             try:
                 raw = ev["date"]
@@ -84,46 +84,59 @@ def _symbol_currencies(symbol: str) -> set[str]:
     return currencies
 
 
+def _current_h1_candle(now: datetime) -> tuple[datetime, datetime]:
+    """Devuelve (candle_start, candle_end) de la vela H1 que contiene 'now'."""
+    start = now.replace(minute=0, second=0, microsecond=0)
+    return start, start + timedelta(hours=1)
+
+
 async def is_news_blackout(symbol: str) -> tuple[bool, str | None]:
-    """True + event title si estamos dentro de la ventana de exclusión."""
+    """True + event title si hay una noticia de alto impacto en la vela H1 actual.
+
+    Lógica: si la noticia cae en [candle_start, candle_end), toda la vela queda
+    bloqueada. Ejemplo: noticia a las 15:45 → bloquea desde las 15:00 hasta las 16:00.
+    """
     if not settings.news_filter_enabled:
         return False, None
 
     events = await _fetch_calendar()
     now = datetime.now(timezone.utc)
-    window = timedelta(minutes=settings.news_blackout_minutes)
+    candle_start, candle_end = _current_h1_candle(now)
     currencies = _symbol_currencies(symbol)
 
     for ev in events:
         if ev["currency"] not in currencies:
             continue
-        if abs(now - ev["time_utc"]) <= window:
+        if candle_start <= ev["time_utc"] < candle_end:
             return True, ev["title"]
 
     return False, None
 
 
 async def get_upcoming_news(symbols: list[str], lookahead_minutes: int | None = None) -> list[dict]:
-    """Eventos de alto impacto que ocurren en los próximos N minutos para los símbolos dados."""
-    if lookahead_minutes is None:
-        lookahead_minutes = settings.news_blackout_minutes
+    """Eventos de alto impacto en la vela H1 actual que afectan a los símbolos dados.
 
+    lookahead_minutes se ignora — la unidad de tiempo es la vela H1 completa.
+    """
     events = await _fetch_calendar()
     now = datetime.now(timezone.utc)
-    window = timedelta(minutes=lookahead_minutes)
+    candle_start, candle_end = _current_h1_candle(now)
 
     result = []
     for ev in events:
+        if not (candle_start <= ev["time_utc"] < candle_end):
+            continue
         affected = CURRENCY_TO_SYMBOLS.get(ev["currency"], [])
         matching = [s for s in symbols if s in affected]
+        if not matching:
+            continue
         delta = ev["time_utc"] - now
-        if matching and timedelta(0) <= delta <= window:
-            result.append({
-                "title": ev["title"],
-                "currency": ev["currency"],
-                "time_utc": ev["time_utc"].isoformat(),
-                "minutes_until": round(delta.total_seconds() / 60, 1),
-                "affected_symbols": matching,
-            })
+        result.append({
+            "title": ev["title"],
+            "currency": ev["currency"],
+            "time_utc": ev["time_utc"].isoformat(),
+            "minutes_until": round(delta.total_seconds() / 60, 1),
+            "affected_symbols": matching,
+        })
 
     return result
