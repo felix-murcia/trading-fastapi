@@ -1,0 +1,9 @@
+.claude/
+.codegraph/
+.continue/
+mql5/
+mt5_template/
+.mcp.json
+CLAUDE.md
+README.md
+.env.example

@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     simple_pipeline_enabled: bool = False
     signal_cooldown_minutes: int = 60     # H1: 1 vela = 60 min
     sl_risk_usd: float = 15.0
+    sl_mult: float = 1.5                  # multiplicador SL sobre distancia de la flecha
     sl_pct: float = 0.001                 # SL = 0.1% del precio de entrada
     rr_min: float = 1.0
     news_filter_enabled: bool = True
