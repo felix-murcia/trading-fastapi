@@ -15,7 +15,7 @@
 //| FastAPI calcula SL = anchor ± base_dist × SL_MULT               |
 //+------------------------------------------------------------------+
 #property copyright "Trading System"
-#property version   "1.0"
+#property version   "1.2"
 #property strict
 
 //--- Parámetros configurables
@@ -27,9 +27,9 @@ input int    EmaPeriod        = 50;
 input int    AdxPeriod        = 14;
 input double AdxMinLevel      = 20.0;
 input double AdxMaxLevel      = 50.0;
-input int    StructurePeriod  = 20;    // velas para determinar swing high/low previo
+input int    StructurePeriod  = 5;     // velas para determinar swing high/low previo
 input int    VolumePeriod     = 20;    // velas para calcular volumen medio
-input double VolumeMult       = 1.5;   // volumen mínimo = promedio × VolumeMult
+input double VolumeMult       = 1.2;   // volumen mínimo = promedio × VolumeMult
 input int    EmaExitBuffer    = 10;    // pips al otro lado de la EMA para salir
 input bool   EmaExitConfirm2  = true;  // exigir 2 velas consecutivas para cerrar por EMA
 input bool   DiagMode         = false;
@@ -68,7 +68,7 @@ int OnInit()
      }
 
    EventSetTimer(SendIntervalSec);
-   PrintFormat("StructureBreakBridge v1.0 en %s TF=%s EMA=%d ADX(%d)[%.0f-%.0f] struct=%d vol=%.1fx",
+   PrintFormat("StructureBreakBridge v1.2 en %s TF=%s EMA=%d ADX(%d)[%.0f-%.0f] struct=%d vol=%.1fx",
                Symbol(), Timeframe, EmaPeriod, AdxPeriod, AdxMinLevel, AdxMaxLevel,
                StructurePeriod, VolumeMult);
    return INIT_SUCCEEDED;

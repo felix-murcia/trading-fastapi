@@ -205,8 +205,8 @@ Solo logea cuando hay cambio de estado:
 
 | Parámetro | Default | Descripción |
 |-----------|---------|-------------|
-| `StructurePeriod` | 20 | Velas hacia atrás para determinar swing high/low |
-| `VolumeMult` | 1.5 | Volumen mínimo = promedio × VolumeMult |
+| `StructurePeriod` | 5 | Velas hacia atrás para determinar swing high/low |
+| `VolumeMult` | 1.2 | Volumen mínimo = promedio × VolumeMult |
 | `AdxMinLevel` | 20.0 | ADX mínimo de entrada |
 | `AdxMaxLevel` | 50.0 | ADX máximo de entrada |
 
@@ -214,10 +214,10 @@ Solo logea cuando hay cambio de estado:
 
 | Parámetro | Default | Descripción |
 |-----------|---------|-------------|
-| `LiquidityPeriod` | 20 | Velas para determinar el swing previo |
+| `LiquidityPeriod` | 10 | Velas para determinar el swing previo |
 | `WickRatio` | 0.5 | Mecha mínima como fracción del rango total |
 | `MinSpikePips` | 20 | Pips mínimos que debe superar el swing (tamaño del spike) |
-| `VolumeMult` | 2.0 | Volumen mínimo = promedio × VolumeMult (más estricto en XAUUSD) |
+| `VolumeMult` | 1.5 | Volumen mínimo = promedio × VolumeMult |
 | `AdxMinLevel` | 15.0 | ADX mínimo (más permisivo para XAUUSD) |
 | `AdxMaxLevel` | 65.0 | ADX máximo |
 | `EmaExitBuffer` | 20 | Pips buffer EMA para salida (mayor en XAUUSD) |

@@ -21,7 +21,7 @@
 //| SL anchor: high[1] (SELL) o low[1] (BUY) — el extremo del spike |
 //+------------------------------------------------------------------+
 #property copyright "Trading System"
-#property version   "1.0"
+#property version   "1.2"
 #property strict
 
 //--- Parámetros configurables
@@ -33,11 +33,11 @@ input int    EmaPeriod        = 50;    // solo para salida por EMA
 input int    AdxPeriod        = 14;
 input double AdxMinLevel      = 15.0;  // más permisivo para XAUUSD
 input double AdxMaxLevel      = 65.0;
-input int    LiquidityPeriod  = 20;    // velas para determinar swing previo
+input int    LiquidityPeriod  = 10;    // velas para determinar swing previo
 input double WickRatio        = 0.5;   // mínimo: mecha / rango total
 input int    MinSpikePips     = 20;    // mínimo de pips que debe superar el swing
 input int    VolumePeriod     = 20;
-input double VolumeMult       = 2.0;   // XAUUSD requiere spike de volumen mayor
+input double VolumeMult       = 1.5;   // volumen mínimo = promedio × VolumeMult
 input int    EmaExitBuffer    = 20;    // pips (XAUUSD: 1 pip = 0.10)
 input bool   EmaExitConfirm2  = true;
 input bool   DiagMode         = false;
@@ -76,7 +76,7 @@ int OnInit()
      }
 
    EventSetTimer(SendIntervalSec);
-   PrintFormat("LiquidityGrabBridge v1.0 en %s TF=%s | period=%d wick=%.1f spike=%dpips vol=%.1fx ADX[%.0f-%.0f]",
+   PrintFormat("LiquidityGrabBridge v1.2 en %s TF=%s | period=%d wick=%.1f spike=%dpips vol=%.1fx ADX[%.0f-%.0f]",
                Symbol(), Timeframe, LiquidityPeriod, WickRatio, MinSpikePips,
                VolumeMult, AdxMinLevel, AdxMaxLevel);
    return INIT_SUCCEEDED;
