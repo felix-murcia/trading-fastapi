@@ -28,7 +28,9 @@ double CalculateLots(double slDistancePrice);
 bool IsCircuitBreakerOpen();
 void CloseAllPositions();
 bool HasActivePosition();
-void NotifyTradeClosed(ulong ticket, string comment);
+void NotifyTradeClosed(ulong ticket, string comment,
+                       double entryPrice, double closePrice, double volume,
+                       double pnl, long posType, datetime entryTime);
 void NotifyTradeOpened(string direction, double entryPrice);
 
 //--- Macros MQL5
@@ -405,26 +407,30 @@ void CloseAllPositions()
       if(ticket <= 0) continue;
       if(PositionGetString(POSITION_SYMBOL) == Symbol() && PositionGetInteger(POSITION_MAGIC) == MagicNumber)
         {
-         string comment = PositionGetString(POSITION_COMMENT);
+         // Capture all data BEFORE closing (PositionGet* fails after close)
+         string comment    = PositionGetString(POSITION_COMMENT);
+         double entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+         double closePrice = SymbolInfoDouble(Symbol(), SYMBOL_BID);
+         double volume     = PositionGetDouble(POSITION_VOLUME);
+         double pnl        = PositionGetDouble(POSITION_PROFIT);
+         long   posType    = PositionGetInteger(POSITION_TYPE);
+         datetime entryTime= (datetime)PositionGetInteger(POSITION_TIME);
+
          trade.PositionClose(ticket);
-         NotifyTradeClosed(ticket, comment);
+         NotifyTradeClosed(ticket, comment, entryPrice, closePrice, volume, pnl, posType, entryTime);
         }
      }
   }
 
 //+------------------------------------------------------------------+
-//| Notify FastAPI that a trade was closed                             |
+//| Notify FastAPI that a trade was closed (data captured BEFORE close)|
 //+------------------------------------------------------------------+
-void NotifyTradeClosed(ulong ticket, string comment)
+void NotifyTradeClosed(ulong ticket, string comment,
+                       double entryPrice, double closePrice, double volume,
+                       double pnl, long posType, datetime entryTime)
   {
    string url = FastAPI_URL + "/api/v1/ai/trade/filled";
-   double entryPrice   = PositionGetDouble(POSITION_PRICE_OPEN);
-   double closePrice   = PositionGetDouble(POSITION_PRICE_CURRENT);
-   double volume       = PositionGetDouble(POSITION_VOLUME);
-   double pnl          = PositionGetDouble(POSITION_PROFIT);
-   long   posType      = PositionGetInteger(POSITION_TYPE);
-   string direction    = (posType == POSITION_TYPE_BUY) ? "LONG" : "SHORT";
-   datetime entryTime  = (datetime)PositionGetInteger(POSITION_TIME);
+   string direction = (posType == POSITION_TYPE_BUY) ? "LONG" : "SHORT";
 
    // Parse exit reason from comment
    string exitReason = "manual";
@@ -433,7 +439,7 @@ void NotifyTradeClosed(ulong ticket, string comment)
    if(StringFind(comment, "[sl") >= 0) { slHit = true; exitReason = "sl"; }
    else if(StringFind(comment, "[tp") >= 0) { tpHit = true; exitReason = "tp"; }
 
-   // Calculate pnl_pct (approximate)
+   // Calculate pnl_pct
    double pnlPct = 0.0;
    if(entryPrice > 0 && volume > 0) {
       double directionMult = (posType == POSITION_TYPE_BUY) ? 1.0 : -1.0;
