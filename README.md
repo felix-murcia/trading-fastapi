@@ -292,6 +292,24 @@ Dashboard disponible en `frontend/index.html`:
 - Rentabilidad semanal y rachas (win/loss streak)
 - Gráficos de evolución de capital
 
+## Testing
+
+Tests unitarios con pytest. Cubren servicios críticos para detectar regressions:
+
+```bash
+cd fastapi
+uv run --with pandas --with pytest --with pytest-asyncio --with httpx --with fastapi --with "pydantic>=2.0" --with pydantic-settings python3 -m pytest tests/ -v
+```
+
+**Cobertura actual** (28 tests, 100% pasan):
+
+| Archivo | Qué testa |
+|---------|-----------|
+| `tests/test_auto_retrain.py` | `_parse_timestamp` (Unix float/int/str, ISO con Z), `RetrainConfig`, `get_state` |
+| `tests/test_alerting.py` | `send_alert` (WARNING/ERROR/CRITICAL), fallback si Telegram falla |
+| `tests/test_models.py` | `TradeFilledRequest` — validación de direction, exit_reason, pnl |
+| `tests/test_config.py` | Settings desde env vars, valores por defecto críticos |
+
 ## Estado Actual (Septiembre 2026)
 
 - ✅ **AI_Quant_Terminal v10.1** - Trading activo con ML + LLM
@@ -307,6 +325,7 @@ Dashboard disponible en `frontend/index.html`:
 - ✅ **Docker FastAPI** - Contenedor funcionando en puerto 8090
 - ✅ **PostgreSQL** - Base de datos con audit_log, orders, smc_signals, trade_outcomes
 - ✅ **Qwen Opción 1** - Quality Score: contexto rico ogni candle → score 0-10 + reason + bias
+- ✅ **Unit Tests** - 28 tests cubriendo auto_retrain, alerting, models, config
 
 ## Qwen Optimization Options
 

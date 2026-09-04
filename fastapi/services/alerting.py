@@ -43,7 +43,11 @@ def send_alert(
         logger.warning(full)
 
     # TODO: integrar Telegram/Slack/email cuando esté configurado
-    _send_to_telegram(level, message, context)
+    try:
+        _send_to_telegram(level, message, context)
+    except Exception:
+        # No dejar que un fallo en el canal de notificación mate la alerta
+        logger.warning(f"Alerting channel failed: {context}")
 
 
 def _send_to_telegram(level: AlertLevel, message: str, context: dict | None) -> None:

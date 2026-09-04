@@ -1,0 +1,18 @@
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+asyncpg==0.30.0
+pydantic==2.10.3
+pydantic-settings==2.6.1
+python-dotenv==1.0.1
+httpx==0.28.1
+pandas
+scikit-learn
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.3.0+cpu
+gymnasium==0.29.1
+stable-baselines3==2.3.2
+google-cloud-storage==2.12.0
+
+# Testing
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
