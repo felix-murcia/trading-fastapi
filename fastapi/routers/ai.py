@@ -313,13 +313,20 @@ If both are OK, return the same values. If adjustment needed, propose sensible o
 # ── Helper: estimar equity desde MT5 ──────────────────────────────────────────
 async def _get_equity_estimate() -> float:
     """Equity aproximado desde MT5 para logging."""
+    from services.alerting import send_alert, AlertLevel
     try:
         async with httpx.AsyncClient() as client:
             r = await client.get(f"{settings.mt5_http_url}/api/v1/account/info", timeout=2.0)
             if r.status_code == 200:
                 return r.json().get("equity", 0.0)
-    except Exception:
-        pass
+    except Exception as e:
+        send_alert(
+            AlertLevel.ERROR,
+            "MT5",
+            f"No se pudo obtener equity desde MT5: {e}",
+            exc=e,
+            context={"mt5_url": settings.mt5_http_url}
+        )
     return 0.0
 
 class PredictRequest(BaseModel):
@@ -724,12 +731,17 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
                 **({"raw_action": raw_action} if raw_action else {})
             })
         )
-    except Exception:
-        pass
+    except Exception as resp_err:
+        from services.alerting import send_alert, AlertLevel
+        send_alert(
+            AlertLevel.ERROR,
+            "AI-PREDICT",
+            f"Error armando respuesta de predict: {resp_err}",
+            exc=resp_err,
+            context={"symbol": req.symbol, "decision": decision}
+        )
 
     # 6. Métricas de rendimiento
-    import time as _time
-    t_end = _time.time()
     from services.performance_metrics import record_cycle_metrics as _rec
     _rec(symbol=req.symbol, decision=decision, ml_prob=effective_prob, llm_bias=llm_bias,
          latency_ms=(t_end - t_start) * 1000,
@@ -777,6 +789,89 @@ async def retrain_status(_: None = Depends(verify_token)):
         "last_retrain_time": state.last_retrain_time,
         "outcomes_count": len(state.outcomes),
     }
+
+
+# ─── Pipeline Health ──────────────────────────────────────────────────────────
+# Health check integral del sistema — verifica que todo el pipeline funcione.
+
+
+class HealthCheckResponse(BaseModel):
+    status: str  # "healthy" | "degraded" | "critical"
+    components: dict  # {name: {"ok": bool, "error": str|null}}
+
+
+@router.get("/pipeline/health", response_model=HealthCheckResponse)
+async def pipeline_health() -> HealthCheckResponse:
+    """
+    Verifica la salud de todo el sistema de trading.
+    Cada componente que falle se reporta explícitamente.
+    """
+    from services.alerting import send_alert, AlertLevel
+
+    components = {}
+    issues = []
+
+    # 1. Database
+    try:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            await conn.fetchval("SELECT 1")
+        trade_count = await pool.fetchval("SELECT COUNT(*) FROM trade_outcomes")
+        components["database"] = {"ok": True, "trade_count": trade_count, "error": None}
+    except Exception as e:
+        components["database"] = {"ok": False, "error": str(e)}
+        issues.append(f"DB: {e}")
+
+    # 2. MT5 connectivity
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get(f"{settings.mt5_http_url}/api/v1/account/info", timeout=5.0)
+            mt5_ok = r.status_code == 200
+        components["mt5"] = {"ok": mt5_ok, "error": None if mt5_ok else f"HTTP {r.status_code}"}
+        if not mt5_ok:
+            issues.append(f"MT5: HTTP {r.status_code}")
+    except Exception as e:
+        components["mt5"] = {"ok": False, "error": str(e)}
+        issues.append(f"MT5: {e}")
+
+    # 3. PPO model file exists
+    MODEL_PATH = "/app/ml/ppo_trading_bot_v3.zip"
+    try:
+        model_exists = os.path.exists(MODEL_PATH)
+        components["ppo_model"] = {"ok": model_exists, "error": None if model_exists else "Model file not found"}
+        if not model_exists:
+            issues.append("PPO model missing")
+    except Exception as e:
+        components["ppo_model"] = {"ok": False, "error": str(e)}
+
+    # 4. Retrain state
+    state = _get_retrain_state()
+    components["retrain"] = {
+        "ok": True,
+        "filled_count": state.filled_count,
+        "in_progress": state.retrain_in_progress,
+        "last_retrain": state.last_retrain_time,
+        "error": None,
+    }
+    if state.filled_count == 0:
+        issues.append("No trades recorded yet (EA may not be sending webhooks)")
+
+    # Determine overall status
+    critical_failures = sum(1 for c in components.values() if not c["ok"])
+    if critical_failures > 0:
+        status = "critical" if any(c == "database" or c == "ppo_model" for c in components) else "degraded"
+    else:
+        status = "healthy"
+
+    if status != "healthy":
+        send_alert(
+            AlertLevel.ERROR,
+            "PIPELINE-HEALTH",
+            f"Pipeline status: {status}. Issues: {'; '.join(issues)}",
+            context={"components": components, "status": status},
+        )
+
+    return HealthCheckResponse(status=status, components=components)
 
 
 # ─── Trade Completion Webhook ────────────────────────────────────────────────

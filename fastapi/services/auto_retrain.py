@@ -160,7 +160,14 @@ async def record_trade_filled(
             tp_hit=tp_hit,
         )
     except Exception as j_err:
-        logger.warning("[RETRAIN] Journal error (no bloquea): %s", j_err)
+        from services.alerting import send_alert, AlertLevel
+        send_alert(
+            AlertLevel.WARNING,
+            "TRADE-JOURNAL",
+            f"Post-trade journal falló (no bloquea recording): {j_err}",
+            exc=j_err,
+            context={"trade_id": trade_id, "symbol": symbol}
+        )
 
     outcome = TradeOutcome(
         symbol=symbol,
