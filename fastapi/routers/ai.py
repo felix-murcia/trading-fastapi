@@ -110,7 +110,7 @@ Fields:
 - regime: market regime classification"""
 
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
+        async with httpx.AsyncClient(timeout=60.0) as client:
             res = await client.post(QWEN_URL, json={
                 "messages": [
                     {"role": "system", "content": "You are a quantitative trading analyst. Always respond in valid JSON."},
@@ -315,7 +315,7 @@ async def _get_equity_estimate() -> float:
     """Equity aproximado desde MT5 para logging."""
     try:
         async with httpx.AsyncClient() as client:
-            r = await client.get(f"{settings.mt5_http_url}/api/v1/account", timeout=2.0)
+            r = await client.get(f"{settings.mt5_http_url}/api/v1/account/info", timeout=2.0)
             if r.status_code == 200:
                 return r.json().get("equity", 0.0)
     except Exception:
@@ -364,9 +364,9 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     cycle_id = f"{req.symbol}_{int(time.time() * 1000)}"
     
     # ── LOG 1: Ciclo iniciado ──────────────────────────────────────────────
+    equity_val = await _get_equity_estimate()
     logger.info("[%s] ══ CICLO INICIADO ║ symbol=%s timeframe=%s position=%s equity=%.2f",
-                cycle_id, req.symbol, req.timeframe, req.position,
-                _get_equity_estimate())
+                cycle_id, req.symbol, req.timeframe, req.position, equity_val)
     # 1. Feature Engineering (Exact match to train_ppo.py)
     async with httpx.AsyncClient() as client:
         res = await client.get(f"{settings.mt5_http_url}/api/v1/market/candles/latest?symbol_name={req.symbol}&timeframe={req.timeframe}&count=100")

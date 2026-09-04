@@ -127,7 +127,7 @@ void OnTick()
 
       for(int attempt = 0; attempt < MAX_RETRIES && !success; attempt++) {
          if(attempt > 0) Sleep(BASE_RETRY_DELAY_MS * attempt);
-         res = WebRequest("POST", url, headers, 5000, postData, result, responseHeaders);
+         res = WebRequest("POST", url, headers, 30000, postData, result, responseHeaders);
          success = (res == 200);
       }
 
