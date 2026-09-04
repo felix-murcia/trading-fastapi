@@ -71,9 +71,14 @@ def get_state() -> RetrainState:
 
 
 def _parse_timestamp(ts: float | str) -> float:
-    """Acepta Unix timestamp (float) o ISO string, devuelve Unix timestamp (float)."""
+    """Acepta Unix timestamp (float or numeric string) o ISO string, devuelve Unix timestamp (float)."""
     if isinstance(ts, str):
-        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+        # Try numeric string first (Unix timestamp as string like "1725450000")
+        try:
+            return float(ts)
+        except ValueError:
+            # Fall back to ISO format
+            return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
     return float(ts)
 
 
