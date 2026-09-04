@@ -1,0 +1,53 @@
+name: trading
+
+services:
+  fastapi:
+    build: ./fastapi
+    container_name: trading-fastapi
+    volumes:
+      - ./fastapi/ml:/app/ml
+
+    restart: unless-stopped
+    networks:
+      - trading-net
+    ports:
+      - "0.0.0.0:8090:8000"
+    env_file:
+      - .env
+      - .config/ai-keys.env
+    environment:
+      - DATABASE_URL=postgresql://trading:${POSTGRES_PASSWORD}@postgres:5432/trading
+      - INTERNAL_TOKEN=${INTERNAL_TOKEN}
+      - HMAC_SECRET=${HMAC_SECRET}
+      - MT5_HTTP_URL=${MT5_HTTP_URL}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: trading-postgres
+    restart: unless-stopped
+    networks:
+      - trading-net
+    environment:
+      - POSTGRES_USER=trading
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=trading
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./fastapi/db/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trading -d trading"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+networks:
+  trading-net:
+    driver: bridge
+
+volumes:
+  postgres_data:

@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trading System | Audit Log</title>
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        .charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; padding: 20px; }
+        .chart-container { background: rgba(30, 30, 46, 0.4); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 8px; padding: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.2); }
+        .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 15px; padding: 20px 20px 0 20px; }
+        .kpi-card { background: rgba(30, 30, 46, 0.6); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 8px; padding: 15px; text-align: center; box-shadow: 0 4px 15px rgba(0,0,0,0.2); }
+        .kpi-card h3 { font-size: 0.75rem; color: #a0a0b0; margin: 0 0 5px 0; text-transform: uppercase; letter-spacing: 0.5px; }
+        .kpi-card p { font-size: 1.25rem; font-weight: bold; color: #fff; margin: 0; }
+        .positive { color: #4caf50 !important; }
+        .negative { color: #f44336 !important; }
+        @media (max-width: 900px) { .charts-grid { grid-template-columns: 1fr; } }
+    </style>
+</head>
+<body>
+    <div class="glass-container">
+        <header>
+            <div class="header-content">
+                <h1>Trading Dashboard</h1>
+                <p>Monitoreo en tiempo real de logs y noticias fundamentales</p>
+            </div>
+            
+            <div class="controls">
+                <input type="text" id="apiUrl" placeholder="http://YOUR_FASTAPI_IP:8090">
+                <input type="password" id="apiToken" placeholder="X-Internal-Token">
+                <button id="refreshBtn">Cargar Datos</button>
+            </div>
+        </header>
+
+        <div class="tabs">
+            <button class="tab-btn active" data-target="audit-tab">Audit Log</button>
+            <button class="tab-btn" data-target="news-tab">Noticias Semanales (Blackouts)</button>
+            <button class="tab-btn" data-target="stats-tab">Grafana (Rendimiento)</button>
+        </div>
+
+        <div id="stats-tab" class="tab-content">
+            <div class="kpi-grid">
+                <div class="kpi-card"><h3>Saldo Mín. Global</h3><p id="kpiBalance">0.00 €</p></div>
+                <div class="kpi-card"><h3>Rentabilidad 7D</h3><p id="kpiReturn">0.00%</p></div>
+                <div class="kpi-card"><h3>Mejor Trade</h3><p id="kpiBest" class="positive">0.00 €</p></div>
+                <div class="kpi-card"><h3>Peor Trade</h3><p id="kpiWorst" class="negative">0.00 €</p></div>
+                <div class="kpi-card"><h3>Racha Victorias</h3><p id="kpiConsWins" class="positive">0</p></div>
+                <div class="kpi-card"><h3>Racha Pérdidas</h3><p id="kpiConsLosses" class="negative">0</p></div>
+                <div class="kpi-card"><h3>Cons. Profit</h3><p id="kpiConsProfit" class="positive">0.00 €</p></div>
+            </div>
+            <div class="charts-grid">
+                <div class="chart-container"><canvas id="balanceChart"></canvas></div>
+                <div class="chart-container"><canvas id="dailyChart"></canvas></div>
+                <div class="chart-container"><canvas id="winLossChart"></canvas></div>
+                <div class="chart-container"><canvas id="symbolChart"></canvas></div>
+            </div>
+        </div>
+
+        <div id="audit-tab" class="tab-content active">
+            <div class="table-container">
+            <table id="auditTable">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Fecha (UTC)</th>
+                        <th>Evento</th>
+                        <th>Símbolo</th>
+                        <th>Cycle ID</th>
+                        <th>Detalles (JSON)</th>
+                    </tr>
+                </thead>
+                <tbody id="auditTableBody">
+                    <tr><td colspan="6" class="loading">Inicia la consulta...</td></tr>
+                </tbody>
+            </table>
+            <div class="pagination">
+                <button id="prevBtn" disabled>Anterior</button>
+                <span id="pageInfo">Página 1 de 1</span>
+                <button id="nextBtn" disabled>Siguiente</button>
+            </div>
+            </div> <!-- Closes table-container -->
+        </div> <!-- Closes audit-tab -->
+
+        <div id="news-tab" class="tab-content">
+            <div class="table-container">
+                <table id="newsTable">
+                    <thead>
+                        <tr>
+                            <th>Inicio Blackout (Local)</th>
+                            <th>Fin Blackout (Local)</th>
+                            <th>Moneda</th>
+                            <th>Evento</th>
+                            <th>Estado</th>
+                        </tr>
+                    </thead>
+                    <tbody id="newsTableBody">
+                        <tr><td colspan="5" class="loading">Inicia la consulta de noticias...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    
+    <script src="js/app.js"></script>
+</body>
+</html>

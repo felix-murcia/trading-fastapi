@@ -1,0 +1,16 @@
+.claude/
+.codegraph/
+.continue/
+mql5/
+mt5_template/
+resultadosBT/
+.mcp.json
+CLAUDE.md
+README.md
+.env.example
+.vscode/
+*.txt
+__pycache__/
+*.pyc
+*.pyo
+venv/
