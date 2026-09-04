@@ -28,6 +28,8 @@ double CalculateLots(double slDistancePrice);
 bool IsCircuitBreakerOpen();
 void CloseAllPositions();
 bool HasActivePosition();
+void NotifyTradeClosed(ulong ticket, string comment);
+void NotifyTradeOpened(string direction, double entryPrice);
 
 //--- Macros MQL5
 #define IsTesting() ((bool)MQLInfoInteger(MQL_TESTER))
@@ -248,11 +250,12 @@ void OnTick()
                bool buyOk = trade.Buy(lot, Symbol(), entry,
                                       NormalizeDouble(entry - slDistance, dig),
                                       NormalizeDouble(entry + tpDistance, dig),
-                                      "AI Predict BUY v3");
+                                      "AI Predict BUY v3[sl][tp]");
                PrintFormat("[AI Terminal v3] BUY — entry=%.5f lot=%.2f SL=%.5f TP=%.5f → %s",
                            entry, lot, NormalizeDouble(entry - slDistance, dig),
                            NormalizeDouble(entry + tpDistance, dig),
                            buyOk ? "OK" : "FALLO");
+               if(buyOk) NotifyTradeOpened("BUY", entry);
             }
            }
          else if(StringFind(r, "\"decision\":\"SELL\"") >= 0)
@@ -263,11 +266,12 @@ void OnTick()
                bool sellOk = trade.Sell(lot, Symbol(), entry,
                                        NormalizeDouble(entry + slDistance, dig),
                                        NormalizeDouble(entry - tpDistance, dig),
-                                       "AI Predict SELL v3");
+                                       "AI Predict SELL v3[sl][tp]");
                PrintFormat("[AI Terminal v3] SELL — entry=%.5f lot=%.2f SL=%.5f TP=%.5f → %s",
                            entry, lot, NormalizeDouble(entry + slDistance, dig),
                            NormalizeDouble(entry - tpDistance, dig),
                            sellOk ? "OK" : "FALLO");
+               if(sellOk) NotifyTradeOpened("SELL", entry);
             }
            }
         }
@@ -401,9 +405,97 @@ void CloseAllPositions()
       if(ticket <= 0) continue;
       if(PositionGetString(POSITION_SYMBOL) == Symbol() && PositionGetInteger(POSITION_MAGIC) == MagicNumber)
         {
+         string comment = PositionGetString(POSITION_COMMENT);
          trade.PositionClose(ticket);
+         NotifyTradeClosed(ticket, comment);
         }
      }
+  }
+
+//+------------------------------------------------------------------+
+//| Notify FastAPI that a trade was closed                             |
+//+------------------------------------------------------------------+
+void NotifyTradeClosed(ulong ticket, string comment)
+  {
+   string url = FastAPI_URL + "/api/v1/ai/trade/filled";
+   double entryPrice   = PositionGetDouble(POSITION_PRICE_OPEN);
+   double closePrice   = PositionGetDouble(POSITION_PRICE_CURRENT);
+   double volume       = PositionGetDouble(POSITION_VOLUME);
+   double pnl          = PositionGetDouble(POSITION_PROFIT);
+   long   posType      = PositionGetInteger(POSITION_TYPE);
+   string direction    = (posType == POSITION_TYPE_BUY) ? "LONG" : "SHORT";
+   datetime entryTime  = (datetime)PositionGetInteger(POSITION_TIME);
+
+   // Parse exit reason from comment
+   string exitReason = "manual";
+   bool slHit = false;
+   bool tpHit = false;
+   if(StringFind(comment, "[sl") >= 0) { slHit = true; exitReason = "sl"; }
+   else if(StringFind(comment, "[tp") >= 0) { tpHit = true; exitReason = "tp"; }
+
+   // Calculate pnl_pct (approximate)
+   double pnlPct = 0.0;
+   if(entryPrice > 0 && volume > 0) {
+      double directionMult = (posType == POSITION_TYPE_BUY) ? 1.0 : -1.0;
+      double priceDiff = (closePrice - entryPrice) * directionMult;
+      double tickValue = SymbolInfoDouble(Symbol(), SYMBOL_TRADE_TICK_VALUE);
+      double tickSize = SymbolInfoDouble(Symbol(), SYMBOL_TRADE_TICK_SIZE);
+      if(tickSize > 0 && tickValue > 0) {
+         pnlPct = (priceDiff / tickSize) * tickValue * volume / (entryPrice * volume) * 100.0;
+      }
+   }
+
+   // Build JSON body
+   string body = StringFormat(
+      "{\"symbol\":\"%s\",\"entry_time\":\"%s\",\"exit_time\":\"%s\","
+      "\"pnl\":%.2f,\"pnl_pct\":%.4f,\"direction\":\"%s\","
+      "\"sl_hit\":%s,\"tp_hit\":%s,\"exit_reason\":\"%s\"}",
+      Symbol(),
+      IntegerToString(entryTime),
+      IntegerToString(TimeCurrent()),
+      pnl, pnlPct, direction,
+      slHit ? "true" : "false",
+      tpHit ? "true" : "false",
+      exitReason
+   );
+
+   char postData[], result[];
+   string headers = "Content-Type: application/json\r\n"
+                    "X-Internal-Token: " + InternalToken + "\r\n";
+   StringToCharArray(body, postData, 0, StringLen(body));
+   ArrayResize(postData, StringLen(body));
+
+   string responseHeaders;
+   int res = WebRequest("POST", url, headers, 5000, postData, result, responseHeaders);
+   if(res == 200) {
+      PrintFormat("[AI Terminal v3] Trade closed notified: ticket=%d pnl=%.2f exit=%s", ticket, pnl, exitReason);
+   } else {
+      PrintFormat("[AI Terminal v3] NotifyTradeClosed failed: HTTP %d", res);
+   }
+  }
+
+//+------------------------------------------------------------------+
+//| Log trade open to file for debugging                              |
+//+------------------------------------------------------------------+
+void NotifyTradeOpened(string direction, double entryPrice)
+  {
+   datetime now = TimeCurrent();
+   string entryLog = StringFormat(
+      "%s|%s|%s|%.5f\n",
+      IntegerToString(now),
+      direction,
+      Symbol(),
+      entryPrice
+   );
+   
+   int handle = FileOpen("trade_entries.csv", FILE_READ|FILE_WRITE|FILE_SHARE_WRITE|FILE_CSV, ',');
+   if(handle != INVALID_HANDLE) {
+      FileSeek(handle, 0, SEEK_END);
+      FileWriteString(handle, entryLog);
+      FileClose(handle);
+   }
+   
+   PrintFormat("[AI Terminal v3] Trade OPENED: %s @ %.5f", direction, entryPrice);
   }
 
 //+------------------------------------------------------------------+
