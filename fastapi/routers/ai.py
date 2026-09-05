@@ -742,6 +742,7 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         )
 
     # 6. Métricas de rendimiento
+    t_end = time.time()
     from services.performance_metrics import record_cycle_metrics as _rec
     _rec(symbol=req.symbol, decision=decision, ml_prob=effective_prob, llm_bias=llm_bias,
          latency_ms=(t_end - t_start) * 1000,
@@ -896,13 +897,15 @@ async def trade_filled_webhook(req: TradeFilledRequest, _: None = Depends(verify
     Webhook que el MT5 EA llama cuando una orden se cierra.
     Registra el trade y dispara auto-retrain si corresponde.
     """
+    # Normalize direction to uppercase to match DB constraint (LONG/SHORT)
+    direction = req.direction.upper() if req.direction else req.direction
     await record_trade_filled(
         symbol=req.symbol,
         entry_time=req.entry_time,
         exit_time=req.exit_time,
         pnl=req.pnl,
         pnl_pct=req.pnl_pct,
-        direction=req.direction,
+        direction=direction,
         sl_hit=req.sl_hit,
         tp_hit=req.tp_hit,
         exit_reason=req.exit_reason,
