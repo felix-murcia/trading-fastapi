@@ -226,7 +226,7 @@ async def _do_retrain() -> None:
     4. Reemplaza ppo_trading_bot_v3.zip
     5. Loguea resultado
     """
-    from services.model_backup import upload_model
+    from services.model_backup import backup_model as upload_model
     from ml.trading_env_v2 import ForexTradingEnvV2  # ← V2 con spread real
 
     cfg = RetrainConfig
@@ -257,11 +257,26 @@ async def _do_retrain() -> None:
         from stable_baselines3.common.vec_env import DummyVecEnv
 
         if os.path.exists(MODEL_PATH):
-            model = PPO.load(MODEL_PATH)
-            logger.info("[RETRAIN] Modelo existente cargado — continuando entrenamiento")
+            try:
+                # Crear env primero para que SB3 valide dimensiones
+                env = DummyVecEnv([lambda: ForexTradingEnvV2(**env_cfg)])
+                model = PPO.load(MODEL_PATH, env=env)
+                logger.info("[RETRAIN] Modelo existente cargado — continuando entrenamiento")
+            except ValueError as dim_err:
+                # Mismatch de dimensiones (modelo viejo con features diferentes)
+                logger.warning(
+                    "[RETRAIN] Dimensiones incompatibles (%s) — reentrenando desde cero",
+                    dim_err,
+                )
+                env = DummyVecEnv([lambda: ForexTradingEnvV2(**env_cfg)])
+                model = PPO(
+                    "MlpPolicy",
+                    env,
+                    learning_rate=cfg.learning_rate,
+                    verbose=cfg.verbose,
+                )
         else:
             logger.warning("[RETRAIN] No hay modelo previo — creando nuevo")
-            # Necesitamos crear un modelo nuevo (requiere DummyVecEnv primero)
             env = DummyVecEnv([lambda: ForexTradingEnvV2(**env_cfg)])
             model = PPO(
                 "MlpPolicy",
@@ -271,13 +286,13 @@ async def _do_retrain() -> None:
             )
 
         # 4. Fine-tune con datos recientes
-        env = DummyVecEnv([lambda: ForexTradingEnvV2(**env_cfg)])
+        if "env" not in dir() or env is None:
+            env = DummyVecEnv([lambda: ForexTradingEnvV2(**env_cfg)])
         model.set_env(env)
 
         logger.info("[RETRAIN] Entrenando %d epochs...", cfg.n_epochs)
         model.learn(
             total_timesteps=cfg.lookback_candles * cfg.n_epochs,
-            reset_num_episodes=0,
             progress_bar=False,
         )
 

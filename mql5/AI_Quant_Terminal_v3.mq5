@@ -73,6 +73,9 @@ datetime lastManagedPositions = 0;
 datetime g_circuitBreakerReset = 0;
 int g_consecutiveErrors = 0;
 
+//--- Deal history tracking (avoid duplicate close notifications)
+ulong g_lastClosedTicket = 0;
+
 int OnInit()
   {
    trade.SetExpertMagicNumber(MagicNumber);
@@ -417,7 +420,7 @@ void CloseAllPositions()
          datetime entryTime= (datetime)PositionGetInteger(POSITION_TIME);
 
          trade.PositionClose(ticket);
-         NotifyTradeClosed(ticket, comment, entryPrice, closePrice, volume, pnl, posType, entryTime);
+         // NOTE: OnTradeTransaction will fire automatically for this close
         }
      }
   }
@@ -502,6 +505,91 @@ void NotifyTradeOpened(string direction, double entryPrice)
    }
    
    PrintFormat("[AI Terminal v3] Trade OPENED: %s @ %.5f", direction, entryPrice);
+  }
+
+//+------------------------------------------------------------------+
+//| Detect trade closes triggered by MT5 (SL/TP/Manual) via events    |
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction& trans,
+                        const MqlTradeRequest& request,
+                        const MqlTradeResult& result)
+  {
+   // Only handle deal additions (position closed)
+   if(trans.type != TRADE_TRANSACTION_DEAL_ADD) return;
+
+   ulong dealTicket = trans.deal;
+   if(dealTicket <= 0) return;
+
+   // Only our symbol
+   if(trans.symbol != Symbol()) return;
+
+   // Select the position that was closed to check magic number
+   if(!PositionSelectByTicket(trans.position)) return;
+   if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) return;
+
+   // Avoid duplicate notifications for the same deal ticket
+   if(dealTicket == g_lastClosedTicket) return;
+   g_lastClosedTicket = dealTicket;
+
+   // Get deal data via HistoryDeal
+   double entryPrice  = HistoryDealGetDouble(dealTicket, DEAL_PRICE);   // entry price of the deal
+   double volume      = HistoryDealGetDouble(dealTicket, DEAL_VOLUME);
+   double pnl         = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
+   long dealType     = HistoryDealGetInteger(dealTicket, DEAL_TYPE);    // DEAL_TYPE_BUY or DEAL_TYPE_SELL
+   string comment    = HistoryDealGetString(dealTicket, DEAL_COMMENT);
+   datetime entryTime = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME);
+   datetime closeTime = TimeCurrent();                                   // no trans.time field available
+
+   // Map deal type to direction (DEAL_TYPE_BUY=0, DEAL_TYPE_SELL=1)
+   bool isBuy = (dealType == DEAL_TYPE_BUY);
+   string direction = isBuy ? "LONG" : "SHORT";
+
+   // Parse exit reason from comment
+   string exitReason = "manual";
+   bool slHit = false, tpHit = false;
+   if(StringFind(comment, "[sl") >= 0) { slHit = true; exitReason = "sl"; }
+   else if(StringFind(comment, "[tp") >= 0) { tpHit = true; exitReason = "tp"; }
+
+   // Calculate pnl_pct
+   double pnlPct = 0.0;
+   if(entryPrice > 0 && volume > 0) {
+      double directionMult = isBuy ? 1.0 : -1.0;
+      double priceDiff = (pnl / volume) * directionMult;  // pnl per lot / direction
+      if(entryPrice > 0) {
+         pnlPct = (priceDiff / entryPrice) * 100.0;
+      }
+   }
+
+   // Build JSON body
+   string body = StringFormat(
+      "{\"symbol\":\"%s\",\"entry_time\":\"%s\",\"exit_time\":\"%s\","
+      "\"pnl\":%.2f,\"pnl_pct\":%.4f,\"direction\":\"%s\","
+      "\"sl_hit\":%s,\"tp_hit\":%s,\"exit_reason\":\"%s\"}",
+      Symbol(),
+      IntegerToString(entryTime),
+      IntegerToString(closeTime),
+      pnl, pnlPct,
+      direction,
+      slHit ? "true" : "false",
+      tpHit ? "true" : "false",
+      exitReason
+   );
+
+   char postData[], resultArr[];
+   string headers = "Content-Type: application/json\r\n"
+                  "X-Internal-Token: " + InternalToken + "\r\n";
+   StringToCharArray(body, postData, 0, StringLen(body));
+   ArrayResize(postData, StringLen(body));
+
+   string responseHeaders;
+   int res = WebRequest("POST", FastAPI_URL + "/api/v1/ai/trade/filled",
+                        headers, 5000, postData, resultArr, responseHeaders);
+   if(res == 200) {
+      PrintFormat("[AI Terminal v3] OnTradeTransaction: closed ticket=%d pnl=%.2f exit=%s",
+                  dealTicket, pnl, exitReason);
+   } else {
+      PrintFormat("[AI Terminal v3] OnTradeTransaction failed: HTTP %d", res);
+   }
   }
 
 //+------------------------------------------------------------------+

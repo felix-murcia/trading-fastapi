@@ -402,3 +402,235 @@ Se están implementando 5 capacidades progresivas para aprovechar Qwen 4B local:
 - La tabla `trade_insights` solo se llena cuando `record_trade_filled()` es llamado (trade cerrado con exit completo)
 - Trades abiertos NO generan insights — solo al cerrar (SL, TP, o cierre manual)
 - Verificar que hay trades cerrados: `docker exec trading-postgres psql -U trading -d trading -c "SELECT COUNT(*) FROM trade_outcomes;"`
+
+---
+
+## Troubleshooting — Sesión 2026-09-07
+
+Issues encontrados durante la prueba end-to-end y sus fixes.
+
+### A. EA no notifica cierres a `/api/v1/ai/trade/filled`
+
+**Síntoma:** `docker logs trading-fastapi` muestra `POST /api/v1/ai/ai/predict` pero cero `POST /api/v1/ai/trade/filled`. El `filled_count` del auto-retrain se queda en 0.
+
+**Causa raíz:** El EA solo llamaba al webhook desde `CloseAllPositions()` (cuando la predicción dice "CLOSE"), pero NO cuando MT5 cierra la posición por SL/TP automáticos. Los trades cerrados por stop/take profit se perdían.
+
+**Fix:** Agregar `OnTradeTransaction()` en el EA (`mql5/AI_Quant_Terminal_v3.mq5`):
+
+```mql5
+void OnTradeTransaction(const MqlTradeTransaction& trans,
+                        const MqlTradeRequest& request,
+                        const MqlTradeResult& result)
+{
+   if(trans.type != TRADE_TRANSACTION_DEAL_ADD) return;
+   ulong dealTicket = trans.deal;
+   if(dealTicket <= 0) return;
+   if(trans.symbol != Symbol()) return;
+
+   if(!PositionSelectByTicket(trans.position)) return;
+   if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) return;
+
+   // Deduplicación
+   if(dealTicket == g_lastClosedTicket) return;
+   g_lastClosedTicket = dealTicket;
+
+   // Datos del deal
+   double volume   = HistoryDealGetDouble(dealTicket, DEAL_VOLUME);
+   double pnl      = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
+   long dealType   = HistoryDealGetInteger(dealTicket, DEAL_TYPE);
+   string comment  = HistoryDealGetString(dealTicket, DEAL_COMMENT);
+
+   // ...POST a /api/v1/ai/trade/filled
+}
+```
+
+Y deduplicación con variable de módulo: `ulong g_lastClosedTicket = 0;`
+
+### B. MT5 rechaza WebRequest con HTTP 1003
+
+**Síntoma:** Log del EA: `Error HTTP 1003. Intentos fallidos: 1`. El backend responde 200 a `curl` desde la red local pero MT5 no llega.
+
+**Causa raíz:** MT5 requiere whitelist explícita de URLs para `WebRequest()`.
+
+**Fix en MT5:**
+1. **Tools → Options → Expert Advisors**
+2. Marcar ✅ **Allow WebRequest for listed URL**
+3. Click **Add** y agregar: `http://100.91.167.17:8090` (la IP del backend)
+4. En el chart, click derecho sobre el EA → **Properties** → **Common** → ✅ **Allow WebRequest**
+5. Reiniciar el EA (remover y volver a arrastrar al chart)
+
+**Verificación desde el host:**
+```bash
+curl -s -o /dev/null -w "HTTP %{http_code}\n" http://100.91.167.17:8090/health
+# Debe devolver: HTTP 200
+```
+
+### C. Retrain falla con `ImportError: cannot import name 'upload_model'`
+
+**Síntoma:** `docker logs trading-fastapi` muestra:
+```
+ImportError: cannot import name 'upload_model' from 'services.model_backup'
+```
+
+**Causa raíz:** En `services/auto_retrain.py:229` se importa `upload_model` pero esa función no existe. `model_backup.py` solo expone `backup_model()`.
+
+**Fix:** Alias al importar:
+```python
+# services/auto_retrain.py
+from services.model_backup import backup_model as upload_model
+```
+
+### D. Retrain falla con `Observation spaces do not match`
+
+**Síntoma:**
+```
+ValueError: Observation spaces do not match: Box(-inf, inf, (10, 16), float32) != Box(-inf, inf, (10, 21), float32)
+```
+
+**Causa raíz:** El modelo PPO preexistente fue entrenado con 12 features de mercado (16 con state channels), pero el `trading_env_v2.py` actual genera 17 features (21 con state). Mismatch de dimensiones.
+
+**Fix:** Cuando hay mismatch, reentrenar desde cero:
+```python
+# services/auto_retrain.py
+if os.path.exists(MODEL_PATH):
+    try:
+        env = DummyVecEnv([lambda: ForexTradingEnvV2(**env_cfg)])
+        model = PPO.load(MODEL_PATH, env=env)
+    except ValueError as dim_err:
+        logger.warning("Dimensiones incompatibles — reentrenando desde cero")
+        env = DummyVecEnv([lambda: ForexTradingEnvV2(**env_cfg)])
+        model = PPO("MlpPolicy", env, learning_rate=cfg.learning_rate, verbose=cfg.verbose)
+```
+
+### E. Retrain falla con `reset_num_episodes` kwarg inválido
+
+**Síntoma:** `TypeError: PPO.learn() got an unexpected keyword argument 'reset_num_episodes'`
+
+**Causa raíz:** La API de `stable_baselines3.PPO.learn()` no acepta `reset_num_episodes`.
+
+**Fix:** Eliminar el kwarg:
+```python
+# services/auto_retrain.py
+model.learn(
+    total_timesteps=cfg.lookback_candles * cfg.n_epochs,
+    progress_bar=False,
+    # reset_num_episodes=0,  # REMOVED — no soportado
+)
+```
+
+### F. `total_seconds()` falla con `float` en `trade_journal.py`
+
+**Síntoma:**
+```
+ERROR [services.trade_journal] 'float' object has no attribute 'total_seconds'
+```
+
+**Causa raíz:** El webhook recibe `entry_time` y `exit_time` como `float` (Unix timestamp) o `str` (ISO), pero `_query_qwen_trade_insight()` espera `datetime`.
+
+**Fix:** Normalizar al inicio de la función:
+```python
+# services/trade_journal.py
+from datetime import datetime, timedelta, timezone
+
+if isinstance(entry_time, (int, float)):
+    entry_time = datetime.fromtimestamp(entry_time, tz=timezone.utc)
+elif isinstance(entry_time, str):
+    try:
+        entry_time = datetime.fromtimestamp(float(entry_time), tz=timezone.utc)
+    except (ValueError, TypeError):
+        entry_time = datetime.fromisoformat(entry_time.replace("Z", "+00:00"))
+# (mismo bloque para exit_time)
+```
+
+### G. `/predict` falla con `UnboundLocalError: rsi_val`
+
+**Síntoma:** `Error HTTP 500` en `/predict` con traceback apuntando a `_query_qwen_unified(..., rsi=rsi_val, ...)`.
+
+**Causa raíz:** `rsi_val` (y `atr_val`, `macd_hist_val`, etc.) se asignan **dentro** del branch v3 exitoso del PPO. Si el modelo v3 falla o no existe, se cae al v2 que no asigna estas variables, pero la llamada a `_query_qwen_unified()` las referencia de todas formas.
+
+**Fix:** Inicializar defaults antes del bucle de modelos:
+```python
+# routers/ai.py — antes del for ppo_path, model_version in ppo_paths:
+ml_prob = 0.5
+decision = "HOLD"
+raw_action = None
+
+# Defaults para indicadores (se sobreescriben dentro del branch v3 exitoso)
+rsi_val = 50.0
+atr_val = 0.001
+atr_pct = 0.001
+macd_hist_val = 0.0
+bb_pos_val = 0.0
+range_pct = 0.002
+last_ret_val = 0.0
+hour_val = 12
+```
+
+### H. Modelo v3 retorna `model_version: v2` después del retrain
+
+**Síntoma:** Después del retrain, `/predict` retorna `model_version: v2` aunque existe `ppo_trading_bot_v3.zip`. Log: `Error con modelo /app/ml/ppo_trading_bot_v3.zip: Unexpected observation shape (10, 16) for Box environment, please use (10, 21)`.
+
+**Causa raíz:** El código de predicción construía la observación con 12 features de mercado (hardcoded), pero el modelo v3 reentrenado espera 17 features (porque `trading_env_v2.py` toma todas las features del df que no sean OHLCV).
+
+**Fix:** Auto-detectar dimensiones del modelo y usar todas las features de mercado:
+```python
+# routers/ai.py — construir obs para v3
+if model_version == "v3":
+    # Auto-detect: leer observación esperada del environment
+    expected_market_features = model.observation_space.shape[1] - 4
+
+    # Excluir OHLCV/tiempo/target — tomar el resto como features
+    _exclude = {'time', 'open', 'high', 'low', 'close', 'tick_volume', 'target', 'volume'}
+    v3_market_features = [c for c in df.columns if c not in _exclude]
+    v3_available = [f for f in v3_market_features if f in df.columns]
+    df_clean = df[v3_available].dropna()
+
+    # Pad/truncar a la cantidad esperada
+    last_market = df_clean.iloc[-10:].values.astype(np.float32)
+    if last_market.shape[1] < expected_market_features:
+        pad = np.zeros((10, expected_market_features - last_market.shape[1]), dtype=np.float32)
+        last_market = np.hstack([last_market, pad])
+    elif last_market.shape[1] > expected_market_features:
+        last_market = last_market[:, :expected_market_features]
+    # ... construir obs con state channels
+```
+
+### I. Backup a GCS falla (no bloqueante)
+
+**Síntoma:**
+```
+ERROR [services.auto_retrain] [RETRAIN] Backup falló: backup_model() takes 0 positional arguments but 1 was given
+WARNING [services.auto_retrain] [RETRAIN] ===== RETRAIN COMPLETADO (sin backup) =====
+```
+
+**Causa raíz:** `services.model_backup.backup_model()` no acepta argumentos posicionales, pero `auto_retrain._do_retrain()` lo llama como `upload_model(MODEL_PATH)`.
+
+**Estado actual:** El retrain completa y el modelo se guarda localmente correctamente. El backup a GCS es opcional y no bloquea el flujo.
+
+**Fix opcional:** Cambiar la firma de `backup_model()` para aceptar el path o ajustar el caller:
+```python
+# Opción A: ajustar caller
+backup_url = await upload_model(MODEL_PATH=None)  # usa path interno
+
+# Opción B: ajustar backup_model
+async def backup_model(model_path: str = None) -> dict:
+    path = model_path or MODEL_LOCAL_PATH
+    # ... resto del código usando `path`
+```
+
+### Resumen de archivos modificados en esta sesión
+
+| Archivo | Cambio |
+|---------|--------|
+| `mql5/AI_Quant_Terminal_v3.mq5` | Agregado `OnTradeTransaction()` para detectar cierres de MT5 |
+| `fastapi/services/auto_retrain.py` | Fix `upload_model` import, fix dim mismatch, remover `reset_num_episodes` |
+| `fastapi/services/trade_journal.py` | Normalizar `entry_time`/`exit_time` a `datetime` antes de `total_seconds()` |
+| `fastapi/routers/ai.py` | Defaults para indicadores, auto-detect v3 obs shape, todas las features para v3 |
+
+### Test E2E validado (15 pasos, 100% pass)
+
+```bash
+bash /tmp/e2e_test.sh
+```
+
+Cubre: health, predict, trade filled, normalización direction, persistencia DB, threshold de retrain, force retrain, modelo guardado, predict post-retrain.

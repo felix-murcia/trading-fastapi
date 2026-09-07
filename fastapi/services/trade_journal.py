@@ -12,7 +12,7 @@ Flujo:
 import asyncio
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
@@ -152,6 +152,22 @@ async def _query_qwen_trade_insight(
 
     Retorna: (insight_text, confidence_0_1, regime_at_entry, quality_score)
     """
+    # Normalizar entry_time y exit_time a datetime (pueden llegar como float unix)
+    if isinstance(entry_time, (int, float)):
+        entry_time = datetime.fromtimestamp(entry_time, tz=timezone.utc)
+    elif isinstance(entry_time, str):
+        try:
+            entry_time = datetime.fromtimestamp(float(entry_time), tz=timezone.utc)
+        except (ValueError, TypeError):
+            entry_time = datetime.fromisoformat(entry_time.replace("Z", "+00:00"))
+    if isinstance(exit_time, (int, float)):
+        exit_time = datetime.fromtimestamp(exit_time, tz=timezone.utc)
+    elif isinstance(exit_time, str):
+        try:
+            exit_time = datetime.fromtimestamp(float(exit_time), tz=timezone.utc)
+        except (ValueError, TypeError):
+            exit_time = datetime.fromisoformat(exit_time.replace("Z", "+00:00"))
+
     # Calcular duración
     duration = (exit_time - entry_time).total_seconds() / 3600  # horas
     win = "WIN" if pnl_pct > 0 else "LOSS"

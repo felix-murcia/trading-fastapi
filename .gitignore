@@ -11,7 +11,7 @@ forex/
 .continue/
 .codegraph/
 .config
-*.txt
+*log*.txt
 __pycache__/
 *.pyc
 *.pyo
@@ -20,3 +20,4 @@ mt5_templates/
 *.tpl
 *.ex5
 *.ex4
+.venv/

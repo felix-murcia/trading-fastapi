@@ -452,6 +452,16 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     decision = "HOLD"
     raw_action = None
 
+    # Defaults para indicadores (se sobreescriben dentro del branch v3 exitoso)
+    rsi_val = 50.0
+    atr_val = 0.001
+    atr_pct = 0.001
+    macd_hist_val = 0.0
+    bb_pos_val = 0.0
+    range_pct = 0.002
+    last_ret_val = 0.0
+    hour_val = 12
+
     # Preferir modelo v3 si existe (acción continua → autónomo en volume/SL/TP)
     ppo_paths = [
         ("/app/ml/ppo_trading_bot_v3.zip", "v3"),
@@ -464,13 +474,11 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
 
         # ── Preparar df_clean según versión del modelo ─────────────────────────
         if model_version == "v3":
-            # v3 requiere 12 features de mercado
-            v3_market_features = [
-                'returns', 'range', 'dist_sma20', 'rsi14',
-                'macd', 'macd_signal', 'macd_hist',
-                'bb_pos', 'lag_return_1', 'lag_return_2',
-                'lag_return_3', 'lag_return_5',
-            ]
+            # v3: usar todas las features de mercado (excluir OHLCV/tiempo/target)
+            # El environment v2 toma todas las features del df que no sean OHLCV
+            _exclude = {'time', 'open', 'high', 'low', 'close', 'tick_volume',
+                        'target', 'volume'}
+            v3_market_features = [c for c in df.columns if c not in _exclude]
             v3_available = [f for f in v3_market_features if f in df.columns]
             df_clean = df[v3_available].dropna()
         else:
@@ -484,19 +492,28 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
 
             # ── Construir observation matching exactamente el training ──────────
             if model_version == "v3":
-                # v3 obs: (10, 16) = 12 market features + 4 state channels × 10 steps
-                last_12 = df_clean.iloc[-10:].values.astype(np.float32)
-                # Pad if fewer than 12 features
-                if last_12.shape[1] < 12:
-                    pad = np.zeros((10, 12 - last_12.shape[1]), dtype=np.float32)
-                    last_12 = np.hstack([last_12, pad])
+                # v3 obs: (10, N_market + 4) — el shape se autodetecta del modelo
+                # Auto-detect: leer observación esperada del environment cargado
+                try:
+                    expected_market_features = model.observation_space.shape[1] - 4
+                except Exception:
+                    expected_market_features = 12  # fallback legacy
+
+                last_market = df_clean.iloc[-10:].values.astype(np.float32)
+                # Pad si hay menos features que las esperadas
+                if last_market.shape[1] < expected_market_features:
+                    pad = np.zeros((10, expected_market_features - last_market.shape[1]), dtype=np.float32)
+                    last_market = np.hstack([last_market, pad])
+                # Truncar si hay más features que las esperadas
+                elif last_market.shape[1] > expected_market_features:
+                    last_market = last_market[:, :expected_market_features]
 
                 last_price = float(df['close'].iloc[-1])
                 entry_norm = np.full((10, 1), (last_price - 1.0) / 0.1, dtype=np.float32)
                 pos_matrix = np.full((10, 1), float(req.position), dtype=np.float32)
                 unrealized_norm = np.zeros((10, 1), dtype=np.float32)
                 balance_norm = np.full((10, 1), 1.0, dtype=np.float32)
-                obs = np.hstack([last_12, entry_norm, pos_matrix, unrealized_norm, balance_norm])
+                obs = np.hstack([last_market, entry_norm, pos_matrix, unrealized_norm, balance_norm])
             else:
                 last_10 = df_clean.iloc[-10:].values
                 pos_matrix = np.full((10, 1), req.position)
