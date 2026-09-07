@@ -124,7 +124,8 @@ Fields:
             content = res.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
             if "{" in content:
                 json_str = content[content.index("{"):]
-                parsed = json.loads(json_str)
+                # Usar raw_decode para extraer solo el JSON válido, ignorando texto posterior
+                parsed, _ = json.JSONDecoder().raw_decode(json_str)
                 q = float(parsed.get("quality", 5.0))
                 reason = str(parsed.get("reason", ""))[:120]
                 bias_raw = str(parsed.get("bias", "NEUTRAL")).upper()
@@ -274,7 +275,8 @@ If both are OK, return the same values. If adjustment needed, propose sensible o
             content = res.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
             if "{" in content:
                 json_str = content[content.index("{"):]
-                parsed = json.loads(json_str)
+                # Usar raw_decode para extraer solo el JSON válido, ignorando texto posterior
+                parsed, _ = json.JSONDecoder().raw_decode(json_str)
                 sl_ok = bool(parsed.get("sl_ok", True))
                 tp_ok = bool(parsed.get("tp_ok", True))
                 sl_adj = float(parsed.get("sl_adjusted", sl_proposed))
