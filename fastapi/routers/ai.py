@@ -117,7 +117,7 @@ Fields:
                     {"role": "user", "content": prompt}
                 ],
                 "temperature": 0.2,
-                "max_tokens": 200,
+                "max_tokens": 300,
             })
 
         if res.status_code == 200:

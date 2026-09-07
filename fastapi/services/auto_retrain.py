@@ -38,6 +38,7 @@ class RetrainConfig:
     n_epochs: int = 3                    # Epochs de entrenamiento
     learning_rate: float = 3e-4
     verbose: int = 0
+    real_outcome_weight: float = 0.3      # Peso del feedback real vs sintético (0=ignorar, 1=dominante)
 
 
 @dataclass
@@ -243,12 +244,24 @@ async def _do_retrain() -> None:
         logger.error("[RETRAIN] Error obteniendo velas: %s", exc)
         return
 
-    # 2. Crear entorno con los outcomes históricos como reward shaping
+    # 2. Crear entorno con los outcomes REALES del EA como reward shaping
+    # Esto es el "auto-aprendizaje": el modelo recibe feedback de sus
+    # predicciones pasadas reales, no solo de la simulación histórica.
+    real_outcomes = list(_state.outcomes)  # copia
+    n_real = len(real_outcomes)
+    if n_real > 0:
+        logger.warning(
+            "[RETRAIN] Inyectando %d outcomes reales al env (peso=%.2f)",
+            n_real, cfg.real_outcome_weight,
+        )
+
     env_cfg = dict(
         df=df,
         window_size=cfg.retrain_window_size,
         initial_balance=cfg.initial_balance,
         commission=cfg.commission,
+        real_outcomes=real_outcomes,
+        real_outcome_weight=cfg.real_outcome_weight,
     )
 
     # 3. Cargar modelo existente o crear nuevo

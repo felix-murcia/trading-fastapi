@@ -24,6 +24,8 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 import pandas as pd
+from typing import Optional
+from datetime import datetime
 
 
 class ForexTradingEnvV2(gym.Env):
@@ -44,6 +46,8 @@ class ForexTradingEnvV2(gym.Env):
         max_tp_pips: float = 200.0,
         pip_size: float = 0.0001,       # EURUSD = 1 pip = 0.0001
         max_leverage: float = 100.0,
+        real_outcomes: Optional[list] = None,  # TradeOutcome[] del EA en producción
+        real_outcome_weight: float = 0.3,      # Peso del feedback real vs sintético
     ):
         super(ForexTradingEnvV2, self).__init__()
 
@@ -56,6 +60,15 @@ class ForexTradingEnvV2(gym.Env):
         self.max_tp_pips = max_tp_pips
         self.pip_size = pip_size
         self.max_leverage = max_leverage
+
+        # ── Real Outcome Feedback ─────────────────────────────────────────────
+        # Outcomes reales del EA en producción (no sintéticos).
+        # El modelo aprende de sus propios errores pasados cuando el
+        # step actual coincide con un trade real.
+        self.real_outcomes = real_outcomes or []
+        self.real_outcome_weight = real_outcome_weight
+        self._real_outcomes_by_step = self._index_real_outcomes(self.real_outcomes)
+        self._used_outcomes = set()  # Evitar aplicar el mismo outcome 2+ veces
 
         # Features disponibles (todas de mercado — NO hay indicadores hardcoded)
         self.features = [
@@ -94,6 +107,108 @@ class ForexTradingEnvV2(gym.Env):
         self.trade_count = 0
         self.wins = 0
         self.losses = 0
+
+    # ── Real Outcome Indexing ─────────────────────────────────────────────────
+    def _index_real_outcomes(self, outcomes: list) -> dict:
+        """
+        Indexa los outcomes reales del EA por entry_step en el dataframe.
+
+        Cada outcome tiene `entry_time` y `exit_time` (timestamps Unix).
+        Buscamos los steps del df que caen dentro de [entry_time, exit_time].
+
+        Returns: {step_idx: outcome} — primer step del trade real.
+        """
+        if not outcomes or len(self.df) == 0:
+            return {}
+
+        # El df tiene columna 'time' (Unix timestamp o ISO string) si viene de MT5
+        if 'time' not in self.df.columns:
+            return {}
+
+        # Normalizar la columna time a int (Unix timestamp) para comparación
+        time_col = self.df['time']
+        try:
+            # Intentar primero como int (Unix timestamp directo)
+            time_numeric = pd.to_numeric(time_col, errors='raise').astype('int64')
+        except (ValueError, TypeError):
+            # Si falla, parsear como ISO string → datetime → Unix
+            try:
+                time_numeric = pd.to_datetime(time_col, errors='coerce').astype('int64') // 10**9
+            except Exception:
+                return {}
+
+        indexed = {}
+        for outcome in outcomes:
+            entry_t = self._coerce_timestamp(outcome.entry_time)
+            exit_t = self._coerce_timestamp(outcome.exit_time)
+            if entry_t is None or exit_t is None:
+                continue
+
+            # Buscar el step del df cuyo 'time' esté dentro del trade
+            mask = (time_numeric >= entry_t) & (time_numeric <= exit_t)
+            if mask.any():
+                first_idx = mask.idxmax()  # Primer True
+                if first_idx not in indexed:  # Evitar pisar
+                    indexed[int(first_idx)] = outcome
+        return indexed
+
+    @staticmethod
+    def _coerce_timestamp(value) -> Optional[float]:
+        """Convierte entry_time/exit_time a float Unix timestamp."""
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, datetime):
+            return value.timestamp()
+        if isinstance(value, str):
+            try:
+                return float(value)
+            except ValueError:
+                try:
+                    return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+                except Exception:
+                    return None
+        return None
+
+    def _apply_real_outcome_feedback(self, action: np.ndarray) -> float:
+        """
+        Si el step actual coincide con un trade REAL del EA, ajusta el reward.
+
+        Esto es el "auto-aprendizaje" — el modelo recibe feedback de sus
+        predicciones pasadas reales (no solo de la simulación histórica).
+
+        Lógica:
+        - Si el modelo tomó la MISMA dirección que el trade real → reward += pnl_real * weight
+        - Si tomó dirección CONTRARIA → reward -= abs(pnl_real) * weight
+        - Si no tomó posición (FLAT) y el trade real fue rentable → pequeño malus
+        """
+        outcome = self._real_outcomes_by_step.get(self.current_step)
+        if outcome is None or self.current_step in self._used_outcomes:
+            return 0.0
+
+        self._used_outcomes.add(self.current_step)
+
+        # action[0] = direction: -1=SHORT, 0=FLAT, +1=LONG
+        action_direction = action[0] if len(action) > 0 else 0.0
+        model_pos = 1 if action_direction > 0.33 else (-1 if action_direction < -0.33 else 0)
+        real_pos = 1 if outcome.direction == "LONG" else (-1 if outcome.direction == "SHORT" else 0)
+
+        # Normalizar PnL real al rango de reward (-20 a +20)
+        # pnl puede ser -50 a +50 USD típicamente — escalamos a -5..+5
+        pnl_normalized = max(-5.0, min(5.0, outcome.pnl / 10.0))
+
+        if model_pos == real_pos and model_pos != 0:
+            # Coincidió → reforzar proporcional al PnL real
+            return pnl_normalized * self.real_outcome_weight
+        elif model_pos != 0 and real_pos != 0 and model_pos != real_pos:
+            # Contradice al trade real → penalizar
+            return -abs(pnl_normalized) * self.real_outcome_weight
+        elif model_pos == 0 and real_pos != 0 and outcome.pnl > 0:
+            # Se quedó FLAT y el trade real fue ganador → pequeño malus
+            return -1.0 * self.real_outcome_weight
+        elif model_pos == 0 and real_pos != 0 and outcome.pnl < 0:
+            # Se quedó FLAT y el trade real perdió → pequeño bonus (evitó pérdida)
+            return 0.5 * self.real_outcome_weight
+        return 0.0
 
     # ── Helper para normalizar ─────────────────────────────────────────────────
     def _norm_price(self, price):
@@ -310,6 +425,25 @@ class ForexTradingEnvV2(gym.Env):
         else:
             terminated = False
 
+        # ── Real Outcome Feedback (auto-aprendizaje) ───────────────────────────
+        # Si el step actual coincide con un trade REAL del EA en producción,
+        # ajustar el reward con feedback de su PnL real. Esto es lo que hace
+        # que el modelo "aprenda de sus errores" entre reentrenamientos.
+        if self.real_outcomes and self.current_step not in self._used_outcomes:
+            real_feedback = self._apply_real_outcome_feedback(action)
+            if real_feedback != 0.0:
+                reward += real_feedback
+                info_real = {
+                    'real_outcome_applied': True,
+                    'real_pnl': self._real_outcomes_by_step[self.current_step].pnl,
+                    'real_direction': self._real_outcomes_by_step[self.current_step].direction,
+                    'real_feedback': real_feedback,
+                }
+            else:
+                info_real = {}
+        else:
+            info_real = {}
+
         # ── Fin de episodio ────────────────────────────────────────────────────
         truncated = False
         self.current_step += 1
@@ -326,6 +460,7 @@ class ForexTradingEnvV2(gym.Env):
             'trade_count': self.trade_count,
             'wins': self.wins,
             'losses': self.losses,
+            **info_real,
         }
 
         return self._get_observation(), reward, terminated, truncated, info

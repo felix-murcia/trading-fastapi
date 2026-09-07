@@ -597,6 +597,8 @@ if model_version == "v3":
 
 ### I. Backup a GCS falla (no bloqueante)
 
+### I. Backup a GCS falla (no bloqueante)
+
 **Síntoma:**
 ```
 ERROR [services.auto_retrain] [RETRAIN] Backup falló: backup_model() takes 0 positional arguments but 1 was given
@@ -618,19 +620,76 @@ async def backup_model(model_path: str = None) -> dict:
     # ... resto del código usando `path`
 ```
 
+### J. Auto-aprendizaje del modelo (Real Outcome Feedback)
+
+**Problema:** Antes de este fix, el modelo PPO se reentrenaba solo contra velas históricas sintéticas, sin saber qué tan buenas fueron sus predicciones reales. Los trades del EA se guardaban en DB y Qwen los analizaba, pero el PPO no recibía feedback → era "amnésico" entre reentrenamientos.
+
+**Solución:** Inyectar los `TradeOutcome` reales del EA al `ForexTradingEnvV2` durante el retrain. El env ahora ajusta el reward cuando el step actual coincide con un trade real:
+
+```python
+# ml/trading_env_v2.py
+if model_pos == real_pos and model_pos != 0:
+    # Coincidió con trade real → reforzar proporcional al PnL real
+    reward += pnl_normalized * self.real_outcome_weight
+elif model_pos != 0 and real_pos != 0 and model_pos != real_pos:
+    # Contradice al trade real → penalizar
+    reward -= abs(pnl_normalized) * self.real_outcome_weight
+elif model_pos == 0 and real_pos != 0 and outcome.pnl < 0:
+    # FLAT y el trade real perdió → pequeño bonus (evitó pérdida)
+    reward += 0.5 * self.real_outcome_weight
+```
+
+**Configuración:**
+- `RetrainConfig.real_outcome_weight: float = 0.3` (peso del feedback real vs sintético)
+- `ForexTradingEnvV2(real_outcomes=[...], real_outcome_weight=0.3)` (constructor acepta outcomes)
+
+**Activación:** En `auto_retrain.py:_do_retrain()`, los outcomes se copian de `_state.outcomes` al env:
+
+```python
+real_outcomes = list(_state.outcomes)  # copia de los últimos N trades
+env_cfg = dict(
+    df=df,
+    real_outcomes=real_outcomes,
+    real_outcome_weight=cfg.real_outcome_weight,
+    ...
+)
+```
+
+**Log de confirmación:** Cada retrain ahora muestra:
+```
+[RETRAIN] Inyectando 10 outcomes reales al env (peso=0.30)
+```
+
+**Test E2E del feedback:** `docker exec trading-fastapi python3 /tmp/feedback_test.py` valida:
+- `weight=0.0` → 0 feedbacks aplicados (sintético puro)
+- LONG action vs outcome LONG+TP (+$25) → feedback `+1.25` (2.5 × 0.5)
+- LONG action vs outcome SHORT-SL (-$15) → feedback `-0.75` (-1.5 × 0.5)
+
+**Limitación actual:** Los timestamps de los outcomes se comparan con la columna `time` del df. Si los outcomes son muy recientes (después de los últimos 500 velas históricas), no se matchearán. Solución futura: extender el lookback o reindexar el df.
+
 ### Resumen de archivos modificados en esta sesión
 
 | Archivo | Cambio |
 |---------|--------|
 | `mql5/AI_Quant_Terminal_v3.mq5` | Agregado `OnTradeTransaction()` para detectar cierres de MT5 |
-| `fastapi/services/auto_retrain.py` | Fix `upload_model` import, fix dim mismatch, remover `reset_num_episodes` |
+| `fastapi/services/auto_retrain.py` | Fix `upload_model` import, fix dim mismatch, remover `reset_num_episodes`, inyectar outcomes reales |
 | `fastapi/services/trade_journal.py` | Normalizar `entry_time`/`exit_time` a `datetime` antes de `total_seconds()` |
 | `fastapi/routers/ai.py` | Defaults para indicadores, auto-detect v3 obs shape, todas las features para v3 |
+| `fastapi/ml/trading_env_v2.py` | Real outcome feedback: indexar outcomes por step, ajustar reward según PnL real |
 
-### Test E2E validado (15 pasos, 100% pass)
+### Test E2E validados (3 niveles)
 
 ```bash
+# 1. Pipeline completo
 bash /tmp/e2e_test.sh
-```
+# Cubre: health, predict, trade filled, normalización direction, persistencia DB,
+#        threshold de retrain, force retrain, modelo guardado, predict post-retrain
 
-Cubre: health, predict, trade filled, normalización direction, persistencia DB, threshold de retrain, force retrain, modelo guardado, predict post-retrain.
+# 2. Qwen 4B Jetson
+bash /tmp/qwen_test2.sh
+# Cubre: latencia, JSON parsing, predict EURUSD/XAUUSD, trade journal
+
+# 3. Auto-learning con real outcomes
+bash /tmp/auto_learn_test.sh
+docker exec trading-fastapi python3 /tmp/feedback_test.py
+# Cubre: inyección de outcomes al env, feedback positivo/negativo según PnL real
