@@ -117,7 +117,8 @@ Fields:
                     {"role": "user", "content": prompt}
                 ],
                 "temperature": 0.2,
-                "max_tokens": 300,
+                "max_tokens": 200,
+                "response_format": {"type": "json_object"},  # Forzar JSON válido
             })
 
         if res.status_code == 200:
@@ -269,6 +270,7 @@ If both are OK, return the same values. If adjustment needed, propose sensible o
                 ],
                 "temperature": 0.15,
                 "max_tokens": 150,
+                "response_format": {"type": "json_object"},  # Forzar JSON válido
             })
 
         if res.status_code == 200:

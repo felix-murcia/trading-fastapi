@@ -209,6 +209,7 @@ quality_score: how good was the original setup (0-10)"""
                 ],
                 "temperature": 0.2,
                 "max_tokens": 100,
+                "response_format": {"type": "json_object"},  # Forzar JSON válido
             })
 
         if res.status_code == 200:
