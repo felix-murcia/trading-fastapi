@@ -25,6 +25,42 @@ QWEN_URL = "http://100.90.16.33:8080/v1/chat/completions"
 QUALITY_THRESHOLD = 4.0   # Setup con score < 4 = HOLD aunque PPO quiera operar
 
 
+def _build_qwen_candle_context(df: pd.DataFrame, count: int = 10) -> str:
+    """Compact candle sequence for Qwen: trend information without raw OHLC noise."""
+    recent = df.tail(count).copy()
+    if recent.empty:
+        return "Unavailable"
+
+    close = recent["close"].astype(float)
+    previous_close = close.shift(1).fillna(close.iloc[0])
+    returns = (close / previous_close - 1.0) * 100.0
+    ranges = (recent["high"].astype(float) - recent["low"].astype(float)) / close * 100.0
+    bodies = (close - recent["open"].astype(float)).abs() / close * 100.0
+    median_volume = recent["tick_volume"].astype(float).median() if "tick_volume" in recent else 0.0
+
+    rows = []
+    for index, (_, candle) in enumerate(recent.iterrows()):
+        direction = "U" if close.iloc[index] >= float(candle["open"]) else "D"
+        volume_ratio = (
+            float(candle.get("tick_volume", 0.0)) / median_volume
+            if median_volume > 0 else 0.0
+        )
+        rows.append(
+            f"{index + 1}:r={returns.iloc[index]:+.2f}% "
+            f"rng={ranges.iloc[index]:.2f}% body={bodies.iloc[index]:.2f}% "
+            f"d={direction} v={volume_ratio:.1f}x"
+        )
+
+    total_return = (close.iloc[-1] / close.iloc[0] - 1.0) * 100.0
+    up_count = int((returns > 0).sum())
+    down_count = int((returns < 0).sum())
+    return (
+        f"last {len(recent)} H1 candles (oldest→newest), "
+        f"return={total_return:+.2f}%, up/down={up_count}/{down_count}\n"
+        + " | ".join(rows)
+    )
+
+
 # ── Helper: consultar Qwen — Opciones 1, 2, 3 unificadas ────────────────────
 async def _query_qwen_unified(
     symbol: str,
@@ -39,6 +75,7 @@ async def _query_qwen_unified(
     last_ret: float,
     hour: int,
     news: str,
+    candle_context: str,
     sl_proposed: float,
     tp_proposed: float,
     cycle_id: str,
@@ -77,10 +114,11 @@ async def _query_qwen_unified(
 
     sl_pips = sl_proposed * 100.0
     tp_pips = tp_proposed * 200.0
+    news_context = " ".join(str(news).split())[:600] or "Unavailable"
 
-    prompt = f"""Analyze this {symbol} H1 trading setup comprehensively.
+    prompt = f"""Analyze this {symbol} H1 setup. Use the candle sequence as context.
 
-Market Context:
+Context:
 - RSI(14): {rsi:.1f}
 - ATR: {atr:.5f} ({atr_pct:.2%} of price)
 - MACD histogram: {macd_hist:.6f}
@@ -89,25 +127,21 @@ Market Context:
 - Last return: {last_ret:.3%}
 - Session: {session}
 - Regime: {regime}
+- Candles: {candle_context}
 
-Live News:
-{news}
+News:
+{news_context}
 
 ML Signal: {decision} with ML confidence {ml_prob:.3f}
 
-Provide a comprehensive analysis responding EXACTLY in JSON (no extra text):
+Return EXACTLY JSON, no extra text:
 {{"quality": 7.5, "reason": "brief reason", "bias": "NEUTRAL", "confidence_modifier": 1.0,
   "sl_ok": true, "tp_ok": true, "sl_adjusted": {sl_proposed:.4f}, "tp_adjusted": {tp_proposed:.4f},
   "regime": "{regime}"}}
 
-Fields:
-- quality: rate setup 0-10
-- reason: 1-2 sentence explanation
-- bias: BULLISH/BEARISH/NEUTRAL
-- confidence_modifier: continuous multiplier 0.5-1.5 (how much to boost/reduce ML confidence)
-- sl_ok / tp_ok: whether proposed stops are reasonable
-- sl_adjusted / tp_adjusted: corrected norm values if needed (SL 0.15-0.30, TP 0.125-0.30, TP:SL ≥1.5x)
-- regime: market regime classification"""
+Fields: quality 0-10; reason max 12 words; bias BULLISH/BEARISH/NEUTRAL;
+confidence_modifier 0.5-1.5; sl_ok/tp_ok booleans; adjusted SL 0.15-0.30,
+TP 0.125-0.30 with TP:SL >=1.5; regime TRENDING/RANGING/VOLATILE/BREAKOUT."""
 
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -117,7 +151,7 @@ Fields:
                     {"role": "user", "content": prompt}
                 ],
                 "temperature": 0.2,
-                "max_tokens": 200,
+                "max_tokens": 160,
                 "response_format": {"type": "json_object"},  # Forzar JSON válido
             })
 
@@ -432,6 +466,7 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             logger.warning("[AI-PREDICT] Microstructure features fallaron: %s", ms_exc)
     
     df = df.dropna()
+    candle_context = _build_qwen_candle_context(df, count=10)
     
     # Exact 10 features matching ppo_trading_bot.zip (10 features + 1 position = 11 cols)
     MODEL_FEATURES = [
@@ -686,6 +721,7 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         last_ret=last_ret_val,
         hour=hour_val,
         news=live_news,
+        candle_context=candle_context,
         sl_proposed=raw_action["sl_pips_norm"] if raw_action and raw_action.get("version") == "v3" else 0.20,
         tp_proposed=raw_action["tp_pips_norm"] if raw_action and raw_action.get("version") == "v3" else 0.20,
         cycle_id=cycle_id,

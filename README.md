@@ -331,6 +331,87 @@ uv run --with pandas --with pytest --with pytest-asyncio --with httpx --with fas
 
 Se están implementando 5 capacidades progresivas para aprovechar Qwen 4B local:
 
+### Ejemplo de prompt enviado a Qwen 4B
+
+En cada ciclo de predicción, FastAPI construye un prompt unificado con el
+contexto técnico actual, las noticias disponibles, la señal del PPO y los
+parámetros de riesgo propuestos. Por ejemplo:
+
+```text
+Analyze this EURUSD H1 trading setup comprehensively.
+
+Market Context:
+- RSI(14): 62.4
+- ATR: 0.00125 (0.11% of price)
+- MACD histogram: 0.000318
+- Bollinger position: 0.74
+- Range: 0.16% of price
+- Last return: 0.08%
+- Session: London
+- Regime: TRENDING
+- Recent candles (oldest→newest):
+    1:r=+0.04% rng=0.12% body=0.03% d=U v=0.9x | 2:r=+0.08% rng=0.16% body=0.06% d=U v=1.2x | ... | 10:r=+0.02% rng=0.11% body=0.01% d=U v=1.1x
+
+Live News:
+No high-impact news in the next 15 minutes.
+
+ML Signal: BUY with ML confidence 0.781
+
+Provide a comprehensive analysis responding EXACTLY in JSON (no extra text):
+{"quality": 7.5, "reason": "brief reason", "bias": "NEUTRAL",
+ "confidence_modifier": 1.0, "sl_ok": true, "tp_ok": true,
+ "sl_adjusted": 0.20, "tp_adjusted": 0.28, "regime": "TRENDING"}
+
+Fields:
+- quality: rate setup 0-10
+- reason: 1-2 sentence explanation
+- bias: BULLISH/BEARISH/NEUTRAL
+- confidence_modifier: continuous multiplier 0.5-1.5
+- sl_ok / tp_ok: whether proposed stops are reasonable
+- sl_adjusted / tp_adjusted: corrected normalized values if needed
+- regime: market regime classification
+```
+
+### Ejemplo de respuesta de Qwen 4B
+
+Para el prompt anterior, una respuesta válida y compacta podría ser:
+
+```json
+{
+    "quality": 7.8,
+    "reason": "Bullish momentum with expanding range; setup is valid.",
+    "bias": "BULLISH",
+    "confidence_modifier": 1.08,
+    "sl_ok": true,
+    "tp_ok": true,
+    "sl_adjusted": 0.20,
+    "tp_adjusted": 0.30,
+    "regime": "TRENDING"
+}
+```
+
+FastAPI interpreta esta respuesta así:
+
+- `quality=7.8`: el setup supera el umbral mínimo de `4.0`.
+- `bias=BULLISH`: no contradice la señal `BUY` del PPO.
+- `confidence_modifier=1.08`: aumenta moderadamente la confianza efectiva.
+- `sl_adjusted` y `tp_adjusted`: se aplican después de validar los límites duros y el ratio TP:SL.
+- `regime=TRENDING`: queda registrado en la respuesta y en los logs.
+
+Si Qwen devuelve `quality < 4.0`, o `bias=BEARISH` para una señal `BUY`,
+FastAPI convierte la decisión final en `HOLD`. Si devuelve JSON inválido o no
+responde, se utiliza el fallback local con calidad `5.0`, sesgo `NEUTRAL` y
+modificador `1.0`.
+
+La petición se envía al endpoint compatible con OpenAI de Qwen con
+`temperature=0.2`, `max_tokens=160` y `response_format={"type":"json_object"}`.
+Se incluyen las últimas 10 velas en formato compacto: retorno, rango, cuerpo,
+dirección y volumen relativo. Las noticias se normalizan y limitan a 600
+caracteres para evitar saturar el contexto de Qwen 4B en la Jetson.
+Los valores `sl_adjusted` y `tp_adjusted` se validan de nuevo en FastAPI con
+los límites duros de SL [15-30 pips], TP [25-60 pips] y ratio TP:SL mínimo de
+1.5:1. Si Qwen no está disponible, se aplica el fallback local.
+
 ### Opción 1 — Quality Score ✅ (implementado)
 - **Qué**: Qwen recibe contexto completo de mercado (RSI, ATR, MACD, Bollinger, sesión, news) y retorna score 0-10 + reason + bias
 - **Trigger**: Cada candle (no solo BUY/SELL) — unificado en llamada única
