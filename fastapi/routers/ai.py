@@ -598,33 +598,34 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
                     "guards_applied": []
                 }
 
-                # Volume: capar siempre al 30% (equity bajo no soporta más)
-                if volume_val > 0.30:
-                    guards_log["guards_applied"].append(f"VOLUME_MAX: {volume_val:.4f}→0.30")
-                    logger.warning("[%s] GUARD-VOLUME-MAX ║ %.4f → 0.30 (equity bajo)", cycle_id, volume_val)
-                    volume_val = 0.30
-                if volume_val < 0.10:
-                    guards_log["guards_applied"].append(f"VOLUME_MIN: {volume_val:.4f}→0.10")
-                    logger.warning("[%s] GUARD-VOLUME-MIN ║ %.4f → 0.10", cycle_id, volume_val)
-                    volume_val = 0.10
-                # SL/TP: capar siempre — sin condición > 0.95
-                # (sin ella el modelo puede generar 0.8-0.9 que equivale a 160-180 pips)
-                if sl_val > 0.30:
-                    guards_log["guards_applied"].append(f"SL_MAX: {sl_val:.4f}→0.30")
-                    logger.warning("[%s] GUARD-SL-MAX ║ %.4f → 0.30 (30 pips)", cycle_id, sl_val)
-                    sl_val = 0.30
-                if tp_val > 0.30:
-                    guards_log["guards_applied"].append(f"TP_MAX: {tp_val:.4f}→0.30")
-                    logger.warning("[%s] GUARD-TP-MAX ║ %.4f → 0.30 (60 pips)", cycle_id, tp_val)
-                    tp_val = 0.30
-                if sl_val < 0.15:
-                    guards_log["guards_applied"].append(f"SL_MIN: {sl_val:.4f}→0.15")
-                    logger.warning("[%s] GUARD-SL-MIN ║ %.4f → 0.15", cycle_id, sl_val)
-                    sl_val = 0.15
-                if tp_val < 0.125:
-                    guards_log["guards_applied"].append(f"TP_MIN: {tp_val:.4f}→0.125")
-                    logger.warning("[%s] GUARD-TP-MIN ║ %.4f → 0.125", cycle_id, tp_val)
-                    tp_val = 0.125
+                # Los límites solo aplican a una acción operable. En HOLD el
+                # modelo no abre una posición y no necesita volumen ni stops.
+                if target_pos != 0:
+                    # Volume: capar siempre al 30% (equity bajo no soporta más)
+                    if volume_val > 0.30:
+                        guards_log["guards_applied"].append(f"VOLUME_MAX: {volume_val:.4f}→0.30")
+                        logger.warning("[%s] GUARD-VOLUME-MAX ║ %.4f → 0.30 (equity bajo)", cycle_id, volume_val)
+                        volume_val = 0.30
+                    if volume_val < 0.10:
+                        guards_log["guards_applied"].append(f"VOLUME_MIN: {volume_val:.4f}→0.10")
+                        logger.warning("[%s] GUARD-VOLUME-MIN ║ %.4f → 0.10", cycle_id, volume_val)
+                        volume_val = 0.10
+                    if sl_val > 0.30:
+                        guards_log["guards_applied"].append(f"SL_MAX: {sl_val:.4f}→0.30")
+                        logger.warning("[%s] GUARD-SL-MAX ║ %.4f → 0.30 (30 pips)", cycle_id, sl_val)
+                        sl_val = 0.30
+                    if tp_val > 0.30:
+                        guards_log["guards_applied"].append(f"TP_MAX: {tp_val:.4f}→0.30")
+                        logger.warning("[%s] GUARD-TP-MAX ║ %.4f → 0.30 (60 pips)", cycle_id, tp_val)
+                        tp_val = 0.30
+                    if sl_val < 0.15:
+                        guards_log["guards_applied"].append(f"SL_MIN: {sl_val:.4f}→0.15")
+                        logger.warning("[%s] GUARD-SL-MIN ║ %.4f → 0.15", cycle_id, sl_val)
+                        sl_val = 0.15
+                    if tp_val < 0.125:
+                        guards_log["guards_applied"].append(f"TP_MIN: {tp_val:.4f}→0.125")
+                        logger.warning("[%s] GUARD-TP-MIN ║ %.4f → 0.125", cycle_id, tp_val)
+                        tp_val = 0.125
 
                 if not guards_log["guards_applied"]:
                     logger.info("[%s] GUARD-CLEAN ║ sin intervención", cycle_id)

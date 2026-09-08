@@ -35,10 +35,12 @@ class RetrainConfig:
     retrain_window_size: int = 10         # Window size del entorno
     initial_balance: float = 1000.0
     commission: float = 0.0001            # 0.01% por trade (MT5 typical)
-    n_epochs: int = 3                    # Epochs de entrenamiento
+    n_epochs: int = 3                    # Epochs de entrenamiento (compatibilidad/auditoría)
+    total_timesteps: int = 100_000      # PPO steps por retrain; 1.500 era insuficiente
     learning_rate: float = 3e-4
     verbose: int = 0
     real_outcome_weight: float = 0.3      # Peso del feedback real vs sintético (0=ignorar, 1=dominante)
+    min_validation_openings: int = 1      # Un candidato HOLD permanente no reemplaza al activo
 
 
 @dataclass
@@ -218,6 +220,47 @@ async def _trigger_retrain() -> None:
             _state.retrain_in_progress = False
 
 
+def _evaluate_model(model, df: pd.DataFrame, env_cfg: dict) -> dict:
+    """Evalúa una política sin feedback real y devuelve métricas comparables."""
+    from ml.trading_env_v2 import ForexTradingEnvV2
+
+    eval_cfg = dict(env_cfg)
+    eval_cfg["df"] = df
+    eval_cfg["real_outcomes"] = []
+    env = ForexTradingEnvV2(**eval_cfg)
+    observation, _ = env.reset()
+    total_reward = 0.0
+    openings = 0
+    previous_position = 0
+    terminated = False
+    truncated = False
+
+    while not terminated and not truncated:
+        action, _ = model.predict(observation, deterministic=True)
+        action = np.asarray(action, dtype=np.float32).reshape(-1)
+        if action.size >= 1:
+            target_position = 1 if action[0] > 0.33 else (-1 if action[0] < -0.33 else 0)
+        else:
+            target_position = 0
+        if target_position != 0 and previous_position == 0:
+            openings += 1
+
+        observation, reward, terminated, truncated, info = env.step(action)
+        total_reward += float(reward)
+        previous_position = int(info.get("position", 0))
+
+    closed_trades = int(info.get("wins", 0)) + int(info.get("losses", 0))
+    wins = int(info.get("wins", 0))
+    return {
+        "openings": openings,
+        "closed_trades": closed_trades,
+        "wins": wins,
+        "losses": int(info.get("losses", 0)),
+        "win_rate": wins / closed_trades if closed_trades else 0.0,
+        "reward": total_reward,
+    }
+
+
 async def _do_retrain() -> None:
     """
     Ejecuta el retrain efectivo.
@@ -244,9 +287,13 @@ async def _do_retrain() -> None:
         logger.error("[RETRAIN] Error obteniendo velas: %s", exc)
         return
 
-    # 2. Crear entorno con los outcomes REALES del EA como reward shaping
-    # Esto es el "auto-aprendizaje": el modelo recibe feedback de sus
-    # predicciones pasadas reales, no solo de la simulación histórica.
+    # 2. Separar entrenamiento y validación para no reemplazar el modelo
+    # activo sin medir aperturas, win rate y reward en datos no vistos.
+    split_idx = max(cfg.retrain_window_size + 1, int(len(df) * 0.8))
+    train_df = df.iloc[:split_idx].reset_index(drop=True)
+    eval_df = df.iloc[split_idx - cfg.retrain_window_size:].reset_index(drop=True)
+
+    # Los outcomes reales solo son feedback real si existen cierres del EA.
     real_outcomes = list(_state.outcomes)  # copia
     n_real = len(real_outcomes)
     if n_real > 0:
@@ -254,9 +301,11 @@ async def _do_retrain() -> None:
             "[RETRAIN] Inyectando %d outcomes reales al env (peso=%.2f)",
             n_real, cfg.real_outcome_weight,
         )
+    else:
+        logger.warning("[RETRAIN] Sin cierres reales: entrenamiento solo histórico/sintético")
 
     env_cfg = dict(
-        df=df,
+        df=train_df,
         window_size=cfg.retrain_window_size,
         initial_balance=cfg.initial_balance,
         commission=cfg.commission,
@@ -303,14 +352,47 @@ async def _do_retrain() -> None:
             env = DummyVecEnv([lambda: ForexTradingEnvV2(**env_cfg)])
         model.set_env(env)
 
-        logger.info("[RETRAIN] Entrenando %d epochs...", cfg.n_epochs)
+        logger.info("[RETRAIN] Entrenando %d timesteps...", cfg.total_timesteps)
         model.learn(
-            total_timesteps=cfg.lookback_candles * cfg.n_epochs,
+            total_timesteps=cfg.total_timesteps,
             progress_bar=False,
         )
 
-        # 5. Guardar modelo
-        model.save(MODEL_PATH)
+        # 5. Evaluar el candidato y el modelo activo antes de reemplazarlo.
+        candidate_metrics = _evaluate_model(model, eval_df, env_cfg)
+        baseline_metrics = None
+        if os.path.exists(MODEL_PATH):
+            try:
+                from stable_baselines3 import PPO
+                baseline_metrics = _evaluate_model(PPO.load(MODEL_PATH), eval_df, env_cfg)
+            except Exception as baseline_err:
+                logger.warning("[RETRAIN] No se pudo evaluar baseline: %s", baseline_err)
+
+        logger.warning(
+            "[RETRAIN-EVAL] candidate openings=%d win_rate=%.3f reward=%.3f trades=%d | baseline=%s",
+            candidate_metrics["openings"], candidate_metrics["win_rate"],
+            candidate_metrics["reward"], candidate_metrics["closed_trades"],
+            baseline_metrics,
+        )
+
+        candidate_is_valid = (
+            candidate_metrics["openings"] >= cfg.min_validation_openings
+            and np.isfinite(candidate_metrics["reward"])
+        )
+        improves_baseline = (
+            baseline_metrics is None
+            or candidate_metrics["reward"] >= baseline_metrics["reward"]
+        )
+        if not candidate_is_valid or not improves_baseline:
+            logger.warning(
+                "[RETRAIN] Candidato rechazado: valid=%s improves_baseline=%s; modelo activo conservado",
+                candidate_is_valid, improves_baseline,
+            )
+            return
+
+        candidate_path = MODEL_PATH.removesuffix(".zip") + ".candidate.zip"
+        model.save(candidate_path)
+        os.replace(candidate_path, MODEL_PATH)
         _state.last_retrain_time = time.time()
 
         # 6. Backup a GCS
@@ -399,7 +481,9 @@ async def _save_retrain_metrics(df: pd.DataFrame, cfg: RetrainConfig) -> None:
         "config": {
             "trades_before_retrain": cfg.trades_before_retrain,
             "n_epochs": cfg.n_epochs,
+            "total_timesteps": cfg.total_timesteps,
             "learning_rate": cfg.learning_rate,
+            "real_outcome_feedback": bool(_state.outcomes),
         },
     }
 

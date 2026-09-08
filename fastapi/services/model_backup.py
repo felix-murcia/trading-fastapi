@@ -26,28 +26,28 @@ def _get_gcs_client():
     return storage.Client()
 
 
-def _local_backup_exists() -> bool:
-    return os.path.exists(MODEL_LOCAL_PATH)
+def _local_backup_exists(model_path: str = MODEL_LOCAL_PATH) -> bool:
+    return os.path.exists(model_path)
 
 
-def _get_model_hash() -> str:
+def _get_model_hash(model_path: str = MODEL_LOCAL_PATH) -> str:
     """Calcula hash MD5 del modelo para detectar cambios."""
     import hashlib
-    if not os.path.exists(MODEL_LOCAL_PATH):
+    if not os.path.exists(model_path):
         return "no_model"
-    with open(MODEL_LOCAL_PATH, "rb") as f:
+    with open(model_path, "rb") as f:
         return hashlib.md5(f.read()).hexdigest()[:12]
 
 
-async def backup_model() -> dict:
+async def backup_model(model_path: str = MODEL_LOCAL_PATH) -> dict:
     """
     Hace backup del modelo actual a GCS si cambió desde el último backup.
     Returns dict con info del backup.
     """
-    if not _local_backup_exists():
+    if not _local_backup_exists(model_path):
         return {"status": "skipped", "reason": "No model file found locally"}
 
-    model_hash = _get_model_hash()
+    model_hash = _get_model_hash(model_path)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     gcs_path = f"{GCS_PREFIX}/{timestamp}__{model_hash}__ppo_trading_bot.zip"
 
@@ -63,7 +63,7 @@ async def backup_model() -> dict:
             return {"status": "skipped", "reason": "Hash unchanged", "hash": model_hash, "gcs_path": existing[0]}
 
         blob = bucket.blob(gcs_path)
-        blob.upload_from_filename(MODEL_LOCAL_PATH)
+        blob.upload_from_filename(model_path)
         logger.warning("[MODEL-BACKUP] Backup creado: gs://%s/%s (hash=%s)", MODEL_BUCKET, gcs_path, model_hash)
         return {"status": "success", "hash": model_hash, "gcs_path": f"gs://{MODEL_BUCKET}/{gcs_path}"}
 

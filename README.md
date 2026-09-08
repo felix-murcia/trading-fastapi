@@ -597,27 +597,43 @@ if model_version == "v3":
 
 ### I. Backup a GCS falla (no bloqueante)
 
-### I. Backup a GCS falla (no bloqueante)
-
 **Síntoma:**
 ```
 ERROR [services.auto_retrain] [RETRAIN] Backup falló: backup_model() takes 0 positional arguments but 1 was given
 WARNING [services.auto_retrain] [RETRAIN] ===== RETRAIN COMPLETADO (sin backup) =====
 ```
 
-**Causa raíz:** `services.model_backup.backup_model()` no acepta argumentos posicionales, pero `auto_retrain._do_retrain()` lo llama como `upload_model(MODEL_PATH)`.
+**Causa raíz:** El retrain actualiza `ppo_trading_bot_v3.zip`, pero `backup_model()` estaba fijado al modelo v2 (`ppo_trading_bot.zip`) y no aceptaba una ruta como argumento.
 
-**Estado actual:** El retrain completa y el modelo se guarda localmente correctamente. El backup a GCS es opcional y no bloquea el flujo.
+**Solución implementada:** `backup_model(model_path=...)` acepta una ruta opcional y `auto_retrain.py` le pasa explícitamente `MODEL_PATH`. El backup usa ahora el hash y el archivo del modelo v3 recién entrenado.
 
-**Fix opcional:** Cambiar la firma de `backup_model()` para aceptar el path o ajustar el caller:
+**Verificación:**
 ```python
-# Opción A: ajustar caller
-backup_url = await upload_model(MODEL_PATH=None)  # usa path interno
+# services/model_backup.py
+async def backup_model(model_path: str = MODEL_LOCAL_PATH) -> dict:
+    ...
+```
 
-# Opción B: ajustar backup_model
-async def backup_model(model_path: str = None) -> dict:
-    path = model_path or MODEL_LOCAL_PATH
-    # ... resto del código usando `path`
+El retrain no se bloquea si GCS falla: el modelo ya queda guardado localmente. Revisar el motivo concreto con:
+```bash
+docker logs trading-fastapi --since 15m | grep -E "RETRAIN|MODEL-BACKUP"
+```
+
+### I.1. Promoción falla con `ppo_trading_bot_v3.candidate.zip` inexistente
+
+**Síntoma:**
+```
+FileNotFoundError: ... ppo_trading_bot_v3.candidate.zip -> ... ppo_trading_bot_v3.zip
+```
+
+**Causa raíz:** Stable-Baselines3 guardó el candidato exactamente como `ppo_trading_bot_v3.candidate`, mientras el código intentaba mover una ruta con `.zip` añadido.
+
+**Solución implementada:** El servicio guarda explícitamente `ppo_trading_bot_v3.candidate.zip` y mueve esa misma ruta con `os.replace()`.
+
+**Si el contenedor conserva código antiguo:** reconstruir el servicio y verificar la ruta cargada:
+```bash
+docker compose up -d --build fastapi
+docker exec trading-fastapi grep -n "candidate_path\|os.replace" /app/services/auto_retrain.py
 ```
 
 ### J. Auto-aprendizaje del modelo (Real Outcome Feedback)
@@ -693,3 +709,13 @@ bash /tmp/qwen_test2.sh
 bash /tmp/auto_learn_test.sh
 docker exec trading-fastapi python3 /tmp/feedback_test.py
 # Cubre: inyección de outcomes al env, feedback positivo/negativo según PnL real
+
+### K. Protecciones y evaluación antes de reemplazar PPO
+
+- Los guards de volumen, SL y TP solo se aplican cuando `target_pos` es `LONG` o `SHORT`.
+- En `HOLD`, el flujo conserva la acción del PPO y registra `GUARD-CLEAN`; no fuerza volumen mínimo.
+- Cada retrain usa `100000` `total_timesteps` por defecto; el valor anterior de `1500` era insuficiente.
+- Si no hay cierres del EA, el log indica `Sin cierres reales` y el entrenamiento se considera histórico/sintético.
+- El candidato se evalúa en una partición de validación separada usando aperturas, operaciones cerradas, win rate y reward.
+- El candidato se rechaza si no abre ninguna operación, produce reward no finito o no mejora el reward del modelo activo.
+- Solo después de pasar esa evaluación se guarda como `ppo_trading_bot_v3.zip`.
