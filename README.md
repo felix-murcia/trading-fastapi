@@ -2,6 +2,18 @@
 
 Sistema de trading automatizado que conecta Expert Advisors (MQL5) con MetaTrader 5 a través de FastAPI, utilizando **Machine Learning (PPO)** y **LLM (Qwen)** para decisiones de trading.
 
+## Fase 1 — Observable Contract (Webhook)
+- `TradeFilledRequest` extendido con `deal_ticket` y `position_id` (observable deal tracking).
+- El EA debe registrar siempre: cierre detectado, deal de apertura, payload enviado, HTTP recibido, confirmación DB.
+- Actualizado: `fastapi/routers/ai.py` (TradeFilledRequest + webhook payload).
+- Validación: `pytest fastapi/tests/test_e2e_ai_predict.py -q` → 8 passed (2026-09-09).
+- EA MQL5: `NotifyTradeClosed` envía `deal_ticket` y `position_id` en JSON.
+
+## Regla de mantenimiento
+
+Cada cambio funcional o corrección de errores debe incluir una actualización de
+este README.
+
 ## Arquitectura
 
 ```
@@ -109,6 +121,64 @@ DailyLossLimit   = 50.0              // Pérdida diaria máxima en USD
 | POST | `/v1/smc/close` | Cierre manual por símbolo |
 | GET | `/health` | Health check con estado MCP y equity |
 | GET | `/docs` | Swagger UI (FastAPI auto-generated) |
+
+## Tests de contrato EA-backend
+
+Los contratos entre `AI_Quant_Terminal_v3.mq5` y FastAPI se validan con:
+
+```bash
+cd fastapi
+source ../.venv312/bin/activate
+pytest tests/test_e2e_ai_predict.py -q
+```
+
+Las pruebas verifican que el endpoint de predicción mantiene los campos
+`volume`, `sl_pips` y `tp_pips`, que el TP cumple exactamente una relación 1:2
+con el SL, y que el webhook `trade/filled` acepta el payload generado por el EA.
+
+## Desacoplamiento en curso
+
+La primera fase fija contratos antes de extraer lógica de producción. El
+entrenamiento PPO v3 y la inferencia comparten ahora las 17 features declaradas
+por `MARKET_FEATURES`, en el mismo orden y con las mismas fórmulas. Las columnas
+`spread` y `real_volume` usan los datos recibidos de MT5 y tienen fallback a
+cero cuando no están disponibles.
+
+La primera extracción segura ya está aplicada: la construcción de la
+observación PPO v3 se encuentra en `ml/trading_env_v2.py` y conserva el padding,
+truncado y estado de posición existentes. `routers/ai.py` la utiliza sin
+modificar el contrato del endpoint. Sus invariantes están cubiertas por el test
+focalizado de predicción.
+
+La segunda extracción segura separa también la decodificación de dirección PPO
+v3 (`BUY`, `SELL` y `HOLD`) en `ml/trading_env_v2.py`. Mantiene los umbrales
+`-0.33` y `0.33`; los guards de volumen y SL/TP continúan en el predictor hasta
+su propia extracción controlada.
+
+El cambio del contrato de features requiere reentrenar
+`ppo_trading_bot_v3.zip` antes de desplegarlo. Un modelo generado con el
+contrato anterior no debe reutilizarse como si fuera compatible.
+
+El script de entrenamiento permite hasta 120 segundos para descargar las
+50.000 candles históricas desde MT5, porque esa consulta puede superar el
+timeout de 30 segundos aunque consultas más pequeñas respondan correctamente.
+
+El modelo v3 compatible con este contrato fue reentrenado el 2026-09-09 con
+200.000 pasos. La validación confirmó 17 features, observación `(10, 21)` y
+acción continua `(4,)` en `ppo_trading_bot_v3.zip`.
+
+El feedback de operaciones reales se carga desde `trade_outcomes` durante el
+auto-retrain, por lo que sobrevive a reinicios del contenedor. Se excluyen
+outcomes con timestamps inválidos y las pérdidas reales generan una penalización
+negativa en `ForexTradingEnvV2`. El reentrenamiento manual de 200.000 pasos
+anterior se realizó antes de esta corrección y no incorporó esos 69 outcomes.
+Debe ejecutarse un auto-retrain posterior para que el modelo aprenda de ellos.
+
+La notificación de cierres del EA también valida el `POSITION_ID` del deal y
+acepta el `MagicNumber` del deal de apertura o cierre. Antes, la búsqueda podía
+descartar cierres válidos sin enviar el webhook. FastAPI rechaza ahora entradas
+con timestamps anteriores a 2000 o con `exit_time <= entry_time`, evitando
+registrar filas corruptas como las de 1970.
 
 ## Docker Services
 

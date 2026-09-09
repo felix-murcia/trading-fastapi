@@ -73,6 +73,39 @@ def get_state() -> RetrainState:
     return _state
 
 
+async def _load_persisted_outcomes() -> list[TradeOutcome]:
+    """Load valid EA outcomes so feedback survives API/container restarts."""
+    from db.connection import get_pool
+
+    pool = get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT symbol, entry_time, exit_time, pnl, pnl_pct, direction,
+               sl_hit, tp_hit, exit_reason
+        FROM trade_outcomes
+        WHERE entry_time > TIMESTAMPTZ '2000-01-01'
+          AND exit_time > entry_time
+        ORDER BY exit_time
+        """
+    )
+    outcomes = []
+    for row in rows:
+        outcomes.append(
+            TradeOutcome(
+                symbol=str(row["symbol"]),
+                entry_time=row["entry_time"].timestamp(),
+                exit_time=row["exit_time"].timestamp(),
+                pnl=float(row["pnl"]),
+                pnl_pct=float(row["pnl_pct"]),
+                direction=str(row["direction"]).upper(),
+                sl_hit=bool(row["sl_hit"]),
+                tp_hit=bool(row["tp_hit"]),
+                exit_reason=str(row["exit_reason"]),
+            )
+        )
+    return outcomes
+
+
 def _parse_timestamp(ts: float | str) -> float:
     """Acepta Unix timestamp (float or numeric string) o ISO string, devuelve Unix timestamp (float)."""
     if isinstance(ts, str):
@@ -293,8 +326,12 @@ async def _do_retrain() -> None:
     train_df = df.iloc[:split_idx].reset_index(drop=True)
     eval_df = df.iloc[split_idx - cfg.retrain_window_size:].reset_index(drop=True)
 
-    # Los outcomes reales solo son feedback real si existen cierres del EA.
-    real_outcomes = list(_state.outcomes)  # copia
+    # Cargar desde DB: el estado en memoria se pierde al reiniciar el contenedor.
+    try:
+        real_outcomes = await _load_persisted_outcomes()
+    except Exception as outcomes_err:
+        logger.error("[RETRAIN] No se pudieron cargar outcomes persistidos: %s", outcomes_err)
+        real_outcomes = list(_state.outcomes)
     n_real = len(real_outcomes)
     if n_real > 0:
         logger.warning(
@@ -425,42 +462,11 @@ async def _fetch_historical_candles(symbol: str, count: int) -> list:
 
 
 def _build_training_dataframe(candles: list) -> pd.DataFrame:
-    """Construye DataFrame con las 12 features que el modelo v3 necesita."""
+    """Build the canonical v3 feature dataframe used by training and inference."""
+    from ml.trading_env_v2 import engineer_market_features
+
     df = pd.DataFrame(candles)
-    df['returns'] = df['close'].pct_change()
-    df['range'] = df['high'] - df['low']
-    df['sma20'] = df['close'].rolling(20).mean()
-    df['dist_sma20'] = (df['close'] - df['sma20']) / df['sma20']
-
-    exp1 = df['close'].ewm(span=12, adjust=False).mean()
-    exp2 = df['close'].ewm(span=26, adjust=False).mean()
-    df['macd'] = exp1 - exp2
-    df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
-    df['macd_hist'] = df['macd'] - df['macd_signal']
-
-    df['tr'] = df['high'] - df['low']
-    df['atr'] = df['tr'].rolling(14).mean()
-
-    # ── RSI (14) ─────────────────────────────────────────────────────────────
-    delta = df['close'].diff()
-    gain = delta.clip(lower=0).rolling(14).mean()
-    loss = (-delta.clip(upper=0)).rolling(14).mean()
-    rs = gain / loss.replace(0, 1e-10)
-    df['rsi14'] = 100 - (100 / (1 + rs))
-
-    # ── Bollinger Bands Position ─────────────────────────────────────────────
-    bb_sma = df['close'].rolling(20).mean()
-    bb_std = df['close'].rolling(20).std()
-    df['bb_pos'] = (df['close'] - bb_sma) / (2 * bb_std.replace(0, 1e-10))
-
-    # ── Lagged Returns ───────────────────────────────────────────────────────
-    df['lag_return_1'] = df['returns'].shift(1)
-    df['lag_return_2'] = df['returns'].shift(2)
-    df['lag_return_3'] = df['returns'].shift(3)
-    df['lag_return_5'] = df['returns'].shift(5)
-
-    df = df.dropna()
-    return df
+    return engineer_market_features(df)
 
 
 async def _save_retrain_metrics(df: pd.DataFrame, cfg: RetrainConfig) -> None:

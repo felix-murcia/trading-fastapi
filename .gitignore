@@ -1,5 +1,6 @@
 .vscode/
 .env
+.venv312/
 .env.*
 QWEN.md
 ESTADO_ACTUAL.md

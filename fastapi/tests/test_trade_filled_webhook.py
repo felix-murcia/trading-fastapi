@@ -49,6 +49,24 @@ class TestTradeFilledDirectionNormalization:
             "MQL5 sends 'long'/'short', DB requires 'LONG'/'SHORT'."
         )
 
+    def test_trade_filled_webhook_rejects_invalid_or_unordered_timestamps(self):
+        routers_ai_path = os.path.join(
+            os.path.dirname(__file__), "..", "routers", "ai.py"
+        )
+        with open(routers_ai_path, "r") as f:
+            source = f.read()
+
+        match = re.search(
+            r'async def trade_filled_webhook\(.*?\):.*?(?=\n@router|\nasync def |\nclass |\Z)',
+            source,
+            re.DOTALL,
+        )
+        assert match, "trade_filled_webhook function not found in routers/ai.py"
+        func_source = match.group(0)
+
+        assert "entry_ts < minimum_timestamp" in func_source
+        assert "exit_ts <= entry_ts" in func_source
+
 
 class TestTradeFilledPersistence:
     """Verify trade_filled persists correctly to DB via auto_retrain service."""

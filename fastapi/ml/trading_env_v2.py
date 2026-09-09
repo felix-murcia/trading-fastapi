@@ -28,6 +28,119 @@ from typing import Optional
 from datetime import datetime
 
 
+# Shared by training and production inference; request-only columns such as
+# ``hour`` must not enter the PPO observation.
+MARKET_FEATURES = (
+    "spread", "real_volume",
+    "returns", "range", "sma20", "dist_sma20",
+    "macd", "macd_signal", "macd_hist", "tr", "atr",
+    "rsi14", "bb_pos", "lag_return_1", "lag_return_2",
+    "lag_return_3", "lag_return_5",
+)
+
+
+def engineer_market_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Build the canonical v3 market feature contract for train and inference."""
+    result = df.copy()
+    close = result["close"].astype(float)
+    high = result["high"].astype(float)
+    low = result["low"].astype(float)
+
+    result["spread"] = result.get("spread", 0.0)
+    if "real_volume" not in result:
+        result["real_volume"] = result.get("tick_volume", result.get("volume", 0.0))
+
+    result["returns"] = close.pct_change().fillna(0.0)
+    result["range"] = (high - low) / close
+    result["sma20"] = close.rolling(20).mean()
+    result["dist_sma20"] = (close - result["sma20"]) / close
+
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    macd = ema12 - ema26
+    signal = macd.ewm(span=9, adjust=False).mean()
+    result["macd"] = macd / close
+    result["macd_signal"] = signal / close
+    result["macd_hist"] = (macd - signal) / close
+
+    result["tr"] = (high - low) / close
+    result["atr"] = result["tr"].rolling(14).mean()
+
+    delta = close.diff()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = (-delta.clip(upper=0)).rolling(14).mean()
+    rs = gain / (loss + 1e-10)
+    result["rsi14"] = 100 - (100 / (1 + rs))
+
+    std20 = close.rolling(20).std()
+    result["bb_pos"] = (close - result["sma20"]) / (2 * std20 + 1e-10)
+
+    for lag in (1, 2, 3, 5):
+        result[f"lag_return_{lag}"] = result["returns"].shift(lag).fillna(0.0)
+
+    return result.dropna().reset_index(drop=True)
+
+
+def get_market_features(df: pd.DataFrame) -> list[str]:
+    """Return the fixed PPO feature order, adding unavailable inputs as zero."""
+    for feature in MARKET_FEATURES:
+        if feature not in df.columns:
+            df[feature] = 0.0
+    return list(MARKET_FEATURES)
+
+
+def build_v3_observation(
+    market_values: np.ndarray,
+    expected_market_features: int,
+    position: int,
+    last_price: float,
+    window_size: int = 10,
+) -> np.ndarray:
+    """Build the v3 PPO observation using the environment state encoding."""
+    last_market = np.asarray(market_values[-window_size:], dtype=np.float32)
+    if last_market.shape[1] < expected_market_features:
+        pad = np.zeros(
+            (window_size, expected_market_features - last_market.shape[1]),
+            dtype=np.float32,
+        )
+        last_market = np.hstack([last_market, pad])
+    elif last_market.shape[1] > expected_market_features:
+        last_market = last_market[:, :expected_market_features]
+
+    state_position = 1 if position == 1 else (-1 if position == 2 else 0)
+    entry_value = (last_price - 1.0) / 0.1 if state_position != 0 else 0.0
+    entry_norm = np.full((window_size, 1), entry_value, dtype=np.float32)
+    position_matrix = np.full((window_size, 1), state_position, dtype=np.float32)
+    unrealized_norm = np.zeros((window_size, 1), dtype=np.float32)
+    balance_norm = np.full((window_size, 1), 1.0, dtype=np.float32)
+    return np.hstack([
+        last_market,
+        entry_norm,
+        position_matrix,
+        unrealized_norm,
+        balance_norm,
+    ])
+
+
+def decode_v3_direction(direction: float, current_position: int) -> tuple[int, str]:
+    """Decode the continuous direction and preserve the EA decision mapping."""
+    if direction < -0.33:
+        target_position = -1
+    elif direction > 0.33:
+        target_position = 1
+    else:
+        target_position = 0
+
+    if target_position == 1:
+        decision = "HOLD" if current_position == 1 else "BUY"
+    elif target_position == -1:
+        decision = "HOLD" if current_position == 2 else "SELL"
+    else:
+        decision = "HOLD"
+
+    return target_position, decision
+
+
 class ForexTradingEnvV2(gym.Env):
     """
     Entorno de trading FOREX totalmente autonomía.
@@ -70,12 +183,8 @@ class ForexTradingEnvV2(gym.Env):
         self._real_outcomes_by_step = self._index_real_outcomes(self.real_outcomes)
         self._used_outcomes = set()  # Evitar aplicar el mismo outcome 2+ veces
 
-        # Features disponibles (todas de mercado — NO hay indicadores hardcoded)
-        self.features = [
-            col for col in df.columns
-            if col not in ['time', 'open', 'high', 'low', 'close',
-                            'tick_volume', 'target', 'volume']
-        ]
+        # Fixed feature contract shared with the production predictor.
+        self.features = get_market_features(self.df)
 
         # ── Action Space: Box continuo 4D ──────────────────────────────────────
         # [direction, volume, sl_pips, tp_pips]
@@ -125,17 +234,22 @@ class ForexTradingEnvV2(gym.Env):
         if 'time' not in self.df.columns:
             return {}
 
-        # Normalizar la columna time a int (Unix timestamp) para comparación
+        # Normalizar timestamps numéricos e ISO sin depender de la unidad interna
+        # (ns/us) que pandas use para almacenar datetime64.
         time_col = self.df['time']
         try:
-            # Intentar primero como int (Unix timestamp directo)
-            time_numeric = pd.to_numeric(time_col, errors='raise').astype('int64')
-        except (ValueError, TypeError):
-            # Si falla, parsear como ISO string → datetime → Unix
-            try:
-                time_numeric = pd.to_datetime(time_col, errors='coerce').astype('int64') // 10**9
-            except Exception:
-                return {}
+            numeric_times = pd.to_numeric(time_col, errors='coerce')
+            if pd.api.types.is_datetime64_any_dtype(time_col):
+                numeric_mask = pd.Series(False, index=time_col.index)
+            else:
+                numeric_mask = numeric_times.notna()
+            parsed_times = pd.to_datetime(time_col, errors='coerce', utc=True)
+            time_numeric = parsed_times.map(
+                lambda value: value.timestamp() if not pd.isna(value) else np.nan
+            )
+            time_numeric = time_numeric.where(~numeric_mask, numeric_times.astype(float))
+        except Exception:
+            return {}
 
         indexed = {}
         for outcome in outcomes:
@@ -287,6 +401,11 @@ class ForexTradingEnvV2(gym.Env):
         # ── Gestionar posición existente ──────────────────────────────────────
         reward = 0.0
         close_reason = None
+        position_before_action = self.position
+        previous_close = (
+            float(self.df['close'].iloc[self.current_step - 1])
+            if self.current_step > 0 else float(current_price)
+        )
 
         if self.position != 0:
             # Calcular PnL actual
@@ -401,6 +520,16 @@ class ForexTradingEnvV2(gym.Env):
         # ── Penalizaciones suaves para forzar aprendizaje eficiente ───────────
         #   (no heurísticas duras — solo señales de que el modelo debe aprender)
         if self.position != 0:
+            # Small dense signal for directional learning. Closing rewards below
+            # remain the source of truth; this shaping only rewards progress
+            # between candles and is bounded to avoid encouraging overtrading.
+            if position_before_action == self.position and close_reason is None:
+                price_return = (float(current_price) - previous_close) / previous_close
+                directional_return = price_return * self.position
+                atr_value = float(self.df['atr'].iloc[self.current_step]) if 'atr' in self.df else 0.0
+                atr_return = max(atr_value / max(float(current_price), 1e-9), 1e-5)
+                reward += float(np.clip(directional_return / atr_return, -1.0, 1.0)) * 0.05
+
             # Swap Holding penalty
             reward -= 0.00001
             # Riesgo excesivo

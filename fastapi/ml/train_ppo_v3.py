@@ -28,7 +28,7 @@ import sys
 
 # Añadir el path para poder importar trading_env_v2
 sys.path.insert(0, '/app/ml')
-from trading_env_v2 import ForexTradingEnvV2
+from trading_env_v2 import MARKET_FEATURES, ForexTradingEnvV2, engineer_market_features
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
@@ -40,13 +40,9 @@ MT5_HTTP_URL = os.getenv("MT5_HTTP_URL")  # REQUIRED - no default
 TOKEN = os.getenv("INTERNAL_TOKEN")  # REQUIRED - no default
 
 # ════════════════════════════════════════════════════════════════
-# 10 FEATURES exactas compatibles con ai.py producción
+# Contrato completo compartido con el entorno y la inferencia v3.
 # ════════════════════════════════════════════════════════════════
-FEATURE_NAMES = [
-    'returns', 'range', 'dist_sma20', 'rsi14',
-    'macd', 'macd_signal', 'macd_hist',
-    'bb_pos', 'lag_return_1', 'lag_return_2',
-]
+FEATURE_NAMES = list(MARKET_FEATURES)
 
 # ════════════════════════════════════════════════════════════════
 # Fetch datos de MT5
@@ -59,7 +55,7 @@ def fetch_mt5_candles(symbol: str = "EURUSD", timeframe: str = "H1",
     req.add_header("X-Internal-Token", TOKEN)
 
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=120) as resp:
             data = json.loads(resp.read())
         if not data:
             raise ValueError("No candles returned")
@@ -77,53 +73,8 @@ def fetch_mt5_candles(symbol: str = "EURUSD", timeframe: str = "H1",
 # Feature Engineering — EXACTO igual que ai.py predict
 # ════════════════════════════════════════════════════════════════
 def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Exact same features as ai.py for production compatibility."""
-    df = df.copy()
-
-    close = df['close'].values
-    high = df['high'].values
-    low = df['low'].values
-
-    # Returns
-    df['returns'] = np.diff(close, prepend=close[0]) / close[0]
-
-    # Range (High - Low)
-    df['range'] = (high - low) / close
-
-    # SMA 20
-    sma20 = pd.Series(close).rolling(20).mean().values
-    df['dist_sma20'] = (close - sma20) / close
-
-    # RSI 14
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(14).mean().values
-    avg_loss = pd.Series(loss).rolling(14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    df['rsi14'] = 100 - (100 / (1 + rs))
-
-    # MACD
-    ema12 = pd.Series(close).ewm(span=12, adjust=False).mean().values
-    ema26 = pd.Series(close).ewm(span=26, adjust=False).mean().values
-    macd = ema12 - ema26
-    signal = pd.Series(macd).ewm(span=9, adjust=False).mean().values
-    df['macd'] = macd / close
-    df['macd_signal'] = signal / close
-    df['macd_hist'] = (macd - signal) / close
-
-    # Bollinger Bands
-    sma20_bb = pd.Series(close).rolling(20).mean().values
-    std20 = pd.Series(close).rolling(20).std().values
-    df['bb_pos'] = (close - sma20_bb) / (2 * std20 + 1e-10)
-
-    # Lagged returns
-    df['lag_return_1'] = df['returns'].shift(1).fillna(0)
-    df['lag_return_2'] = df['returns'].shift(2).fillna(0)
-
-    # Limpiar NaNs
-    df = df.dropna().reset_index(drop=True)
-    return df
+    """Build the canonical v3 features shared with production inference."""
+    return engineer_market_features(df)
 
 
 # ════════════════════════════════════════════════════════════════

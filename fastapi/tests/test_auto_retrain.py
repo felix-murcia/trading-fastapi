@@ -4,6 +4,8 @@ Tests for services/auto_retrain.py
 import pytest
 from datetime import datetime
 from unittest.mock import patch, AsyncMock
+import numpy as np
+import pandas as pd
 
 import sys
 import os
@@ -12,9 +14,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from services.auto_retrain import (
     _parse_timestamp,
     _persist_trade_outcome,
+    _load_persisted_outcomes,
+    TradeOutcome,
     get_state,
     RetrainConfig,
 )
+from ml.trading_env_v2 import ForexTradingEnvV2
 
 
 class TestParseTimestamp:
@@ -91,3 +96,63 @@ class TestGetState:
     def test_filled_count_starts_at_zero(self):
         state = get_state()
         assert state.filled_count == 0
+
+
+@pytest.mark.asyncio
+async def test_load_persisted_outcomes_excludes_invalid_entry_times(monkeypatch):
+    class FakePool:
+        async def fetch(self, query):
+            return [
+                {
+                    "symbol": "EURUSD",
+                    "entry_time": datetime(2026, 9, 7, 10, 0),
+                    "exit_time": datetime(2026, 9, 7, 11, 0),
+                    "pnl": -15.5,
+                    "pnl_pct": -0.0155,
+                    "direction": "LONG",
+                    "sl_hit": True,
+                    "tp_hit": False,
+                    "exit_reason": "sl",
+                }
+            ]
+
+    monkeypatch.setattr("db.connection.get_pool", lambda: FakePool())
+    outcomes = await _load_persisted_outcomes()
+
+    assert len(outcomes) == 1
+    assert outcomes[0].pnl == -15.5
+    assert outcomes[0].direction == "LONG"
+
+
+def test_real_loss_produces_negative_feedback():
+    candles = pd.DataFrame({
+        "time": pd.date_range("2026-09-07", periods=20, freq="h"),
+        "open": np.full(20, 1.1),
+        "high": np.full(20, 1.101),
+        "low": np.full(20, 1.099),
+        "close": np.full(20, 1.1),
+    })
+    outcome = TradeOutcome(
+        symbol="EURUSD",
+        entry_time=candles.iloc[10]["time"].timestamp(),
+        exit_time=candles.iloc[11]["time"].timestamp(),
+        pnl=-15.5,
+        pnl_pct=-0.0155,
+        direction="LONG",
+        sl_hit=True,
+        tp_hit=False,
+        exit_reason="sl",
+    )
+    env = ForexTradingEnvV2(
+        df=candles,
+        window_size=10,
+        real_outcomes=[outcome],
+        real_outcome_weight=0.3,
+    )
+    env.reset()
+
+    feedback = env._apply_real_outcome_feedback(
+        np.array([1.0, 0.2, 0.2, 0.2], dtype=np.float32)
+    )
+
+    assert feedback < 0

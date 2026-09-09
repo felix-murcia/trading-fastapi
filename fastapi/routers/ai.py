@@ -16,6 +16,11 @@ from services.performance_metrics import record_cycle_metrics
 from services.auto_retrain import record_trade_filled, force_retrain as _force_retrain, get_state as _get_retrain_state
 from services.market_microstructure import add_microstructure_features
 from db.connection import get_pool
+from ml.trading_env_v2 import (
+    build_v3_observation,
+    decode_v3_direction,
+    engineer_market_features,
+)
 
 router = APIRouter()
 MODEL_PATH = "/app/ml/ppo_trading_bot.zip"
@@ -177,8 +182,12 @@ TP 0.125-0.30 with TP:SL >=1.5; regime TRENDING/RANGING/VOLATILE/BREAKOUT."""
                 tp_adj = float(parsed.get("tp_adjusted", tp_proposed))
                 sl_adj = max(SL_MIN_NORM, min(SL_MAX_NORM, sl_adj))
                 tp_adj = max(TP_MIN_NORM, min(TP_MAX_NORM, tp_adj))
-                if tp_adj < sl_adj * 1.5:
-                    tp_adj = sl_adj * 1.5
+
+                # Regla de negocio: RR = 1:2 en pips.
+                # Como la escala es distinta (SL usa *100, TP usa *200), en valores
+                # normalizados el TP correcto coincide con el SL: 15 pips -> 30 pips
+                # implica sl_norm = tp_norm = 0.15, no 0.30.
+                tp_adj = sl_adj
 
                 # Effective probability (Opción 3)
                 effective_prob = float(np.exp(np.log(max(ml_prob, 1e-6)) + np.log(conf_mod)))
@@ -322,12 +331,9 @@ If both are OK, return the same values. If adjustment needed, propose sensible o
                 sl_adj = max(SL_MIN_NORM, min(SL_MAX_NORM, sl_adj))
                 tp_adj = max(TP_MIN_NORM, min(TP_MAX_NORM, tp_adj))
 
-                # Ratio 1.5:1 mínimo TP:SL
-                min_tp_for_sl = sl_adj * 1.5
-                if tp_adj < min_tp_for_sl:
-                    logger.warning("[%s] SLTP-VALIDATOR ║ ratio TP:SL=%.2f < 1.5 → bumping TP %.3f→%.3f",
-                                   cycle_id, tp_adj/sl_adj, tp_adj, min_tp_for_sl)
-                    tp_adj = min_tp_for_sl
+                # RR requerido: 1:2. En la escala normalizada usada por el modelo,
+                # el TP debe igualar al SL para producir 2x en pips.
+                tp_adj = sl_adj
 
                 if not sl_ok or not tp_ok:
                     logger.warning(
@@ -421,6 +427,8 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     df = pd.DataFrame(candles)
     if df.empty:
         return {"ml_prob": 0.5, "llm_bias": "ERROR", "decision": "HOLD"}
+
+    v3_feature_df = engineer_market_features(df)
     
     df['returns'] = df['close'].pct_change()
     df['range'] = df['high'] - df['low']
@@ -511,13 +519,10 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
 
         # ── Preparar df_clean según versión del modelo ─────────────────────────
         if model_version == "v3":
-            # v3: usar todas las features de mercado (excluir OHLCV/tiempo/target)
-            # El environment v2 toma todas las features del df que no sean OHLCV
-            _exclude = {'time', 'open', 'high', 'low', 'close', 'tick_volume',
-                        'target', 'volume'}
-            v3_market_features = [c for c in df.columns if c not in _exclude]
-            v3_available = [f for f in v3_market_features if f in df.columns]
-            df_clean = df[v3_available].dropna()
+            # v3: use the exact feature contract used by ForexTradingEnvV2.
+                from ml.trading_env_v2 import get_market_features
+                v3_features = get_market_features(v3_feature_df)
+                df_clean = v3_feature_df[v3_features].dropna()
         else:
             df_clean = df[available].dropna()
 
@@ -536,21 +541,13 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
                 except Exception:
                     expected_market_features = 12  # fallback legacy
 
-                last_market = df_clean.iloc[-10:].values.astype(np.float32)
-                # Pad si hay menos features que las esperadas
-                if last_market.shape[1] < expected_market_features:
-                    pad = np.zeros((10, expected_market_features - last_market.shape[1]), dtype=np.float32)
-                    last_market = np.hstack([last_market, pad])
-                # Truncar si hay más features que las esperadas
-                elif last_market.shape[1] > expected_market_features:
-                    last_market = last_market[:, :expected_market_features]
-
                 last_price = float(df['close'].iloc[-1])
-                entry_norm = np.full((10, 1), (last_price - 1.0) / 0.1, dtype=np.float32)
-                pos_matrix = np.full((10, 1), float(req.position), dtype=np.float32)
-                unrealized_norm = np.zeros((10, 1), dtype=np.float32)
-                balance_norm = np.full((10, 1), 1.0, dtype=np.float32)
-                obs = np.hstack([last_market, entry_norm, pos_matrix, unrealized_norm, balance_norm])
+                obs = build_v3_observation(
+                    market_values=df_clean.iloc[-10:].values,
+                    expected_market_features=expected_market_features,
+                    position=req.position,
+                    last_price=last_price,
+                )
             else:
                 last_10 = df_clean.iloc[-10:].values
                 pos_matrix = np.full((10, 1), req.position)
@@ -563,20 +560,10 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             if model_version == "v3":
                 direction, volume, sl_pips_norm, tp_pips_norm = action.squeeze()
 
-                # Decode dirección
-                if direction < -0.33:
-                    target_pos = -1  # SHORT
-                elif direction > 0.33:
-                    target_pos = 1  # LONG
-                else:
-                    target_pos = 0  # FLAT
-
-                if target_pos == 1:
-                    decision = "HOLD" if req.position == 1 else "BUY"
-                elif target_pos == -1:
-                    decision = "HOLD" if req.position == 2 else "SELL"
-                else:
-                    decision = "HOLD"
+                target_pos, decision = decode_v3_direction(
+                    float(direction),
+                    current_position=req.position,
+                )
 
                 # ml_prob = confidence de la dirección predicha
                 # v3 tiene acción continua → usar CDF del Normal para dar
@@ -649,6 +636,10 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
                         guards_log["guards_applied"].append(f"SL_MAX: {sl_val:.4f}→0.30")
                         logger.warning("[%s] GUARD-SL-MAX ║ %.4f → 0.30 (30 pips)", cycle_id, sl_val)
                         sl_val = 0.30
+                    if tp_val > sl_val:
+                        guards_log["guards_applied"].append(f"TP_RATIO_MAX: {tp_val:.4f}→{sl_val:.4f}")
+                        logger.warning("[%s] GUARD-TP-RATIO-MAX ║ %.4f → %.4f (TP en pips debe ser 2x SL; en normalizado coincide con SL)", cycle_id, tp_val, sl_val)
+                        tp_val = sl_val
                     if tp_val > 0.30:
                         guards_log["guards_applied"].append(f"TP_MAX: {tp_val:.4f}→0.30")
                         logger.warning("[%s] GUARD-TP-MAX ║ %.4f → 0.30 (60 pips)", cycle_id, tp_val)
@@ -657,10 +648,15 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
                         guards_log["guards_applied"].append(f"SL_MIN: {sl_val:.4f}→0.15")
                         logger.warning("[%s] GUARD-SL-MIN ║ %.4f → 0.15", cycle_id, sl_val)
                         sl_val = 0.15
-                    if tp_val < 0.125:
-                        guards_log["guards_applied"].append(f"TP_MIN: {tp_val:.4f}→0.125")
-                        logger.warning("[%s] GUARD-TP-MIN ║ %.4f → 0.125", cycle_id, tp_val)
-                        tp_val = 0.125
+                    if tp_val < sl_val:
+                        guards_log["guards_applied"].append(f"TP_MIN: {tp_val:.4f}→{sl_val:.4f}")
+                        logger.warning("[%s] GUARD-TP-MIN ║ %.4f → %.4f (TP debe igualar al SL en normalizado para RR 1:2)", cycle_id, tp_val, sl_val)
+                        tp_val = sl_val
+
+                    if tp_val > sl_val:
+                        guards_log["guards_applied"].append(f"TP_RATIO_MAX: {tp_val:.4f}→{sl_val:.4f}")
+                        logger.warning("[%s] GUARD-TP-RATIO-MAX ║ %.4f → %.4f (TP en pips debe ser 2x SL; en normalizado coincide con SL)", cycle_id, tp_val, sl_val)
+                        tp_val = sl_val
 
                 if not guards_log["guards_applied"]:
                     logger.info("[%s] GUARD-CLEAN ║ sin intervención", cycle_id)
@@ -947,6 +943,9 @@ class TradeFilledRequest(BaseModel):
     sl_hit: bool
     tp_hit: bool
     exit_reason: str  # "sl", "tp", "manual", "news"
+    # Fase 1 — observable contract: identificadores del deal en MT5
+    deal_ticket: int | None = None
+    position_id: int | None = None
 
 
 @router.post("/trade/filled")
@@ -955,6 +954,20 @@ async def trade_filled_webhook(req: TradeFilledRequest, _: None = Depends(verify
     Webhook que el MT5 EA llama cuando una orden se cierra.
     Registra el trade y dispara auto-retrain si corresponde.
     """
+    try:
+        from services.auto_retrain import _parse_timestamp
+        entry_ts = _parse_timestamp(req.entry_time)
+        exit_ts = _parse_timestamp(req.exit_time)
+        minimum_timestamp = 946684800.0  # 2000-01-01 UTC
+        if (
+            entry_ts < minimum_timestamp
+            or exit_ts < minimum_timestamp
+            or exit_ts <= entry_ts
+        ):
+            raise HTTPException(status_code=422, detail="entry_time and exit_time must be valid ordered timestamps")
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise HTTPException(status_code=422, detail="entry_time and exit_time must be valid timestamps") from exc
+
     # Normalize direction to uppercase to match DB constraint (LONG/SHORT)
     direction = req.direction.upper() if req.direction else req.direction
     await record_trade_filled(

@@ -11,13 +11,13 @@ Cuando el servidor FastAPI responde con campos desde el modelo v3:
 Cuando NO hay campos v3 (modelo v2 legacy), cae back a los inputs estáticos
 de RiskPercent / StopLossPips / TakeProfitPips.
 
-Cambios vs v10.1:
+Cambios vs v11.1:
   - JSON parsing extensible para volume/sl_pips/tp_pips/model_version
   -Uso directo de lot/SL/TP del modelo cuando están disponibles
   - Backwards compatible con respuestas v2 (sin esos campos)
 */
 #property copyright "AI Quant Terminal v3"
-#property version   "11.0"
+#property version   "11.2"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -81,7 +81,7 @@ int OnInit()
    trade.SetExpertMagicNumber(MagicNumber);
    trade.SetDeviationInPoints(30);
    trade.SetTypeFillingBySymbol(Symbol());
-   Print("[AI Terminal v3] Iniciado. Autonomous=", UseModelRiskParams);
+   Print("[AI Terminal v3] Version=11.2 Iniciado. Autonomous=", UseModelRiskParams);
    return INIT_SUCCEEDED;
   }
 
@@ -196,6 +196,14 @@ void OnTick()
             
             // Si tenemos los 3 parámetros del modelo → modo autónomo
             if(modelLot > 0.0 && modelSlPips > 0.0 && modelTpPips > 0.0) {
+               if(modelTpPips > modelSlPips * 2.0) {
+                  PrintFormat("[AI Terminal v3] RR corregido: %.1f -> %.1f (máximo 2:1)", modelTpPips, modelSlPips * 2.0);
+                  modelTpPips = modelSlPips * 2.0;
+               }
+               if(modelTpPips < modelSlPips) {
+                  PrintFormat("[AI Terminal v3] RR corregido: %.1f -> %.1f (mínimo 1:1 en salida)", modelTpPips, modelSlPips);
+                  modelTpPips = modelSlPips;
+               }
                hasModelParams = true;
                PrintFormat("[AI Terminal v3] MODO AUTÓNOMO: lot=%.2f sl=%.1f tp=%.1f",
                            modelLot, modelSlPips, modelTpPips);
@@ -208,6 +216,8 @@ void OnTick()
          double slPips, tpPips, lot;
          double slDistance, tpDistance;
          double p = SymbolInfoDouble(Symbol(), SYMBOL_POINT);
+         int digits = (int)SymbolInfoInteger(Symbol(), SYMBOL_DIGITS);
+         double pipSize = (digits == 3 || digits == 5) ? p * 10.0 : p;
          int dig = (int)SymbolInfoInteger(Symbol(), SYMBOL_DIGITS);
          
          if(hasModelParams)
@@ -216,8 +226,8 @@ void OnTick()
             slPips = modelSlPips;
             tpPips = modelTpPips;
             lot    = modelLot;
-            slDistance = slPips * p;
-            tpDistance = tpPips * p;
+            slDistance = slPips * pipSize;
+            tpDistance = tpPips * pipSize;
            }
          else
            {
@@ -227,13 +237,13 @@ void OnTick()
                double atrArr[];
                int atrHandle = iATR(Symbol(), PERIOD_CURRENT, ATRPeriod);
                if(CopyBuffer(atrHandle, 0, 0, 1, atrArr) > 0) {
-                  slPips = MathMax(atrArr[0] / p * 1.5, StopLossPips);
+                  slPips = MathMax(atrArr[0] / pipSize * 1.5, StopLossPips);
                }
                IndicatorRelease(atrHandle);
             }
             tpPips = TakeProfitPips;
-            slDistance = slPips * p;
-            tpDistance = tpPips * p;
+            slDistance = slPips * pipSize;
+            tpDistance = tpPips * pipSize;
             lot = CalculateLots(slDistance);
            }
          
@@ -514,7 +524,7 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
                         const MqlTradeRequest& request,
                         const MqlTradeResult& result)
   {
-   // Only handle deal additions (position closed)
+   // Only handle deals that close one of our positions.
    if(trans.type != TRADE_TRANSACTION_DEAL_ADD) return;
 
    ulong dealTicket = trans.deal;
@@ -523,25 +533,63 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
    // Only our symbol
    if(trans.symbol != Symbol()) return;
 
-   // Select the position that was closed to check magic number
-   if(!PositionSelectByTicket(trans.position)) return;
-   if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) return;
+   long dealEntry = HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
+   if(dealEntry != DEAL_ENTRY_OUT && dealEntry != DEAL_ENTRY_OUT_BY) {
+      PrintFormat("[AI Terminal v3] OnTradeTransaction skip ticket=%I64u entry=%d (not an exit)",
+                  dealTicket, dealEntry);
+      return;
+   }
 
-   // Avoid duplicate notifications for the same deal ticket
+   // Avoid duplicate notifications for the last confirmed ticket. Do not mark
+   // it yet: a failed HTTP request must remain retryable.
    if(dealTicket == g_lastClosedTicket) return;
-   g_lastClosedTicket = dealTicket;
 
-   // Get deal data via HistoryDeal
-   double entryPrice  = HistoryDealGetDouble(dealTicket, DEAL_PRICE);   // entry price of the deal
+   // Get the original opening deal from position history. The closing deal
+   // has the opposite type and must not be used as entry/direction.
+   ulong openingDeal = 0;
+   long positionId = HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID);
+   if(positionId <= 0) positionId = (long)trans.position;
+   datetime historyFrom = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME) - 86400;
+   datetime historyTo = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME) + 60;
+   if(HistorySelect(historyFrom, historyTo)) {
+      for(int i = 0; i < HistoryDealsTotal(); i++) {
+         ulong historyTicket = HistoryDealGetTicket(i);
+         if(historyTicket <= 0) continue;
+         if(HistoryDealGetInteger(historyTicket, DEAL_POSITION_ID) != positionId) continue;
+         if(HistoryDealGetInteger(historyTicket, DEAL_ENTRY) != DEAL_ENTRY_IN) continue;
+         openingDeal = historyTicket;
+         break;
+      }
+   }
+   if(openingDeal <= 0) {
+      PrintFormat("[AI Terminal v3] OnTradeTransaction skip ticket=%I64u: opening deal not found position=%I64u magic=%d",
+                  dealTicket, positionId, MagicNumber);
+      return;
+   }
+
+   long openingMagic = HistoryDealGetInteger(openingDeal, DEAL_MAGIC);
+   long closingMagic = HistoryDealGetInteger(dealTicket, DEAL_MAGIC);
+   if(openingMagic != (long)MagicNumber && closingMagic != (long)MagicNumber) {
+      PrintFormat("[AI Terminal v3] OnTradeTransaction skip ticket=%I64u: magic mismatch open=%d close=%d expected=%d",
+                  dealTicket, openingMagic, closingMagic, MagicNumber);
+      return;
+   }
+
+   double entryPrice  = HistoryDealGetDouble(openingDeal, DEAL_PRICE);
    double volume      = HistoryDealGetDouble(dealTicket, DEAL_VOLUME);
    double pnl         = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
-   long dealType     = HistoryDealGetInteger(dealTicket, DEAL_TYPE);    // DEAL_TYPE_BUY or DEAL_TYPE_SELL
    string comment    = HistoryDealGetString(dealTicket, DEAL_COMMENT);
-   datetime entryTime = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME);
+   long openingType  = HistoryDealGetInteger(openingDeal, DEAL_TYPE);
+   datetime entryTime = (datetime)HistoryDealGetInteger(openingDeal, DEAL_TIME);
    datetime closeTime = TimeCurrent();                                   // no trans.time field available
+   if(entryTime <= 0 || closeTime <= 0) {
+      PrintFormat("[AI Terminal v3] OnTradeTransaction skip ticket=%I64u: invalid timestamps entry=%d close=%d",
+                  dealTicket, entryTime, closeTime);
+      return;
+   }
 
-   // Map deal type to direction (DEAL_TYPE_BUY=0, DEAL_TYPE_SELL=1)
-   bool isBuy = (dealType == DEAL_TYPE_BUY);
+   // Map direction from the opening deal, not the closing deal.
+   bool isBuy = (openingType == DEAL_TYPE_BUY);
    string direction = isBuy ? "LONG" : "SHORT";
 
    // Parse exit reason from comment
@@ -560,11 +608,12 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
       }
    }
 
-   // Build JSON body
+   // Build JSON body — Fase 1 observable contract: deal_ticket + position_id
    string body = StringFormat(
       "{\"symbol\":\"%s\",\"entry_time\":\"%s\",\"exit_time\":\"%s\","
       "\"pnl\":%.2f,\"pnl_pct\":%.4f,\"direction\":\"%s\","
-      "\"sl_hit\":%s,\"tp_hit\":%s,\"exit_reason\":\"%s\"}",
+      "\"sl_hit\":%s,\"tp_hit\":%s,\"exit_reason\":\"%s\","
+      "\"deal_ticket\":%I64u,\"position_id\":%I64u}",
       Symbol(),
       IntegerToString(entryTime),
       IntegerToString(closeTime),
@@ -572,7 +621,9 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
       direction,
       slHit ? "true" : "false",
       tpHit ? "true" : "false",
-      exitReason
+      exitReason,
+      dealTicket,
+      (ulong)positionId
    );
 
    char postData[], resultArr[];
@@ -582,13 +633,20 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
    ArrayResize(postData, StringLen(body));
 
    string responseHeaders;
-   int res = WebRequest("POST", FastAPI_URL + "/api/v1/ai/trade/filled",
-                        headers, 5000, postData, resultArr, responseHeaders);
+   int res = -1;
+   for(int attempt = 0; attempt < MAX_RETRIES && res != 200; attempt++) {
+      if(attempt > 0) Sleep(BASE_RETRY_DELAY_MS * attempt);
+      ArrayFree(resultArr);
+      res = WebRequest("POST", FastAPI_URL + "/api/v1/ai/trade/filled",
+                       headers, 5000, postData, resultArr, responseHeaders);
+   }
    if(res == 200) {
-      PrintFormat("[AI Terminal v3] OnTradeTransaction: closed ticket=%d pnl=%.2f exit=%s",
+      g_lastClosedTicket = dealTicket;
+      PrintFormat("[AI Terminal v3] Version=11.2 close confirmed ticket=%I64u pnl=%.2f exit=%s",
                   dealTicket, pnl, exitReason);
    } else {
-      PrintFormat("[AI Terminal v3] OnTradeTransaction failed: HTTP %d", res);
+      PrintFormat("[AI Terminal v3] Version=11.2 close NOT confirmed ticket=%I64u HTTP=%d err=%d body=%s",
+            dealTicket, res, GetLastError(), CharArrayToString(resultArr));
    }
   }
 
