@@ -1,33 +1,386 @@
-import logging
-import httpx
-import pickle
-import os
+import asyncio
 import json
+import logging
+import os
 import time
-import torch
-import pandas as pd
+from typing import Optional
+
+import httpx
 import numpy as np
+import pandas as pd
+import torch
+import gymnasium as gym
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from .deps import verify_token
-from config import settings
 from stable_baselines3 import PPO
-from services.performance_metrics import record_cycle_metrics
-from services.auto_retrain import record_trade_filled, force_retrain as _force_retrain, get_state as _get_retrain_state
-from services.market_microstructure import add_microstructure_features
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+
+from config import settings
 from db.connection import get_pool
 from ml.trading_env_v2 import (
+    MARKET_FEATURES,
     build_v3_observation,
     decode_v3_direction,
     engineer_market_features,
+    get_market_features,
 )
+from services.auto_retrain import (
+    force_retrain as _force_retrain,
+    get_state as _get_retrain_state,
+    record_trade_filled,
+)
+from services.performance_metrics import record_cycle_metrics
+from .deps import verify_token
+
+
+class _DummyEnv(gym.Env):
+    def __init__(self, observation_space, action_space):
+        super().__init__()
+        self.observation_space = observation_space
+        self.action_space = action_space
+
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
+        return self.observation_space.sample(), {}
+
+    def step(self, action):
+        return self.observation_space.sample(), 0.0, False, False, {}
+
 
 router = APIRouter()
-MODEL_PATH = "/app/ml/ppo_trading_bot.zip"
-QWEN_URL = "http://100.90.16.33:8080/v1/chat/completions"
+logger = logging.getLogger(__name__)
 
-# ── Opción 1: Quality Score thresholds ───────────────────────────────────────
-QUALITY_THRESHOLD = 4.0   # Setup con score < 4 = HOLD aunque PPO quiera operar
+# Paths de artefactos
+MODEL_DIR = os.getenv("PPO_OUTPUT_DIR", "/app/ml")
+MODEL_V3_PATH = os.path.join(MODEL_DIR, "ppo_trading_bot_v3.zip")
+VEC_NORM_PATH = os.path.join(MODEL_DIR, "ppo_trading_bot_v3_vec_norm.pkl")
+QWEN_URL = getattr(settings, "qwen_url", "http://100.90.16.33:8080/v1/chat/completions")
+
+QUALITY_THRESHOLD = 4.0
+SL_MIN_NORM = 0.05
+SL_MAX_NORM = 0.30
+TP_MIN_NORM = 0.05
+TP_MAX_NORM = 0.50
+
+# Estado en memoria para inferencia rápida
+_CACHED_MODEL: Optional[PPO] = None
+_CACHED_VEC_NORM: Optional[VecNormalize] = None
+
+
+def load_inference_artifacts():
+    """Carga en memoria PPO y las estadísticas de normalización una sola vez."""
+    global _CACHED_MODEL, _CACHED_VEC_NORM
+    if os.path.exists(MODEL_V3_PATH):
+        _CACHED_MODEL = PPO.load(MODEL_V3_PATH, device="cpu")
+        logger.info("[AI-STARTUP] Modelo PPO v3 cargado en memoria exitosamente.")
+
+        if os.path.exists(VEC_NORM_PATH):
+            obs_space = getattr(_CACHED_MODEL, "observation_space", None)
+            if obs_space is None:
+                raise RuntimeError("Modelo PPO cargado sin observation_space; no se puede inicializar VecNormalize.")
+            dummy_env = DummyVecEnv([lambda: _DummyEnv(obs_space, _CACHED_MODEL.action_space)])
+            _CACHED_VEC_NORM = VecNormalize.load(VEC_NORM_PATH, dummy_env)
+            _CACHED_VEC_NORM.training = False
+            _CACHED_VEC_NORM.norm_reward = False
+            logger.info("[AI-STARTUP] Estadísticas de VecNormalize cargadas.")
+        else:
+            _CACHED_VEC_NORM = None
+            logger.warning("[AI-STARTUP] Alerta: No se encontró %s. Inferencia sin normalizar.", VEC_NORM_PATH)
+    else:
+        raise RuntimeError("No se encontró el modelo PPO en %s." % MODEL_V3_PATH)
+
+
+@router.on_event("startup")
+async def on_startup():
+    load_inference_artifacts()
+
+
+def _build_qwen_candle_context(df: pd.DataFrame, count: int = 10) -> str:
+    """Compact candle sequence for Qwen: trend information without raw OHLC noise."""
+    recent = df.tail(count).copy()
+    if recent.empty:
+        return "Unavailable"
+
+    close = recent["close"].astype(float)
+    previous_close = close.shift(1).fillna(close.iloc[0])
+    returns = (close / previous_close - 1.0) * 100.0
+    ranges = (recent["high"].astype(float) - recent["low"].astype(float)) / close * 100.0
+    bodies = (close - recent["open"].astype(float)).abs() / close * 100.0
+    median_volume = recent["tick_volume"].astype(float).median() if "tick_volume" in recent else 0.0
+
+    rows = []
+    for index, (_, candle) in enumerate(recent.iterrows()):
+        direction = "U" if close.iloc[index] >= float(candle["open"]) else "D"
+        volume_ratio = (
+            float(candle.get("tick_volume", 0.0)) / median_volume
+            if median_volume > 0 else 0.0
+        )
+        rows.append(
+            f"{index + 1}:r={returns.iloc[index]:+.2f}% "
+            f"rng={ranges.iloc[index]:.2f}% body={bodies.iloc[index]:.2f}% "
+            f"d={direction} v={volume_ratio:.1f}x"
+        )
+
+    total_return = (close.iloc[-1] / close.iloc[0] - 1.0) * 100.0
+    up_count = int((returns > 0).sum())
+    down_count = int((returns < 0).sum())
+    return (
+        f"last {len(recent)} H1 candles (oldest→newest), "
+        f"return={total_return:+.2f}%, up/down={up_count}/{down_count}\n"
+        + " | ".join(rows)
+    )
+
+
+async def _query_qwen_unified(
+    symbol: str,
+    decision: str,
+    ml_prob: float,
+    rsi: float,
+    atr: float,
+    atr_pct: float,
+    macd_hist: float,
+    bb_pos: float,
+    range_pct: float,
+    last_ret: float,
+    hour: int,
+    news: str,
+    candle_context: str,
+    sl_proposed: float,
+    tp_proposed: float,
+    cycle_id: str,
+) -> dict:
+    """
+    Opciones 1+2+3 unificadas — una sola llamada a Qwen por candle.
+
+    Retorna:
+      - quality_score: 0-10
+      - quality_reason: str
+      - llm_bias: BULLISH/BEARISH/NEUTRAL
+      - confidence_modifier: 0.5-1.5 (Opción 3)
+      - sl_adjusted / tp_adjusted: norm values (Opción 2)
+      - regime: TRENDING/RANGING/VOLATILE/BREAKOUT (Opción 4 anticipado)
+    """
+    # Clasificar sesión
+    if 7 <= hour < 12:
+        session = "London"
+    elif 12 <= hour < 17:
+        session = "NY"
+    elif 17 <= hour < 23:
+        session = "Asia"
+    else:
+        session = "Weekend/Closed"
+
+    # Clasificar régimen
+    if abs(bb_pos) > 0.8:
+        regime = "TRENDING"
+    elif atr_pct > 0.015:
+        regime = "VOLATILE"
+    elif abs(macd_hist) < 0.0002:
+        regime = "RANGING"
+    else:
+        regime = "BREAKOUT"
+
+    sl_pips = sl_proposed * 100.0
+    tp_pips = tp_proposed * 200.0
+    news_context = " ".join(str(news).split())[:600] or "Unavailable"
+
+    prompt = f"""Analyze this {symbol} H1 setup. Use the candle sequence as context.
+
+Context:
+- RSI(14): {rsi:.1f}
+- ATR: {atr:.5f} ({atr_pct:.2%} of price)
+- MACD histogram: {macd_hist:.6f}
+- Bollinger position: {bb_pos:.2f}
+- Range: {range_pct:.2%} of price
+- Last return: {last_ret:.3%}
+- Session: {session}
+- Regime: {regime}
+- Candles: {candle_context}
+
+News:
+{news_context}
+
+ML Signal: {decision} with ML confidence {ml_prob:.3f}
+
+Return EXACTLY JSON, no extra text:
+{{"quality": 7.5, "reason": "brief reason", "bias": "NEUTRAL", "confidence_modifier": 1.0,
+  "sl_ok": true, "tp_ok": true, "sl_adjusted": {sl_proposed:.4f}, "tp_adjusted": {tp_proposed:.4f},
+  "regime": "{regime}"}}
+
+Fields: quality 0-10; reason max 12 words; bias BULLISH/BEARISH/NEUTRAL;
+confidence_modifier 0.5-1.5; sl_ok/tp_ok booleans; adjusted SL 0.15-0.30,
+TP 0.125-0.30 with TP:SL >=1.5; regime TRENDING/RANGING/VOLATILE/BREAKOUT."""
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        res = await client.post(QWEN_URL, json={
+            "messages": [
+                {"role": "system", "content": "You are a quantitative trading analyst. Always respond in valid JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.2,
+            "max_tokens": 160,
+            "response_format": {"type": "json_object"},
+        })
+
+    if res.status_code == 200:
+        content = res.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        if "{" in content:
+            json_str = content[content.index("{"):]
+            parsed, _ = json.JSONDecoder().raw_decode(json_str)
+            q = float(parsed.get("quality", 5.0))
+            reason = str(parsed.get("reason", ""))[:120]
+            bias_raw = str(parsed.get("bias", "NEUTRAL")).upper()
+            bias = "NEUTRAL"
+            if "BULL" in bias_raw: bias = "BULLISH"
+            elif "BEAR" in bias_raw: bias = "BEARISH"
+
+            conf_mod = float(parsed.get("confidence_modifier", 1.0))
+            conf_mod = max(0.5, min(1.5, conf_mod))
+
+            sl_adj = float(parsed.get("sl_adjusted", sl_proposed))
+            tp_adj = float(parsed.get("tp_adjusted", tp_proposed))
+            sl_adj = max(SL_MIN_NORM, min(SL_MAX_NORM, sl_adj))
+            tp_adj = max(TP_MIN_NORM, min(TP_MAX_NORM, tp_adj))
+
+            tp_adj = sl_adj
+
+            effective_prob = float(np.exp(np.log(max(ml_prob, 1e-6)) + np.log(conf_mod)))
+            effective_prob = max(0.0, min(1.0, effective_prob))
+
+            logger.info(
+                "[%s] QWEN-UNIFIED ║ q=%.1f bias=%s conf_mod=%.2f eff_prob=%.4f | "
+                "sl=%.3f→%.3f tp=%.3f→%.3f regime=%s | %s",
+                cycle_id, q, bias, conf_mod, effective_prob,
+                sl_proposed, sl_adj, tp_proposed, tp_adj,
+                parsed.get("regime", regime), reason[:60]
+            )
+            return {
+                "quality": q,
+                "reason": reason,
+                "bias": bias,
+                "confidence_modifier": conf_mod,
+                "effective_prob": effective_prob,
+                "sl_adjusted": sl_adj,
+                "tp_adjusted": tp_adj,
+                "regime": parsed.get("regime", regime),
+            }
+        raise RuntimeError(f"[{cycle_id}] QWEN-UNIFIED respuesta sin JSON: {content[:80]}")
+    res.raise_for_status()
+    raise RuntimeError(f"[{cycle_id}] QWEN-UNIFIED HTTP {res.status_code}: {res.text[:120]}")
+
+
+# ── Opción 2: SL/TP Validator ─────────────────────────────────────────────────
+SL_MIN_NORM = 0.15   # 15 pips minimum
+SL_MAX_NORM = 0.30   # 30 pips maximum
+TP_MIN_NORM = 0.125  # 25 pips minimum (SL*0.5 para ratio 2:1 mínimo)
+TP_MAX_NORM = 0.30   # 60 pips maximum
+
+
+async def _query_qwen_sltp_validator(
+    symbol: str,
+    decision: str,
+    atr: float,
+    atr_pct: float,
+    rsi: float,
+    bb_pos: float,
+    macd_hist: float,
+    range_pct: float,
+    hour: int,
+    sl_proposed: float,
+    tp_proposed: float,
+    cycle_id: str,
+) -> tuple[float, float, str]:
+    """
+    Opción 2 — SL/TP Validator:
+    Qwen analiza si el SL y TP propuestos son razonables para el régimen
+    de mercado actual (volatilidad, sesión, momentum).
+
+    Retorna: (sl_norm_final, tp_norm_final, reason)
+    """
+    if abs(bb_pos) > 0.8:
+        regime = "TRENDING"
+    elif atr_pct > 0.015:
+        regime = "VOLATILE"
+    elif abs(macd_hist) < 0.0002:
+        regime = "RANGING"
+    else:
+        regime = "BREAKOUT"
+
+    if 7 <= hour < 12:
+        session = "London"
+    elif 12 <= hour < 17:
+        session = "NY"
+    else:
+        session = "Asia"
+
+    sl_pips = sl_proposed * 100.0
+    tp_pips = tp_proposed * 200.0
+
+    prompt = f"""Validate the proposed stop-loss and take-profit for {symbol} {decision}.
+
+Current Market Regime:
+- ATR: {atr:.5f} ({atr_pct:.2%} of price → regime is {'HIGH VOLATILITY' if atr_pct > 0.015 else 'NORMAL'})
+- RSI: {rsi:.1f}
+- MACD histogram: {macd_hist:.6f} ({'bullish' if macd_hist > 0 else 'bearish'})
+- Bollinger position: {bb_pos:.2f} ({regime})
+- Range size: {range_pct:.2%} of price
+- Session: {session}
+
+Proposed Trade:
+- Direction: {decision}
+- Stop-Loss: {sl_pips:.1f} pips (norm={sl_proposed:.4f})
+- Take-Profit: {tp_pips:.1f} pips (norm={tp_proposed:.4f})
+- Current ATR: {atr:.5f} pips
+
+Is the SL reasonable for this regime? Is the TP at least 1.5x the SL distance?
+Reply EXACTLY JSON (no extra text):
+{{"sl_ok": true/false, "tp_ok": true/false, "sl_adjusted": 0.20, "tp_adjusted": 0.28, "reason": "brief"}}
+If both are OK, return the same values. If adjustment needed, propose sensible ones."""
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        res = await client.post(QWEN_URL, json={
+            "messages": [
+                {"role": "system", "content": "You are a quantitative risk analyst. Always respond in valid JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.15,
+            "max_tokens": 150,
+            "response_format": {"type": "json_object"},
+        })
+
+    if res.status_code == 200:
+        content = res.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        if "{" in content:
+            json_str = content[content.index("{"):]
+            parsed, _ = json.JSONDecoder().raw_decode(json_str)
+            sl_ok = bool(parsed.get("sl_ok", True))
+            tp_ok = bool(parsed.get("tp_ok", True))
+            sl_adj = float(parsed.get("sl_adjusted", sl_proposed))
+            tp_adj = float(parsed.get("tp_adjusted", tp_proposed))
+
+            sl_adj = max(SL_MIN_NORM, min(SL_MAX_NORM, sl_adj))
+            tp_adj = max(TP_MIN_NORM, min(TP_MAX_NORM, tp_adj))
+            tp_adj = sl_adj
+
+            if not sl_ok or not tp_ok:
+                logger.warning(
+                    "[%s] SLTP-REJECTED ║ sl_ok=%s tp_ok=%s → adjusted sl=%.4f tp=%.4f | reason=%s",
+                    cycle_id, sl_ok, tp_ok, sl_adj, tp_adj,
+                    parsed.get("reason", "")[:80]
+                )
+            return sl_adj, tp_adj, parsed.get("reason", "")[:100]
+        raise RuntimeError(f"[{cycle_id}] SLTP-VALIDATOR respuesta sin JSON: {content[:80]}")
+    res.raise_for_status()
+    raise RuntimeError(f"[{cycle_id}] SLTP-VALIDATOR HTTP {res.status_code}: {res.text[:120]}")
+
+
+async def _get_equity_estimate() -> float:
+    """Equity aproximado desde MT5 para logging."""
+    async with httpx.AsyncClient() as client:
+        r = await client.get(f"{settings.mt5_http_url}/api/v1/account/info", timeout=2.0)
+        if r.status_code == 200:
+            return float(r.json().get("equity", 0.0))
+    return 0.0
 
 
 def _build_qwen_candle_context(df: pd.DataFrame, count: int = 10) -> str:
@@ -148,91 +501,62 @@ Fields: quality 0-10; reason max 12 words; bias BULLISH/BEARISH/NEUTRAL;
 confidence_modifier 0.5-1.5; sl_ok/tp_ok booleans; adjusted SL 0.15-0.30,
 TP 0.125-0.30 with TP:SL >=1.5; regime TRENDING/RANGING/VOLATILE/BREAKOUT."""
 
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            res = await client.post(QWEN_URL, json={
-                "messages": [
-                    {"role": "system", "content": "You are a quantitative trading analyst. Always respond in valid JSON."},
-                    {"role": "user", "content": prompt}
-                ],
-                "temperature": 0.2,
-                "max_tokens": 160,
-                "response_format": {"type": "json_object"},  # Forzar JSON válido
-            })
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        res = await client.post(QWEN_URL, json={
+            "messages": [
+                {"role": "system", "content": "You are a quantitative trading analyst. Always respond in valid JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.2,
+            "max_tokens": 160,
+            "response_format": {"type": "json_object"},  # Forzar JSON válido
+        })
 
-        if res.status_code == 200:
-            content = res.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-            if "{" in content:
-                json_str = content[content.index("{"):]
-                # Usar raw_decode para extraer solo el JSON válido, ignorando texto posterior
-                parsed, _ = json.JSONDecoder().raw_decode(json_str)
-                q = float(parsed.get("quality", 5.0))
-                reason = str(parsed.get("reason", ""))[:120]
-                bias_raw = str(parsed.get("bias", "NEUTRAL")).upper()
-                bias = "NEUTRAL"
-                if "BULL" in bias_raw: bias = "BULLISH"
-                elif "BEAR" in bias_raw: bias = "BEARISH"
+    if res.status_code == 200:
+        content = res.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        if "{" in content:
+            json_str = content[content.index("{"):]
+            parsed, _ = json.JSONDecoder().raw_decode(json_str)
+            q = float(parsed.get("quality", 5.0))
+            reason = str(parsed.get("reason", ""))[:120]
+            bias_raw = str(parsed.get("bias", "NEUTRAL")).upper()
+            bias = "NEUTRAL"
+            if "BULL" in bias_raw: bias = "BULLISH"
+            elif "BEAR" in bias_raw: bias = "BEARISH"
 
-                # Opción 3: confidence modifier [0.5, 1.5]
-                conf_mod = float(parsed.get("confidence_modifier", 1.0))
-                conf_mod = max(0.5, min(1.5, conf_mod))
+            conf_mod = float(parsed.get("confidence_modifier", 1.0))
+            conf_mod = max(0.5, min(1.5, conf_mod))
 
-                # Opción 2: SL/TP validation
-                sl_adj = float(parsed.get("sl_adjusted", sl_proposed))
-                tp_adj = float(parsed.get("tp_adjusted", tp_proposed))
-                sl_adj = max(SL_MIN_NORM, min(SL_MAX_NORM, sl_adj))
-                tp_adj = max(TP_MIN_NORM, min(TP_MAX_NORM, tp_adj))
+            sl_adj = float(parsed.get("sl_adjusted", sl_proposed))
+            tp_adj = float(parsed.get("tp_adjusted", tp_proposed))
+            sl_adj = max(SL_MIN_NORM, min(SL_MAX_NORM, sl_adj))
+            tp_adj = max(TP_MIN_NORM, min(TP_MAX_NORM, tp_adj))
 
-                # Regla de negocio: RR = 1:2 en pips.
-                # Como la escala es distinta (SL usa *100, TP usa *200), en valores
-                # normalizados el TP correcto coincide con el SL: 15 pips -> 30 pips
-                # implica sl_norm = tp_norm = 0.15, no 0.30.
-                tp_adj = sl_adj
+            tp_adj = sl_adj
 
-                # Effective probability (Opción 3)
-                effective_prob = float(np.exp(np.log(max(ml_prob, 1e-6)) + np.log(conf_mod)))
-                effective_prob = max(0.0, min(1.0, effective_prob))
+            effective_prob = float(np.exp(np.log(max(ml_prob, 1e-6)) + np.log(conf_mod)))
+            effective_prob = max(0.0, min(1.0, effective_prob))
 
-                logger.info(
-                    "[%s] QWEN-UNIFIED ║ q=%.1f bias=%s conf_mod=%.2f eff_prob=%.4f | "
-                    "sl=%.3f→%.3f tp=%.3f→%.3f regime=%s | %s",
-                    cycle_id, q, bias, conf_mod, effective_prob,
-                    sl_proposed, sl_adj, tp_proposed, tp_adj,
-                    parsed.get("regime", regime), reason[:60]
-                )
-                return {
-                    "quality": q,
-                    "reason": reason,
-                    "bias": bias,
-                    "confidence_modifier": conf_mod,
-                    "effective_prob": effective_prob,
-                    "sl_adjusted": sl_adj,
-                    "tp_adjusted": tp_adj,
-                    "regime": parsed.get("regime", regime),
-                }
-            else:
-                logger.warning("[%s] QWEN-UNIFIED ║ respuesta sin JSON: %s", cycle_id, content[:80])
-    except Exception as q_err:
-        logger.warning("[%s] QWEN-UNIFIED ║ ERROR ║ %s → FALLBACK (q=5.0, bias=NEUTRAL, conf=1.0)",
-                       cycle_id, q_err)
-
-    # Fallback — Qwen no disponible
-    logger.warning(
-        "[%s] QWEN-UNIFIED ║ FALLBACK ║ q=5.0 bias=NEUTRAL conf_mod=1.0 eff_prob=%.4f "
-        "sl=%.3f tp=%.3f regime=%s | Qwen unreachable → defaults aplicados",
-        cycle_id, ml_prob, sl_proposed, tp_proposed, regime
-    )
-    effective_prob = float(np.exp(np.log(max(ml_prob, 1e-6))))
-    return {
-        "quality": 5.0,
-        "reason": "Qwen unavailable, using defaults",
-        "bias": "NEUTRAL",
-        "confidence_modifier": 1.0,
-        "effective_prob": effective_prob,
-        "sl_adjusted": max(SL_MIN_NORM, min(SL_MAX_NORM, sl_proposed)),
-        "tp_adjusted": max(TP_MIN_NORM, min(TP_MAX_NORM, tp_proposed)),
-        "regime": regime,
-    }
+            logger.info(
+                "[%s] QWEN-UNIFIED ║ q=%.1f bias=%s conf_mod=%.2f eff_prob=%.4f | "
+                "sl=%.3f→%.3f tp=%.3f→%.3f regime=%s | %s",
+                cycle_id, q, bias, conf_mod, effective_prob,
+                sl_proposed, sl_adj, tp_proposed, tp_adj,
+                parsed.get("regime", regime), reason[:60]
+            )
+            return {
+                "quality": q,
+                "reason": reason,
+                "bias": bias,
+                "confidence_modifier": conf_mod,
+                "effective_prob": effective_prob,
+                "sl_adjusted": sl_adj,
+                "tp_adjusted": tp_adj,
+                "regime": parsed.get("regime", regime),
+            }
+        raise RuntimeError(f"[{cycle_id}] QWEN-UNIFIED respuesta sin JSON: {content[:80]}")
+    res.raise_for_status()
+    raise RuntimeError(f"[{cycle_id}] QWEN-UNIFIED HTTP {res.status_code}: {res.text[:120]}")
 
 
 # ── Opción 2: SL/TP Validator ─────────────────────────────────────────────────
@@ -304,523 +628,247 @@ Reply EXACTLY JSON (no extra text):
 {{"sl_ok": true/false, "tp_ok": true/false, "sl_adjusted": 0.20, "tp_adjusted": 0.28, "reason": "brief"}}
 If both are OK, return the same values. If adjustment needed, propose sensible ones."""
 
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            res = await client.post(QWEN_URL, json={
-                "messages": [
-                    {"role": "system", "content": "You are a quantitative risk analyst. Always respond in valid JSON."},
-                    {"role": "user", "content": prompt}
-                ],
-                "temperature": 0.15,
-                "max_tokens": 150,
-                "response_format": {"type": "json_object"},  # Forzar JSON válido
-            })
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        res = await client.post(QWEN_URL, json={
+            "messages": [
+                {"role": "system", "content": "You are a quantitative risk analyst. Always respond in valid JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.15,
+            "max_tokens": 150,
+            "response_format": {"type": "json_object"},
+        })
 
-        if res.status_code == 200:
-            content = res.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-            if "{" in content:
-                json_str = content[content.index("{"):]
-                # Usar raw_decode para extraer solo el JSON válido, ignorando texto posterior
-                parsed, _ = json.JSONDecoder().raw_decode(json_str)
-                sl_ok = bool(parsed.get("sl_ok", True))
-                tp_ok = bool(parsed.get("tp_ok", True))
-                sl_adj = float(parsed.get("sl_adjusted", sl_proposed))
-                tp_adj = float(parsed.get("tp_adjusted", tp_proposed))
+    if res.status_code == 200:
+        content = res.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        if "{" in content:
+            json_str = content[content.index("{"):]
+            parsed, _ = json.JSONDecoder().raw_decode(json_str)
+            sl_ok = bool(parsed.get("sl_ok", True))
+            tp_ok = bool(parsed.get("tp_ok", True))
+            sl_adj = float(parsed.get("sl_adjusted", sl_proposed))
+            tp_adj = float(parsed.get("tp_adjusted", tp_proposed))
 
-                # Aplicar boundries hard
-                sl_adj = max(SL_MIN_NORM, min(SL_MAX_NORM, sl_adj))
-                tp_adj = max(TP_MIN_NORM, min(TP_MAX_NORM, tp_adj))
+            sl_adj = max(SL_MIN_NORM, min(SL_MAX_NORM, sl_adj))
+            tp_adj = max(TP_MIN_NORM, min(TP_MAX_NORM, tp_adj))
+            tp_adj = sl_adj
 
-                # RR requerido: 1:2. En la escala normalizada usada por el modelo,
-                # el TP debe igualar al SL para producir 2x en pips.
-                tp_adj = sl_adj
+            if not sl_ok or not tp_ok:
+                logger.warning(
+                    "[%s] SLTP-REJECTED ║ sl_ok=%s tp_ok=%s → adjusted sl=%.4f tp=%.4f | reason=%s",
+                    cycle_id, sl_ok, tp_ok, sl_adj, tp_adj,
+                    parsed.get("reason", "")[:80]
+                )
+            return sl_adj, tp_adj, parsed.get("reason", "")[:100]
+        raise RuntimeError(f"[{cycle_id}] SLTP-VALIDATOR respuesta sin JSON: {content[:80]}")
+    res.raise_for_status()
+    raise RuntimeError(f"[{cycle_id}] SLTP-VALIDATOR HTTP {res.status_code}: {res.text[:120]}")
 
-                if not sl_ok or not tp_ok:
-                    logger.warning(
-                        "[%s] SLTP-REJECTED ║ sl_ok=%s tp_ok=%s → adjusted sl=%.4f tp=%.4f | reason=%s",
-                        cycle_id, sl_ok, tp_ok, sl_adj, tp_adj,
-                        parsed.get("reason", "")[:80]
-                    )
-                return sl_adj, tp_adj, parsed.get("reason", "")[:100]
-    except Exception as e:
-        logger.warning("[%s] SLTP-VALIDATOR ║ error: %s", cycle_id, e)
-
-    # Fallback: bounds hard
-    sl_final = max(SL_MIN_NORM, min(SL_MAX_NORM, sl_proposed))
-    tp_final = max(TP_MIN_NORM, min(TP_MAX_NORM, tp_proposed))
-    min_tp = sl_final * 1.5
-    if tp_final < min_tp:
-        tp_final = min_tp
-    return sl_final, tp_final, "Qwen unavailable, using hard bounds"
+    raise RuntimeError(f"[{cycle_id}] SLTP-VALIDATOR respuesta sin JSON: {content[:80]}")
 
 
 # ── Helper: estimar equity desde MT5 ──────────────────────────────────────────
 async def _get_equity_estimate() -> float:
     """Equity aproximado desde MT5 para logging."""
-    from services.alerting import send_alert, AlertLevel
-    try:
-        async with httpx.AsyncClient() as client:
-            r = await client.get(f"{settings.mt5_http_url}/api/v1/account/info", timeout=2.0)
-            if r.status_code == 200:
-                return r.json().get("equity", 0.0)
-    except Exception as e:
-        send_alert(
-            AlertLevel.ERROR,
-            "MT5",
-            f"No se pudo obtener equity desde MT5: {e}",
-            exc=e,
-            context={"mt5_url": settings.mt5_http_url}
-        )
+    async with httpx.AsyncClient() as client:
+        r = await client.get(f"{settings.mt5_http_url}/api/v1/account/info", timeout=2.0)
+        if r.status_code == 200:
+            return float(r.json().get("equity", 0.0))
     return 0.0
 
 class PredictRequest(BaseModel):
     symbol: str
     timeframe: str = "H1"
-    position: int = 0 # 0=Flat, 1=Long, 2=Short
+    position: int = 0         # 0=Flat, 1=Long, 2=Short (se remapea internamente)
+    entry_price: float = 0.0  # Precio real de entrada si la posición está abierta
+    sl_price: float = 0.0
+    tp_price: float = 0.0
+    steps_in_trade: int = 0
+
 
 class PredictResponse(BaseModel):
     ml_prob: float
     llm_bias: str
     decision: str
-    # Parámetros de gestión de riesgo autónomo (solo presentes con modelo v3)
-    volume: float | None = None
-    sl_pips: float | None = None
-    tp_pips: float | None = None
-    model_version: str | None = None
-    # Opción 1: Qwen Quality Score
-    quality_score: float | None = None  # 0-10 escala de calidad del setup
-    quality_reason: str | None = None   # Razón breve del score    # Opción 3: Confidence Modulation
-    confidence_modifier: float | None = None  # 0.5-1.5 multiplicador
-    effective_prob: float | None = None       # ml_prob * modifier
-    # Opción 4: Regime
-    regime: str | None = None  # TRENDING/RANGING/VOLATILE/BREAKOUT
+    volume: Optional[float] = None
+    sl_pips: Optional[float] = None
+    tp_pips: Optional[float] = None
+    model_version: Optional[str] = None
+    quality_score: Optional[float] = None
+    quality_reason: Optional[str] = None
+    confidence_modifier: Optional[float] = None
+    effective_prob: Optional[float] = None
+    regime: Optional[str] = None
 
-@router.on_event("startup")
-async def ensure_model_available():
-    """Intenta restaurar el modelo desde GCS si no existe localmente."""
-    if not os.path.exists(MODEL_PATH):
-        logger = logging.getLogger(__name__)
-        logger.warning("[AI-STARTUP] Modelo no encontrado. Intentando restaurar desde GCS...")
-        try:
-            from services.model_backup import restore_latest_model
-            result = await restore_latest_model()
-            logger.warning("[AI-STARTUP] Restauración: %s", result)
-        except Exception as exc:
-            logger.error("[AI-STARTUP] No se pudo restaurar modelo: %s", exc)
 
 @router.post("/predict", response_model=PredictResponse)
 async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)):
     t_start = time.time()
-    logger = logging.getLogger(__name__)
-    cycle_id = f"{req.symbol}_{int(time.time() * 1000)}"
-    
-    # ── LOG 1: Ciclo iniciado ──────────────────────────────────────────────
-    equity_val = await _get_equity_estimate()
-    logger.info("[%s] ══ CICLO INICIADO ║ symbol=%s timeframe=%s position=%s equity=%.2f",
-                cycle_id, req.symbol, req.timeframe, req.position, equity_val)
-    # 1. Feature Engineering (Exact match to train_ppo.py)
+    cycle_id = f"{req.symbol}_{int(t_start * 1000)}"
+
+    env_position = 1 if req.position == 1 else (-1 if req.position == 2 else 0)
+
     async with httpx.AsyncClient() as client:
-        res = await client.get(f"{settings.mt5_http_url}/api/v1/market/candles/latest?symbol_name={req.symbol}&timeframe={req.timeframe}&count=100")
-        data = res.json()
-        candles = data if isinstance(data, list) else data.get("candles", [])
-        
-    df = pd.DataFrame(candles)
-    if df.empty:
-        return {"ml_prob": 0.5, "llm_bias": "ERROR", "decision": "HOLD"}
+        equity_task = client.get(
+            f"{settings.mt5_http_url}/api/v1/account/info",
+            timeout=2.0,
+        )
+        candles_task = client.get(
+            f"{settings.mt5_http_url}/api/v1/market/candles/latest?symbol_name={req.symbol}&timeframe={req.timeframe}&count=120",
+            timeout=3.0,
+        )
+        equity_res, candles_res = await asyncio.gather(equity_task, candles_task)
 
-    v3_feature_df = engineer_market_features(df)
-    
-    df['returns'] = df['close'].pct_change()
-    df['range'] = df['high'] - df['low']
-    df['sma20'] = df['close'].rolling(20).mean()
-    df['dist_sma20'] = (df['close'] - df['sma20']) / df['sma20']
-    
-    exp1 = df['close'].ewm(span=12, adjust=False).mean()
-    exp2 = df['close'].ewm(span=26, adjust=False).mean()
-    df['macd'] = exp1 - exp2
-    df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
-    df['macd_hist'] = df['macd'] - df['macd_signal']
-    
-    df['tr'] = df['high'] - df['low']
-    df['atr'] = df['tr'].rolling(14).mean()
-    
-    # ─── RSI (14) ─────────────────────────────────────────────────────────────
-    delta = df['close'].diff()
-    gain = delta.clip(lower=0).rolling(14).mean()
-    loss = (-delta.clip(upper=0)).rolling(14).mean()
-    rs = gain / loss.replace(0, 1e-10)
-    df['rsi14'] = 100 - (100 / (1 + rs))
-    
-    # ─── Bollinger Bands Position ───────────────────────────────────────────────
-    bb_sma = df['close'].rolling(20).mean()
-    bb_std = df['close'].rolling(20).std()
-    df['bb_pos'] = (df['close'] - bb_sma) / (2 * bb_std.replace(0, 1e-10))
-    
-    # ─── Lagged Returns ─────────────────────────────────────────────────────────
-    df['lag_return_1'] = df['returns'].shift(1)
-    df['lag_return_2'] = df['returns'].shift(2)
-    df['lag_return_3'] = df['returns'].shift(3)
-    df['lag_return_5'] = df['returns'].shift(5)
-    
-    # ─── Hour of day ────────────────────────────────────────────────────────────
-    df['hour'] = pd.to_datetime(df['time']).dt.hour
-    # ─── Market Microstructure Features (Volume Profile + Orderbook) ───────────────
-    # Solo si está habilitado Y el modelo fue reentrenado con estas features
-    # (requiere cambiar el observation space del entorno)
-    if settings.microstructure_features_enabled:
-        try:
-            df = await add_microstructure_features(df, req.symbol)
-        except Exception as ms_exc:
-            logger.warning("[AI-PREDICT] Microstructure features fallaron: %s", ms_exc)
-    
-    df = df.dropna()
-    candle_context = _build_qwen_candle_context(df, count=10)
-    
-    # Exact 10 features matching ppo_trading_bot.zip (10 features + 1 position = 11 cols)
-    MODEL_FEATURES = [
-        'returns', 'range', 'dist_sma20', 'rsi14',
-        'macd', 'macd_signal', 'macd_hist',
-        'bb_pos', 'lag_return_1', 'lag_return_2',
-    ]
-    # Solo usar las que existan en el DataFrame (robusto a cambios de velas)
-    available = [f for f in MODEL_FEATURES if f in df.columns]
-    if len(available) != len(MODEL_FEATURES):
-        missing = set(MODEL_FEATURES) - set(available)
-        logger.warning("[AI-PREDICT] Features faltantes: %s — el modelo puede comportarse inesperadamente", missing)
-    df_clean = df[available].dropna()
-    
-    # 2. ML Prediction (Stable-Baselines3 PPO)
-    # Soporta DOS versiones del modelo:
-    #  - v2 (ppo_trading_bot.zip):  action_space=Discrete(3) → [FLAT, LONG, SHORT]
-    #  - v3 (ppo_trading_bot_v3.zip): action_space=Box(4,) → [direction, volume, sl_pips, tp_pips]
-    ml_prob = 0.5
-    decision = "HOLD"
-    raw_action = None
+    equity_val = 0.0
+    if equity_res.status_code == 200:
+        equity_val = equity_res.json().get("equity", 0.0)
 
-    # Defaults para indicadores (se sobreescriben dentro del branch v3 exitoso)
-    rsi_val = 50.0
-    atr_val = 0.001
-    atr_pct = 0.001
-    macd_hist_val = 0.0
-    bb_pos_val = 0.0
-    range_pct = 0.002
-    last_ret_val = 0.0
-    hour_val = 12
+    if candles_res.status_code != 200:
+        raise HTTPException(status_code=502, detail="Error de conexión con servicio MT5")
+    data = candles_res.json()
+    candles = data if isinstance(data, list) else data.get("candles", [])
 
-    # Preferir modelo v3 si existe (acción continua → autónomo en volume/SL/TP)
-    ppo_paths = [
-        ("/app/ml/ppo_trading_bot_v3.zip", "v3"),
-        ("/app/ml/ppo_trading_bot.zip", "v2"),
-    ]
+    raw_df = pd.DataFrame(candles)
+    if raw_df.empty or len(raw_df) < 30:
+        return PredictResponse(ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
 
-    for ppo_path, model_version in ppo_paths:
-        if not os.path.exists(ppo_path):
-            continue
+    df = engineer_market_features(raw_df)
+    features_list = get_market_features(df)
+    candle_context = _build_qwen_candle_context(raw_df, count=10)
 
-        # ── Preparar df_clean según versión del modelo ─────────────────────────
-        if model_version == "v3":
-            # v3: use the exact feature contract used by ForexTradingEnvV2.
-                from ml.trading_env_v2 import get_market_features
-                v3_features = get_market_features(v3_feature_df)
-                df_clean = v3_feature_df[v3_features].dropna()
-        else:
-            df_clean = df[available].dropna()
+    if _CACHED_MODEL is None:
+        load_inference_artifacts()
+    if _CACHED_MODEL is None:
+        logger.error("[%s] No hay modelo PPO disponible.", cycle_id)
+        return PredictResponse(ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
 
-        if len(df_clean) < 10:
-            continue
+    current_price = float(df['close'].iloc[-1])
+    current_atr = float(df['atr'].iloc[-1]) if 'atr' in df.columns else 0.0001
+    entry_p = req.entry_price if env_position != 0 and req.entry_price > 0 else current_price
 
-        try:
-            model = PPO.load(ppo_path)
+    digits = 5 if not req.symbol.upper().endswith("JPY") and len(str(current_price).split(".")[1]) >= 4 else 2
+    pip_size = 0.0001 if digits == 5 else 0.01
+    atr_pips = current_atr / pip_size
 
-            # ── Construir observation matching exactamente el training ──────────
-            if model_version == "v3":
-                # v3 obs: (10, N_market + 4) — el shape se autodetecta del modelo
-                # Auto-detect: leer observación esperada del environment cargado
-                try:
-                    expected_market_features = model.observation_space.shape[1] - 4
-                except Exception:
-                    expected_market_features = 12  # fallback legacy
+    sl_pips = max(10.0, min(50.0, atr_pips * 1.5))
+    tp_pips = sl_pips * 2.0
+    sl_distance_price = sl_pips * pip_size
 
-                last_price = float(df['close'].iloc[-1])
-                obs = build_v3_observation(
-                    market_values=df_clean.iloc[-10:].values,
-                    expected_market_features=expected_market_features,
-                    position=req.position,
-                    last_price=last_price,
-                )
-            else:
-                last_10 = df_clean.iloc[-10:].values
-                pos_matrix = np.full((10, 1), req.position)
-                obs = np.hstack((last_10, pos_matrix)).astype(np.float32)
+    if env_position != 0 and req.entry_price > 0:
+        entry_p = req.entry_price
+        sl_p = req.sl_price if req.sl_price > 0 else (entry_p - sl_distance_price if env_position == 1 else entry_p + sl_distance_price)
+        tp_p = req.tp_price if req.tp_price > 0 else (entry_p + tp_pips * pip_size if env_position == 1 else entry_p - tp_pips * pip_size)
+    else:
+        sl_p = entry_p - sl_distance_price if env_position == 1 else entry_p + sl_distance_price
+        tp_p = entry_p + tp_pips * pip_size if env_position == 1 else entry_p - tp_pips * pip_size
 
-            # Predicción
-            action, _ = model.predict(obs, deterministic=True)
+    market_slice = df[features_list].iloc[-20:].values
+    raw_obs = build_v3_observation(
+        market_values=market_slice,
+        expected_market_features=len(features_list),
+        position=env_position,
+        entry_price=entry_p,
+        current_price=current_price,
+        sl_price=sl_p,
+        tp_price=tp_p,
+        current_atr=current_atr,
+        steps_in_trade=req.steps_in_trade,
+        max_holding_steps=120,
+        balance=equity_val,
+        initial_balance=10000.0,
+        window_size=20,
+    )
 
-            # ── Modelo v3: acción continua (direction, volume, sl_pips, tp_pips) ──
-            if model_version == "v3":
-                direction, volume, sl_pips_norm, tp_pips_norm = action.squeeze()
+    if _CACHED_VEC_NORM is not None:
+        norm_obs = _CACHED_VEC_NORM.normalize_obs(raw_obs)
+    else:
+        norm_obs = raw_obs
 
-                target_pos, decision = decode_v3_direction(
-                    float(direction),
-                    current_position=req.position,
-                )
+    action, _ = _CACHED_MODEL.predict(norm_obs, deterministic=True)
+    raw_action = np.asarray(action, dtype=np.float32).reshape(-1)
+    direction, volume_norm, sl_norm, tp_norm = raw_action
 
-                # ml_prob = confidence de la dirección predicha
-                # v3 tiene acción continua → usar CDF del Normal para dar
-                # una "probabilidad" intuitiva: cuánta masa de probabilidad
-                # queda en el lado correcto de la acción tomada (1 = seguro, 0 = improbable)
-                obs_t = torch.from_numpy(obs).float()
-                preprocessed = obs_t.flatten().unsqueeze(0)
-                with torch.no_grad():
-                    dist = model.policy.get_distribution(preprocessed)
-                mean = dist.distribution.mean.numpy().squeeze()
-                std = dist.distribution.stddev.numpy().squeeze()
-                std = np.maximum(std, 0.01)  # evitar std=0
-                action_arr = action.squeeze()
-                # Para la dirección (índice 0): CDF en la acción significa
-                # "qué tan lejos está la acción del centro, en dirección correcta"
-                # Si mean<0 y action<0 → acción está en el lado correcto del centro
-                from torch.distributions import Normal
-                n = Normal(torch.tensor(mean), torch.tensor(std))
-                action_tensor = torch.tensor(action_arr, dtype=torch.float32)
-                log_prob = n.log_prob(action_tensor).sum().item()
-                ml_prob = float(np.exp(log_prob))
-                # Normalizar: log_prob de un Normal típico está en [-5, 0]
-                # Mapear a [0, 1] con 0 = más negativo, 1 = 0
-                ml_prob = float(np.exp(log_prob / 4))  # escala para que sea más legible
+    target_pos, decision = decode_v3_direction(float(direction), env_position)
+    ml_prob = float(np.clip(abs(direction), 0.1, 0.99))
 
-                # ── LOG 2: Raw model output ─────────────────────────────────
-                logger.info("[%s] MODEL-RAW ║ direction=%.4f volume=%.4f sl_norm=%.4f tp_norm=%.4f | target_pos=%d ml_prob=%.4f",
-                            cycle_id, float(direction), float(volume),
-                            float(sl_pips_norm), float(tp_pips_norm),
-                            target_pos, ml_prob)
+    max_lot_allowed = 0.5
+    vol_calculated = float(volume_norm) * max_lot_allowed
+    max_risk_usd = equity_val * 0.03
+    max_lot_by_risk = max_risk_usd / (sl_distance_price * 100000.0 + 1e-8)
 
-                # Guardar valores para quality score (antes de guards)
-                rsi_val = float(df['rsi14'].iloc[-1]) if 'rsi14' in df.columns else 50.0
-                atr_val = float(df['atr'].iloc[-1]) if 'atr' in df.columns else 0.001
-                atr_pct = atr_val / float(df['close'].iloc[-1]) if float(df['close'].iloc[-1]) > 0 else 0.001
-                macd_hist_val = float(df['macd_hist'].iloc[-1]) if 'macd_hist' in df.columns else 0.0
-                bb_pos_val = float(df['bb_pos'].iloc[-1]) if 'bb_pos' in df.columns else 0.0
-                range_pct = float(df['range'].iloc[-1]) / float(df['close'].iloc[-1]) if float(df['close'].iloc[-1]) > 0 else 0.002
-                last_ret_val = float(df['returns'].iloc[-1]) if 'returns' in df.columns else 0.0
-                hour_val = int(pd.to_datetime(df['time'].iloc[-1]).hour) if 'time' in df.columns else 12
+    # Calcular el lote mínimo necesario para ganar ~3€ netos en el TP,
+    # teniendo en cuenta el spread y comisiones implícitas.
+    min_profit_target = 3.0
+    spread_price = 3.0 * pip_size  # margen conservador por spread/comisiones
+    net_tp_pips = max(1.0, tp_pips - 2.0)  # restar ~2 pips de spread/comisión
+    min_lot_for_profit = min_profit_target / (net_tp_pips * 0.1 + 1e-8)
 
-                # ── Guards: evitar valores extremos del modelo ──────────────
-                # El modelo puede dar 0.0 (min) o 1.0 (max) por no haber aprendido bien
-                # Aplicamos un floor/ceiling razonable para evitar órdenes imposibles
-                volume_val = float(volume)
-                sl_val = float(sl_pips_norm)
-                tp_val = float(tp_pips_norm)
+    candidate_lots = max(min_lot_for_profit, vol_calculated)
+    final_lots = float(np.clip(candidate_lots, 0.01, min(max_lot_allowed, max_lot_by_risk)))
+    final_lots = round(round(final_lots / 0.01) * 0.01, 2)
 
-                # ── LOG 3: Guards aplicados ──────────────────────────────────
-                guards_log = {
-                    "volume_raw": float(volume),
-                    "sl_raw": float(sl_pips_norm),
-                    "tp_raw": float(tp_pips_norm),
-                    "guards_applied": []
-                }
+    sl_pips_final = sl_pips
+    tp_pips_final = tp_pips
 
-                # Los límites solo aplican a una acción operable. En HOLD el
-                # modelo no abre una posición y no necesita volumen ni stops.
-                if target_pos != 0:
-                    # Volume: capar siempre al 30% (equity bajo no soporta más)
-                    if volume_val > 0.30:
-                        guards_log["guards_applied"].append(f"VOLUME_MAX: {volume_val:.4f}→0.30")
-                        logger.warning("[%s] GUARD-VOLUME-MAX ║ %.4f → 0.30 (equity bajo)", cycle_id, volume_val)
-                        volume_val = 0.30
-                    if volume_val < 0.10:
-                        guards_log["guards_applied"].append(f"VOLUME_MIN: {volume_val:.4f}→0.10")
-                        logger.warning("[%s] GUARD-VOLUME-MIN ║ %.4f → 0.10", cycle_id, volume_val)
-                        volume_val = 0.10
-                    if sl_val > 0.30:
-                        guards_log["guards_applied"].append(f"SL_MAX: {sl_val:.4f}→0.30")
-                        logger.warning("[%s] GUARD-SL-MAX ║ %.4f → 0.30 (30 pips)", cycle_id, sl_val)
-                        sl_val = 0.30
-                    if tp_val > sl_val:
-                        guards_log["guards_applied"].append(f"TP_RATIO_MAX: {tp_val:.4f}→{sl_val:.4f}")
-                        logger.warning("[%s] GUARD-TP-RATIO-MAX ║ %.4f → %.4f (TP en pips debe ser 2x SL; en normalizado coincide con SL)", cycle_id, tp_val, sl_val)
-                        tp_val = sl_val
-                    if tp_val > 0.30:
-                        guards_log["guards_applied"].append(f"TP_MAX: {tp_val:.4f}→0.30")
-                        logger.warning("[%s] GUARD-TP-MAX ║ %.4f → 0.30 (60 pips)", cycle_id, tp_val)
-                        tp_val = 0.30
-                    if sl_val < 0.15:
-                        guards_log["guards_applied"].append(f"SL_MIN: {sl_val:.4f}→0.15")
-                        logger.warning("[%s] GUARD-SL-MIN ║ %.4f → 0.15", cycle_id, sl_val)
-                        sl_val = 0.15
-                    if tp_val < sl_val:
-                        guards_log["guards_applied"].append(f"TP_MIN: {tp_val:.4f}→{sl_val:.4f}")
-                        logger.warning("[%s] GUARD-TP-MIN ║ %.4f → %.4f (TP debe igualar al SL en normalizado para RR 1:2)", cycle_id, tp_val, sl_val)
-                        tp_val = sl_val
+    live_news = "Macro data unavailable"
+    from services.news_scraper import get_macro_news
+    live_news = await get_macro_news(req.symbol)
 
-                    if tp_val > sl_val:
-                        guards_log["guards_applied"].append(f"TP_RATIO_MAX: {tp_val:.4f}→{sl_val:.4f}")
-                        logger.warning("[%s] GUARD-TP-RATIO-MAX ║ %.4f → %.4f (TP en pips debe ser 2x SL; en normalizado coincide con SL)", cycle_id, tp_val, sl_val)
-                        tp_val = sl_val
-
-                if not guards_log["guards_applied"]:
-                    logger.info("[%s] GUARD-CLEAN ║ sin intervención", cycle_id)
-
-                raw_action = {
-                    "version": "v3",
-                    "direction": float(direction),
-                    "volume": float(volume_val),
-                    "sl_pips_norm": float(sl_val),
-                    "tp_pips_norm": float(tp_val),
-                    "target_position": target_pos,
-                }
-                break
-
-            # ── Modelo v2: acción discreta (0=FLAT, 1=LONG, 2=SHORT) ─────────
-            else:
-                obs_t = torch.from_numpy(obs).float()
-                preprocessed = obs_t.flatten().unsqueeze(0)
-                with torch.no_grad():
-                    dist = model.policy.get_distribution(preprocessed)
-                action_probs = dist.distribution.probs.numpy().squeeze()
-
-                act_val = int(action.item()) if isinstance(action, np.ndarray) else int(action)
-                ml_prob = float(action_probs[act_val])
-
-                if act_val == 1:
-                    decision = "HOLD" if req.position == 1 else "BUY"
-                elif act_val == 2:
-                    decision = "HOLD" if req.position == 2 else "SELL"
-                else:
-                    decision = "HOLD"
-
-                raw_action = {"version": "v2", "action_discrete": int(act_val)}
-                break
-
-        except Exception as exc:
-            logger.warning("[AI-PREDICT] Error con modelo %s: %s", ppo_path, exc)
-            continue
-
-
-    # 3. LLM Unified — Opciones 1+2+3+4 en una sola llamada (no solo BUY/SELL)
-    try:
-        from services.news_scraper import get_macro_news
-        live_news = await get_macro_news(req.symbol)
-    except Exception:
-        live_news = "Macro data unavailable."
-
-    qwen_result = await _query_qwen_unified(
+    qwen = await _query_qwen_unified(
         symbol=req.symbol,
         decision=decision,
         ml_prob=ml_prob,
-        rsi=rsi_val,
-        atr=atr_val,
-        atr_pct=atr_pct,
-        macd_hist=macd_hist_val,
-        bb_pos=bb_pos_val,
-        range_pct=range_pct,
-        last_ret=last_ret_val,
-        hour=hour_val,
+        rsi=float(df['rsi14'].iloc[-1]) * 100.0,
+        atr=current_atr,
+        atr_pct=current_atr / current_price,
+        macd_hist=float(df['macd_hist'].iloc[-1]),
+        bb_pos=float(df['bb_pos'].iloc[-1]),
+        range_pct=float(df['range'].iloc[-1]),
+        last_ret=float(df['returns'].iloc[-1]),
+        hour=int(pd.to_datetime(raw_df['time'].iloc[-1]).hour),
         news=live_news,
         candle_context=candle_context,
-        sl_proposed=raw_action["sl_pips_norm"] if raw_action and raw_action.get("version") == "v3" else 0.20,
-        tp_proposed=raw_action["tp_pips_norm"] if raw_action and raw_action.get("version") == "v3" else 0.20,
+        sl_proposed=sl_pips_final / 100.0,
+        tp_proposed=tp_pips_final / 200.0,
         cycle_id=cycle_id,
         logger=logger,
     )
 
-    quality_score = qwen_result["quality"]
-    quality_reason = qwen_result["reason"]
-    llm_bias = qwen_result["bias"]
-    conf_modifier = qwen_result["confidence_modifier"]
-    effective_prob = qwen_result["effective_prob"]
-    regime = qwen_result["regime"]
+    final_decision = decision
+    if qwen["quality"] < QUALITY_THRESHOLD and final_decision in ("BUY", "SELL"):
+        logger.warning("[%s] VETO CALIDAD ║ Score %.1f < %.1f → HOLD", cycle_id, qwen["quality"], QUALITY_THRESHOLD)
+        final_decision = "HOLD"
+    elif final_decision == "BUY" and qwen["bias"] == "BEARISH":
+        logger.warning("[%s] VETO BIAS ║ BUY revertido por LLM BEARISH", cycle_id)
+        final_decision = "HOLD"
+    elif final_decision == "SELL" and qwen["bias"] == "BULLISH":
+        logger.warning("[%s] VETO BIAS ║ SELL revertido por LLM BULLISH", cycle_id)
+        final_decision = "HOLD"
 
-    # Usar effective_prob (modulado) para la decisión
-    ml_prob_decision = effective_prob
-
-    # ── LOG 4: Quality-threshold override ────────────────────────────────
-    decision_raw = decision
-    if quality_score < QUALITY_THRESHOLD:
-        logger.warning(
-            "[%s] QUALITY-VETO ║ score=%.1f < %.1f → %s→HOLD | reason=%s",
-            cycle_id, quality_score, QUALITY_THRESHOLD, decision, quality_reason[:80]
-        )
-        decision = "HOLD"
-    elif decision == "BUY" and llm_bias == "BEARISH":
-        logger.warning("[%s] VETO ║ BUY→HOLD (LLM=BEARISH)", cycle_id)
-        decision = "HOLD"
-    elif decision == "SELL" and llm_bias == "BULLISH":
-        logger.warning("[%s] VETO ║ SELL→HOLD (LLM=BULLISH)", cycle_id)
-        decision = "HOLD"
-
-    # ── Opción 2: SL/TP Validator — apply adjusted values ──────────────
-    if raw_action and raw_action.get("version") == "v3":
-        raw_action["sl_pips_norm"] = qwen_result["sl_adjusted"]
-        raw_action["tp_pips_norm"] = qwen_result["tp_adjusted"]
-
-    # ── LOG 5: Decisión final ─────────────────────────────────────────────
-    if raw_action and raw_action.get("version") == "v3":
-        vol_out = round(raw_action["volume"] * 0.5, 4)
-        sl_out = round(max(1.0, raw_action["sl_pips_norm"] * 100.0), 1)
-        tp_out = round(max(1.0, raw_action["tp_pips_norm"] * 200.0), 1)
-        logger.info(
-            "[%s] DECISION-FINAL ║ decision=%s ml_prob=%.4f eff_prob=%.4f conf_mod=%.2f | "
-            "llm=%s regime=%s quality=%.1f | volume=%.4f sl=%.1f tp=%.1f equity=%.2f",
-            cycle_id, decision, ml_prob, effective_prob, conf_modifier, llm_bias, regime,
-            quality_score, vol_out, sl_out, tp_out,
-            await _get_equity_estimate()
-        )
-    else:
-        logger.info("[%s] DECISION-FINAL ║ decision=%s ml_prob=%.4f llm=%s",
-                    cycle_id, decision, ml_prob, llm_bias)
-    
-    # 5. Telemetry & Auditing
-    try:
-        pool = get_pool()
-        await pool.execute(
-            "INSERT INTO audit_log(cycle_id, event, data) VALUES($1,$2,$3)",
-            f"ai_predict_{req.symbol}_{int(time.time())}",
-            "ai_predict_cycle",
-            json.dumps({
-                "symbol": req.symbol,
-                "ml_prob": round(ml_prob, 4),
-                "llm_bias": llm_bias,
-                "decision": decision,
-                **({"raw_action": raw_action} if raw_action else {})
-            })
-        )
-    except Exception as resp_err:
-        from services.alerting import send_alert, AlertLevel
-        send_alert(
-            AlertLevel.ERROR,
-            "AI-PREDICT",
-            f"Error armando respuesta de predict: {resp_err}",
-            exc=resp_err,
-            context={"symbol": req.symbol, "decision": decision}
-        )
-
-    # 6. Métricas de rendimiento
-    t_end = time.time()
-    from services.performance_metrics import record_cycle_metrics as _rec
-    _rec(symbol=req.symbol, decision=decision, ml_prob=effective_prob, llm_bias=llm_bias,
-         latency_ms=(t_end - t_start) * 1000,
-         mt5_available=True, order_placed=False)
-
-    resp = PredictResponse(
-        ml_prob=round(effective_prob, 4),
-        llm_bias=llm_bias,
-        decision=decision,
-        model_version=raw_action.get("version") if raw_action else None,
-        # v3 normalizado → valores reales
-        volume=round(raw_action["volume"] * 0.5, 4) if raw_action and raw_action.get("version") == "v3" else None,
-        sl_pips=round(max(1.0, raw_action["sl_pips_norm"] * 100.0), 1) if raw_action and raw_action.get("version") == "v3" else None,
-        tp_pips=round(max(1.0, raw_action["tp_pips_norm"] * 200.0), 1) if raw_action and raw_action.get("version") == "v3" else None,
-        # Opción 1: Quality Score
-        quality_score=round(quality_score, 2),
-        quality_reason=quality_reason[:200] if quality_reason else None,
-        # Opción 3: Confidence Modulation
-        confidence_modifier=round(conf_modifier, 3),
-        effective_prob=round(effective_prob, 4),
-        # Opción 4: Regime
-        regime=regime,
+    record_cycle_metrics(
+        symbol=req.symbol,
+        decision=final_decision,
+        ml_prob=qwen["effective_prob"],
+        llm_bias=qwen["bias"],
+        latency_ms=(time.time() - t_start) * 1000,
+        mt5_available=True,
+        order_placed=final_decision in ("BUY", "SELL"),
     )
-    return resp
+
+    return PredictResponse(
+        ml_prob=round(ml_prob, 4),
+        llm_bias=qwen["bias"],
+        decision=final_decision,
+        volume=final_lots if final_decision in ("BUY", "SELL") else None,
+        sl_pips=round(sl_pips_final, 1) if final_decision in ("BUY", "SELL") else None,
+        tp_pips=round(tp_pips_final, 1) if final_decision in ("BUY", "SELL") else None,
+        model_version="v3",
+        quality_score=round(qwen["quality"], 2),
+        quality_reason=qwen["reason"],
+        confidence_modifier=round(qwen["confidence_modifier"], 2),
+        effective_prob=round(qwen["effective_prob"], 4),
+        regime=qwen["regime"],
+    )
 
 
 @router.post("/retrain/force")
@@ -867,37 +915,26 @@ async def pipeline_health() -> HealthCheckResponse:
     issues = []
 
     # 1. Database
-    try:
-        pool = get_pool()
-        async with pool.acquire() as conn:
-            await conn.fetchval("SELECT 1")
-        trade_count = await pool.fetchval("SELECT COUNT(*) FROM trade_outcomes")
-        components["database"] = {"ok": True, "trade_count": trade_count, "error": None}
-    except Exception as e:
-        components["database"] = {"ok": False, "error": str(e)}
-        issues.append(f"DB: {e}")
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.fetchval("SELECT 1")
+    trade_count = await pool.fetchval("SELECT COUNT(*) FROM trade_outcomes")
+    components["database"] = {"ok": True, "trade_count": trade_count, "error": None}
 
     # 2. MT5 connectivity
-    try:
-        async with httpx.AsyncClient() as client:
-            r = await client.get(f"{settings.mt5_http_url}/api/v1/account/info", timeout=5.0)
-            mt5_ok = r.status_code == 200
-        components["mt5"] = {"ok": mt5_ok, "error": None if mt5_ok else f"HTTP {r.status_code}"}
-        if not mt5_ok:
-            issues.append(f"MT5: HTTP {r.status_code}")
-    except Exception as e:
-        components["mt5"] = {"ok": False, "error": str(e)}
-        issues.append(f"MT5: {e}")
+    async with httpx.AsyncClient() as client:
+        r = await client.get(f"{settings.mt5_http_url}/api/v1/account/info", timeout=5.0)
+        mt5_ok = r.status_code == 200
+    components["mt5"] = {"ok": mt5_ok, "error": None if mt5_ok else f"HTTP {r.status_code}"}
+    if not mt5_ok:
+        raise RuntimeError(f"MT5 connectivity failed: HTTP {r.status_code}")
 
     # 3. PPO model file exists
     MODEL_PATH = "/app/ml/ppo_trading_bot_v3.zip"
-    try:
-        model_exists = os.path.exists(MODEL_PATH)
-        components["ppo_model"] = {"ok": model_exists, "error": None if model_exists else "Model file not found"}
-        if not model_exists:
-            issues.append("PPO model missing")
-    except Exception as e:
-        components["ppo_model"] = {"ok": False, "error": str(e)}
+    model_exists = os.path.exists(MODEL_PATH)
+    components["ppo_model"] = {"ok": model_exists, "error": None if model_exists else "Model file not found"}
+    if not model_exists:
+        raise RuntimeError("PPO model missing at /app/ml/ppo_trading_bot_v3.zip")
 
     # 4. Retrain state
     state = _get_retrain_state()
@@ -954,20 +991,17 @@ async def trade_filled_webhook(req: TradeFilledRequest, _: None = Depends(verify
     Webhook que el MT5 EA llama cuando una orden se cierra.
     Registra el trade y dispara auto-retrain si corresponde.
     """
-    try:
-        from services.auto_retrain import _parse_timestamp
-        entry_ts = _parse_timestamp(req.entry_time)
-        exit_ts = _parse_timestamp(req.exit_time)
-        minimum_timestamp = 946684800.0  # 2000-01-01 UTC
-        if (
-            entry_ts < minimum_timestamp
-            or exit_ts < minimum_timestamp
-            or exit_ts <= entry_ts
-        ):
-            raise HTTPException(status_code=422, detail="entry_time and exit_time must be valid ordered timestamps")
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise HTTPException(status_code=422, detail="entry_time and exit_time must be valid timestamps") from exc
+    from services.auto_retrain import _parse_timestamp
+    entry_ts = _parse_timestamp(req.entry_time)
+    exit_ts = _parse_timestamp(req.exit_time)
+    minimum_timestamp = 946684800.0  # 2000-01-01 UTC
+    if entry_ts < minimum_timestamp or exit_ts < minimum_timestamp:
+        raise HTTPException(status_code=422, detail="entry_time/exit_time must be >= 2000-01-01 UTC")
+    if exit_ts <= entry_ts:
+        raise HTTPException(status_code=422, detail="exit_time must be greater than entry_time")
 
+    logger.info("[TRADE-FILLED] payload symbol=%s entry=%s exit=%s pnl=%.2f pct=%.4f dir=%s reason=%s",
+                req.symbol, req.entry_time, req.exit_time, req.pnl, req.pnl_pct, req.direction, req.exit_reason)
     # Normalize direction to uppercase to match DB constraint (LONG/SHORT)
     direction = req.direction.upper() if req.direction else req.direction
     await record_trade_filled(

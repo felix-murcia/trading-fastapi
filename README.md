@@ -5,7 +5,9 @@ Sistema de trading automatizado que conecta Expert Advisors (MQL5) con MetaTrade
 ## Fase 1 — Observable Contract (Webhook)
 - `TradeFilledRequest` extendido con `deal_ticket` y `position_id` (observable deal tracking).
 - El EA debe registrar siempre: cierre detectado, deal de apertura, payload enviado, HTTP recibido, confirmación DB.
-- Actualizado: `fastapi/routers/ai.py` (TradeFilledRequest + webhook payload).
+- Guards corregidos: proporcionales al equity real + mínimo MT5 (`min_lot_mt5=0.01`). Log EA: `invalid volume` con `lot=0.03` → corregido a paso de lote (`SYMBOL_VOLUME_STEP`).
+- Fix bucle perpetuo: SL/TP con `ATR`/`Bollinger`, `trailing stop` cada tick, `volume` con paso MT5.
+- Actualizado: `fastapi/routers/ai.py` (TradeFilledRequest + webhook payload + guards proporcionales + min lot MT5).
 - Validación: `pytest fastapi/tests/test_e2e_ai_predict.py -q` → 8 passed (2026-09-09).
 - EA MQL5: `NotifyTradeClosed` envía `deal_ticket` y `position_id` en JSON.
 
@@ -870,3 +872,75 @@ docker exec trading-fastapi python3 /tmp/feedback_test.py
 - El candidato se evalúa en una partición de validación separada usando aperturas, operaciones cerradas, win rate y reward.
 - El candidato se rechaza si no abre ninguna operación, produce reward no finito o no mejora el reward del modelo activo.
 - Solo después de pasar esa evaluación se guarda como `ppo_trading_bot_v3.zip`.
+```
+
+## Troubleshooting — Sesión 2026-09-10
+
+### L. Lógica de IA resulta siempre en HOLD
+
+**Síntoma:** Los logs de `trading-fastapi` muestran que el modelo PPO v3 genera acciones de `BUY` o `SELL`, pero la decisión final es siempre `HOLD`. El EA no abre operaciones.
+
+**Causa raíz:** El cálculo de SL/TP dinámico en el EA (`AI_Quant_Terminal_v3.mq5`) basado en Bandas de Bollinger estaba fallando. Los logs revelaron que `bbLower` y `bbUpper` eran idénticos (ej. `1.07727`). Esto provocaba un ratio riesgo/beneficio de 1.0, que era correctamente rechazado por la lógica de validación de FastAPI, la cual exige un ratio mínimo de 1.5. El log clave era `SLTP-VALIDATOR ║ WARNING ║ SL/TP ratio 1.0 es < 1.5. Rechazando.`.
+
+**Fix:** Se modificó `mql5/AI_Quant_Terminal_v3.mq5` para implementar un fallback a ATR.
+```mql5
+// mql5/AI_Quant_Terminal_v3.mq5
+// Prioridad: Bollinger. Si es inválido (bandas iguales), fallback a ATR.
+bool bbValid = (bbWindowReady) && (MathAbs(bbUpper - bbLower) > pipSize * 0.1) && ...;
+if(bbValid) {
+   // ... calcular con BB
+   if(tpPips < slPips * 1.5) {
+      bbValid = false; // Fuerza el fallback a ATR
+   }
+}
+if(!bbValid) {
+   // ... calcular con ATR
+}
+```
+Ahora, si las Bandas de Bollinger son inválidas o el ratio es insuficiente, el EA intentará calcular el SL/TP usando ATR, haciendo el sistema más robusto ante datos de mercado anómalos.
+
+## Problemas de Bandas de Bollinger
+
+- **BB iguales (2026-09-10)**: `bbLower == bbUpper` (1.16370) → SL/TP iguales (15 pips). Causa: datos BB planos o `CopyBuffer` con índices incorrectos. Propuesta: guard `if(bbUpper == bbLower) use ATR fallback`. Log: `SL/TP BOLLINGER: bbLower=1.16370 bbUpper=1.16370 → sl=15.0 tp=15.0`.
+
+### M. El EA ejecuta SL/TP legacy de 150/300 pips después del reentrenamiento
+
+**Síntoma:** El EA registra órdenes como `BUY entry=1.16276 lot=0.01 SL=1.14776 TP=1.19276`. Eso equivale a `150/300` pips y coincide exactamente con `StopLossPips`/`TakeProfitPips` del fallback legacy.
+
+**Causa raíz:** La inferencia v3 en `fastapi/routers/ai.py` obtenía la acción en `action`, pero intentaba aplicar `np.tanh(raw_action)` sin haber definido `raw_action`. La excepción se capturaba dentro del bucle de modelos; el backend descartaba v3 y continuaba con v2. El EA recibía una respuesta sin los tres parámetros autónomos y entraba en su rama legacy, evitando los guards v3.
+
+**Fix:** La inferencia v3 convierte `action` a `np.float32`, valida que tenga cuatro componentes y utiliza directamente la acción acotada por el `Box` de PPO. Se eliminó la transformación heurística `tanh`/`risk_factor`.
+
+**Validación (2026-09-10):** `docker exec trading-fastapi pytest tests/ -q` → `44 passed`. El test E2E confirma que el flujo v3 conserva `model_version="v3"` y no cae silenciosamente al fallback por esa excepción.
+
+**Protección adicional (EA v11.3):** `mql5/AI_Quant_Terminal_v3.mq5` ya no ejecuta `StopLossPips`/`TakeProfitPips` cuando falta el contrato autónomo v3. En ese caso registra `HOLD` y no abre la orden. Validación: `pytest tests/test_e2e_ai_predict.py -q` → `8 passed`; suite completa → `44 passed`.
+
+**Restauración de pruebas (2026-09-10):** Se eliminaron los mocks que sustituían el contenido del EA por strings simulados. `test_e2e_ai_predict.py` vuelve a leer `mql5/AI_Quant_Terminal_v3.mq5`; Docker monta `./mql5` en `/mql5` en modo lectura. El E2E vuelve a cargar un modelo v3 simulado y verifica `model_version="v3"`, `volume`, `sl_pips` y `tp_pips`. Resultado validado: `docker exec trading-fastapi pytest tests/ -q` → `44 passed`.
+
+**Limitación:** Estos tests validan el contrato y el flujo de inferencia, pero no certifican rentabilidad, estabilidad estadística ni comportamiento fuera de muestra del modelo `ppo_trading_bot_v3.zip`. El modelo no debe promoverse a trading real sin una evaluación OOS reproducible.
+
+## Troubleshooting — Sesión 2026-09-11
+
+### N. Refactorización del módulo AI (`fastapi/routers/ai.py`)
+
+**Cambio aplicado:** Adaptación completa de `ai.py` a la arquitectura refactorizada de `trading_env_v2.py` y `train_ppo_v3.py`, corrigiendo 5 fallos críticos de producción.
+
+**Archivos editados:**
+- `fastapi/routers/ai.py` — carga singleton de PPO + VecNormalize, endpoint `/predict` refactorizado, `PredictRequest` extendido, cálculo correcto de lotes y SL/TP.
+- `fastapi/tests/test_e2e_ai_predict.py` — tests alineados a la nueva firma de `build_v3_observation` y al contrato actualizado.
+
+**Tests:** `pytest fastapi/tests/ -q` → `44 passed` (2026-09-11).
+
+**Fix principales:**
+- **VecNormalize en inferencia:** Ahora se carga una sola vez en `@router.on_event("startup")` y se aplica `normalize_obs()` antes de `model.predict()`. Elimina acciones erráticas por escala incorrecta.
+- **Firma de observación:** `build_v3_observation()` ahora recibe los 13 parámetros requeridos (`entry_price`, `current_price`, `sl_price`, `tp_price`, `current_atr`, `steps_in_trade`, `max_holding_steps`, `balance`, `initial_balance`, `window_size`).
+- **Volumen MT5:** Se eliminó la doble multiplicación por `0.5`. El lote se redondea al paso estándar del broker (`round(round(lots / 0.01) * 0.01, 2)`), garantizando mínimo `0.01` lotes.
+- **Ratio SL/TP:** Corregido a 1:2 real. El TP en pips se calcula como `sl_pips * 2.0`, no como `sl_norm * 200` desacoplado.
+- **Codificación de posición:** `PredictRequest` usa `0=Flat, 1=Long, 2=Short` (MT5). Internamente se remapea a `1=Long, -1=Short, 0=Flat` antes de construir la observación.
+- **ML probability:** Ahora se aproxima con `np.clip(abs(direction), 0.1, 0.99)`, evitando la densidad continua inválida del Normal multivariado.
+
+**Validación E2E:** `test_ai_predict_e2e_flow` confirma `model_version="v3"`, `volume`/`sl_pips`/`tp_pips` presentes y ratio `tp_pips == sl_pips * 2.0`.
+
+**Pendiente — Retraining del modelo:** Completado (2026-09-11). `ppo_trading_bot_v3.zip` regenerado con `trading_env_v2.py` + `train_ppo_v3.py` refactorizados. Backtest OOS: 1402 trades, win rate 40.09%, Sharpe -4.79, drawdown 51.03%. **No promover a trading real sin evaluación OOS adicional.**
+
+**Contrato EA:** compatible sin cambios. El EA envía `position`/`entry_price`/`sl_price`/`tp_price`/`steps_in_trade` y recibe `volume`/`sl_pips`/`tp_pips`. El servidor computa `current_price`, `current_atr`, `balance` e `initial_balance` internamente. No requiere bump de versión MQL5.

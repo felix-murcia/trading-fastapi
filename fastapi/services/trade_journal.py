@@ -50,12 +50,9 @@ CREATE INDEX IF NOT EXISTS idx_insights_created ON trade_insights(created_at);
 
 async def init_journal_table():
     """Crea la tabla trade_insights si no existe."""
-    try:
-        pool = get_pool()
-        await pool.execute(JOURNAL_SCHEMA)
-        logger.info("[JOURNAL] Tabla trade_insights lista")
-    except Exception as e:
-        logger.warning("[JOURNAL] No se pudo crear trade_insights: %s", e)
+    pool = get_pool()
+    await pool.execute(JOURNAL_SCHEMA)
+    logger.info("[JOURNAL] Tabla trade_insights lista")
 
 
 async def record_trade_closed(
@@ -105,36 +102,32 @@ async def _analyze_trade_async(
 ) -> None:
     """Análisis asíncrono del trade con Qwen."""
     async with JOURNAL_LOCK:
-        try:
-            insight, confidence, regime, quality = await _query_qwen_trade_insight(
-                symbol=symbol,
-                direction=direction,
-                entry_time=entry_time,
-                exit_time=exit_time,
-                pnl_pct=pnl_pct,
-                exit_reason=exit_reason,
-                sl_hit=sl_hit,
-                tp_hit=tp_hit,
-            )
+        insight, confidence, regime, quality = await _query_qwen_trade_insight(
+            symbol=symbol,
+            direction=direction,
+            entry_time=entry_time,
+            exit_time=exit_time,
+            pnl_pct=pnl_pct,
+            exit_reason=exit_reason,
+            sl_hit=sl_hit,
+            tp_hit=tp_hit,
+        )
 
-            # Guardar en DB
-            pool = get_pool()
-            await pool.execute(
-                """
-                INSERT INTO trade_insights
-                    (trade_id, symbol, direction, pnl_pct, exit_reason,
-                     qwen_insight, qwen_confidence, regime, quality_score)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-                """,
-                trade_id, symbol, direction, pnl_pct, exit_reason,
-                insight, confidence, regime, quality,
-            )
-            logger.info(
-                "[JOURNAL] Insight guardado trade=%d: %s (conf=%.2f)",
-                trade_id, insight[:80], confidence
-            )
-        except Exception as e:
-            logger.warning("[JOURNAL] Error análisis trade %d: %s", trade_id, e)
+        pool = get_pool()
+        await pool.execute(
+            """
+            INSERT INTO trade_insights
+                (trade_id, symbol, direction, pnl_pct, exit_reason,
+                 qwen_insight, qwen_confidence, regime, quality_score)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+            """,
+            trade_id, symbol, direction, pnl_pct, exit_reason,
+            insight, confidence, regime, quality,
+        )
+        logger.info(
+            "[JOURNAL] Insight guardado trade=%d: %s (conf=%.2f)",
+            trade_id, insight[:80], confidence
+        )
 
 
 async def _query_qwen_trade_insight(
@@ -200,62 +193,34 @@ confidence: how certain you are (0-1)
 regime: market regime at time of entry (TRENDING/RANGING/VOLATILE/BREAKOUT)
 quality_score: how good was the original setup (0-10)"""
 
-    try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            res = await client.post(QWEN_URL, json={
-                "messages": [
-                    {"role": "system", "content": "You are a quantitative trading analyst. Always respond in valid JSON."},
-                    {"role": "user", "content": prompt}
-                ],
-                "temperature": 0.2,
-                "max_tokens": 100,
-                "response_format": {"type": "json_object"},  # Forzar JSON válido
-            })
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        res = await client.post(QWEN_URL, json={
+            "messages": [
+                {"role": "system", "content": "You are a quantitative trading analyst. Always respond in valid JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.2,
+            "max_tokens": 100,
+            "response_format": {"type": "json_object"},
+        })
 
-        if res.status_code == 200:
-            content = res.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-            if "{" in content:
-                json_str = content[content.index("{"):]
-                parsed = json.loads(json_str)
-                insight = str(parsed.get("insight", "unknown"))[:80]
-                confidence = float(parsed.get("confidence", 0.5))
-                regime = str(parsed.get("regime", "RANGING"))
-                quality = float(parsed.get("quality_score", 5.0))
-                logger.info(
-                    "[JOURNAL] QWEN-INSIGHT ║ SUCCESS ║ %s %s | insight=%s conf=%.2f regime=%s quality=%.1f",
-                    direction, symbol, insight, confidence, regime, quality
-                )
-                return insight, confidence, regime, quality
-            else:
-                logger.warning(
-                    "[JOURNAL] QWEN-INSIGHT ║ PARSE-FAIL ║ %s %s | contenido sin JSON: %s → FALLBACK",
-                    direction, symbol, content[:80]
-                )
-        else:
-            logger.warning(
-                "[JOURNAL] QWEN-INSIGHT ║ HTTP-%d ║ %s %s → FALLBACK",
-                res.status_code, direction, symbol
+    if res.status_code == 200:
+        content = res.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        if "{" in content:
+            json_str = content[content.index("{"):]
+            parsed = json.loads(json_str)
+            insight = str(parsed.get("insight", "unknown"))[:80]
+            confidence = float(parsed.get("confidence", 0.5))
+            regime = str(parsed.get("regime", "RANGING"))
+            quality = float(parsed.get("quality_score", 5.0))
+            logger.info(
+                "[JOURNAL] QWEN-INSIGHT ║ SUCCESS ║ %s %s | insight=%s conf=%.2f regime=%s quality=%.1f",
+                direction, symbol, insight, confidence, regime, quality
             )
-    except Exception as e:
-        logger.warning(
-            "[JOURNAL] QWEN-INSIGHT ║ ERROR ║ %s %s | %s → FALLBACK (heurístico)",
-            direction, symbol, e
-        )
-
-    # Fallback heurístico
-    insight = "unknown_analyzed"
-    if sl_hit and pnl_pct < 0:
-        insight = "range_bound" if abs(pnl_pct) < 0.01 else "momentum_fade"
-    elif tp_hit:
-        insight = "trend_continuation"
-    confidence = 0.4
-    regime = "RANGING"
-    quality = 5.0
-    logger.warning(
-        "[JOURNAL] QWEN-INSIGHT ║ FALLBACK ║ %s %s | pnl=%.4f sl_hit=%s tp_hit=%s → insight=%s",
-        direction, symbol, pnl_pct, sl_hit, tp_hit, insight
-    )
-    return insight, confidence, regime, quality
+            return insight, confidence, regime, quality
+        raise RuntimeError(f"[JOURNAL] QWEN-INSIGHT respuesta sin JSON: {content[:80]}")
+    res.raise_for_status()
+    raise RuntimeError(f"[JOURNAL] QWEN-INSIGHT HTTP {res.status_code}: {res.text[:120]}")
 
 
 async def get_recent_insights(symbol: str = "EURUSD", limit: int = 10) -> list[dict]:
@@ -263,20 +228,16 @@ async def get_recent_insights(symbol: str = "EURUSD", limit: int = 10) -> list[d
     Recupera últimos insights de la base de datos para revisión.
     Usado por el dashboard o para análisis humano.
     """
-    try:
-        pool = get_pool()
-        rows = await pool.fetch(
-            """
-            SELECT symbol, direction, pnl_pct, exit_reason, qwen_insight,
-                   qwen_confidence, regime, quality_score, created_at
-            FROM trade_insights
-            WHERE symbol = $1
-            ORDER BY created_at DESC
-            LIMIT $2
-            """,
-            symbol, limit
-        )
-        return [dict(r) for r in rows]
-    except Exception as e:
-        logger.warning("[JOURNAL] Error retrieving insights: %s", e)
-        return []
+    pool = get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT symbol, direction, pnl_pct, exit_reason, qwen_insight,
+               qwen_confidence, regime, quality_score, created_at
+        FROM trade_insights
+        WHERE symbol = $1
+        ORDER BY created_at DESC
+        LIMIT $2
+        """,
+        symbol, limit
+    )
+    return [dict(r) for r in rows]

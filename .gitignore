@@ -22,3 +22,4 @@ mt5_templates/
 *.ex5
 *.ex4
 .venv/
+doc/

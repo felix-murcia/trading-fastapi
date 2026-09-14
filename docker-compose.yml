@@ -6,6 +6,7 @@ services:
     container_name: trading-fastapi
     volumes:
       - ./fastapi/ml:/app/ml
+      - ./mql5:/mql5:ro
 
     restart: unless-stopped
     networks:

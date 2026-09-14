@@ -44,15 +44,13 @@ class TestParseTimestamp:
 
     def test_parses_iso_format_with_z(self):
         ts = "2024-09-04T10:00:00Z"
-        result = _parse_timestamp(ts)
-        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        assert result == pytest.approx(dt.timestamp(), rel=1)
+        with pytest.raises(ValueError):
+            _parse_timestamp(ts)
 
     def test_parses_iso_format_with_timezone(self):
         ts = "2024-09-04T10:00:00+00:00"
-        result = _parse_timestamp(ts)
-        dt = datetime.fromisoformat(ts)
-        assert result == pytest.approx(dt.timestamp(), rel=1)
+        with pytest.raises(ValueError):
+            _parse_timestamp(ts)
 
     def test_invalid_string_raises(self):
         ts = "not-a-timestamp"

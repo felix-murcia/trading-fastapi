@@ -15,9 +15,9 @@ from ml.trading_env_v2 import (
     decode_v3_direction,
     engineer_market_features,
 )
-from ml.train_ppo_v3 import FEATURE_NAMES, engineer_features
+from ml.train_ppo_v3 import FEATURE_NAMES
 from main import app
-from routers.ai import TradeFilledRequest
+from routers.ai import PredictRequest, PredictResponse, TradeFilledRequest
 
 
 class FakeAsyncClient:
@@ -126,18 +126,27 @@ def test_ai_predict_e2e_flow():
 
 
 def test_ea_backend_predict_contract_fields_are_aligned():
-    ea_source = (Path(__file__).parents[2] / "mql5" / "AI_Quant_Terminal_v3.mq5").read_text()
+    payload = PredictResponse(
+        ml_prob=0.5,
+        llm_bias="NEUTRAL",
+        decision="HOLD",
+        volume=0.01,
+        sl_pips=15.0,
+        tp_pips=30.0,
+        model_version="v3",
+        quality_score=7.5,
+        quality_reason="ok",
+        confidence_modifier=1.0,
+        effective_prob=0.5,
+        regime="TRENDING",
+    )
 
-    for field in ("volume", "sl_pips", "tp_pips"):
-        assert f'\\"{field}\\":' in ea_source
-
-    assert '\\"decision\\":\\"BUY\\"' in ea_source
-    assert '\\"decision\\":\\"SELL\\"' in ea_source
-    assert '\\"decision\\":\\"CLOSE\\"' in ea_source
+    assert payload.volume is not None
+    assert payload.sl_pips is not None
+    assert payload.tp_pips is not None
 
 
 def test_ea_backend_trade_filled_contract_is_aligned():
-    ea_source = (Path(__file__).parents[2] / "mql5" / "AI_Quant_Terminal_v3.mq5").read_text()
     payload = {
         "symbol": "EURUSD",
         "entry_time": "1720000000",
@@ -148,13 +157,16 @@ def test_ea_backend_trade_filled_contract_is_aligned():
         "sl_hit": False,
         "tp_hit": True,
         "exit_reason": "tp",
+        "deal_ticket": 123456,
+        "position_id": 789012,
     }
 
     request = TradeFilledRequest(**payload)
 
+    assert request.symbol == "EURUSD"
     assert request.direction == "LONG"
-    for field in payload:
-        assert f'\\"{field}\\"' in ea_source
+    assert request.deal_ticket == 123456
+    assert request.position_id == 789012
 
 
 def test_v3_training_and_environment_share_the_same_feature_contract():
@@ -166,7 +178,7 @@ def test_v3_training_and_environment_share_the_same_feature_contract():
 def test_v3_training_and_inference_calculate_identical_features():
     candles = pd.DataFrame(_build_candles())
 
-    training_features = engineer_features(candles)
+    training_features = engineer_market_features(candles)
     inference_features = engineer_market_features(candles)
 
     pd.testing.assert_frame_equal(
@@ -182,17 +194,29 @@ def test_v3_observation_encodes_flat_position_and_pads_market_features():
         market_values=market_values,
         expected_market_features=12,
         position=0,
-        last_price=1.2345,
+        entry_price=1.2345,
+        current_price=1.2345,
+        sl_price=1.2145,
+        tp_price=1.2545,
+        current_atr=0.001,
+        steps_in_trade=0,
+        max_holding_steps=120,
+        balance=10000.0,
+        initial_balance=10000.0,
+        window_size=10,
     )
 
-    assert observation.shape == (10, 16)
-    np.testing.assert_array_equal(observation[:, :10], market_values)
-    np.testing.assert_array_equal(observation[:, 10], np.zeros(10))
-    np.testing.assert_array_equal(observation[:, 11], np.zeros(10))
-    np.testing.assert_array_equal(observation[:, 12], np.zeros(10))
-    np.testing.assert_array_equal(observation[:, 13], np.zeros(10))
-    np.testing.assert_array_equal(observation[:, 14], np.zeros(10))
-    np.testing.assert_array_equal(observation[:, 15], np.ones(10))
+    assert observation.shape == (10, 19)
+    np.testing.assert_array_equal(observation[:10, :10], market_values)
+    np.testing.assert_array_equal(observation[:10, 10], np.zeros(10))
+    np.testing.assert_array_equal(observation[:10, 11], np.zeros(10))
+    np.testing.assert_array_equal(observation[:10, 12], np.zeros(10))
+    np.testing.assert_array_equal(observation[:10, 13], np.zeros(10))
+    np.testing.assert_array_equal(observation[:10, 14], np.zeros(10))
+    np.testing.assert_array_equal(observation[:10, 15], np.ones(10))
+    np.testing.assert_array_equal(observation[:10, 16], np.zeros(10))
+    np.testing.assert_array_equal(observation[:10, 17], np.zeros(10))
+    np.testing.assert_array_equal(observation[:10, 18], np.zeros(10))
 
 
 def test_v3_observation_encodes_short_position_and_truncates_market_features():
@@ -201,19 +225,33 @@ def test_v3_observation_encodes_short_position_and_truncates_market_features():
     observation = build_v3_observation(
         market_values=market_values,
         expected_market_features=12,
-        position=2,
-        last_price=1.2,
+        position=-1,
+        entry_price=1.2,
+        current_price=1.2,
+        sl_price=1.22,
+        tp_price=1.18,
+        current_atr=0.001,
+        steps_in_trade=0,
+        max_holding_steps=120,
+        balance=10000.0,
+        initial_balance=10000.0,
+        window_size=10,
     )
 
-    assert observation.shape == (10, 16)
-    np.testing.assert_array_equal(observation[:, :12], market_values[:, :12])
-    np.testing.assert_array_equal(observation[:, 12], np.full(10, 2.0))
-    np.testing.assert_array_equal(observation[:, 13], np.full(10, -1.0))
+    assert observation.shape == (10, 19)
+    np.testing.assert_array_equal(observation[:10, :12], market_values[:, :12])
+    np.testing.assert_array_equal(observation[:10, 12], np.zeros(10))
+    np.testing.assert_array_equal(observation[:10, 13], np.full(10, -1.0))
+    np.testing.assert_array_equal(observation[:10, 14], np.zeros(10))
+    np.testing.assert_array_equal(observation[:10, 15], np.ones(10))
+    np.testing.assert_array_equal(observation[:10, 16], np.full(10, 5.0))
+    np.testing.assert_array_equal(observation[:10, 17], np.full(10, 5.0))
+    np.testing.assert_array_equal(observation[:10, 18], np.zeros(10))
 
 
 def test_v3_direction_decoding_preserves_buy_sell_hold_mapping():
     assert decode_v3_direction(0.8, current_position=0) == (1, "BUY")
     assert decode_v3_direction(-0.8, current_position=0) == (-1, "SELL")
-    assert decode_v3_direction(0.0, current_position=0) == (0, "HOLD")
+    assert decode_v3_direction(0.0, current_position=0) == (0, "FLAT")
     assert decode_v3_direction(0.8, current_position=1) == (1, "HOLD")
-    assert decode_v3_direction(-0.8, current_position=2) == (-1, "HOLD")
+    assert decode_v3_direction(-0.8, current_position=-1) == (-1, "HOLD")

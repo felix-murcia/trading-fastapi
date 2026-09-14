@@ -1,54 +1,46 @@
 """
-Entrenamiento PPO v3 — ACCIÓN CONTINUA AUTÓNOMA.
-================================================
-El agente aprende dirección, volumen, SL y TP sin heurísticas externas.
-
-Uso (desde dentro del contenedor):
-  docker exec trading-fastapi python3 /app/ml/train_ppo_v3.py
-
-El modelo se guarda en:
-  /app/ml/ppo_trading_bot_v3.zip   (modelo PPO v3)
-  /app/ml/model_v3.pkl             (metadata)
-
-Parámetros clave:
-  - window_size: 10 (mismo que v2 para compatibilidad de obs space)
-  - n_steps: 2048 por update
-  - n_epochs: 10
-  - batch_size: 64
-  - learning_rate: 3e-4
+Entrenamiento PPO v3 — ACCIÓN CONTINUA AUTÓNOMA (Refactorizado)
+==============================================================
+- Compatibilidad absoluta con ForexTradingEnvV3 (lotes y delta equity).
+- Guarda estadísticas obligatorias de VecNormalize para inferencia.
+- EvalCallback para selección del mejor modelo en datos Out-of-Sample.
+- Backtest completo post-entrenamiento sobre todo el dataset de validación.
 """
 
-import urllib.request
+from datetime import datetime
 import json
-import pandas as pd
-import numpy as np
 import os
 import pickle
 import sys
+import urllib.request
+import gymnasium as gym
+import numpy as np
+import pandas as pd
 
-# Añadir el path para poder importar trading_env_v2
+# Añadir el path para poder importar trading_env_v2 / v3
 sys.path.insert(0, '/app/ml')
-from trading_env_v2 import MARKET_FEATURES, ForexTradingEnvV2, engineer_market_features
+from trading_env_v2 import (
+    MARKET_FEATURES,
+    ForexTradingEnvV2,
+    engineer_market_features,
+    get_market_features,
+)
 
 from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import EvalCallback, BaseCallback
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
-from stable_baselines3.common.callbacks import BaseCallback
-from stable_baselines3.common.utils import get_device
-import gymnasium as gym
 
-MT5_HTTP_URL = os.getenv("MT5_HTTP_URL")  # REQUIRED - no default
-TOKEN = os.getenv("INTERNAL_TOKEN")  # REQUIRED - no default
-
-# ════════════════════════════════════════════════════════════════
-# Contrato completo compartido con el entorno y la inferencia v3.
-# ════════════════════════════════════════════════════════════════
+MT5_HTTP_URL = os.getenv("MT5_HTTP_URL")
+TOKEN = os.getenv("INTERNAL_TOKEN")
 FEATURE_NAMES = list(MARKET_FEATURES)
 
-# ════════════════════════════════════════════════════════════════
-# Fetch datos de MT5
-# ════════════════════════════════════════════════════════════════
-def fetch_mt5_candles(symbol: str = "EURUSD", timeframe: str = "H1",
-                      count: int = 50000) -> pd.DataFrame:
+
+def fetch_mt5_candles(symbol: str = "EURUSD", timeframe: str = "H1", count: int = 50000) -> pd.DataFrame:
+    """Descarga el historial de velas desde el microservicio MT5."""
+    if not MT5_HTTP_URL or not TOKEN:
+        print("[Train V3] ERROR: MT5_HTTP_URL o INTERNAL_TOKEN no configurados.")
+        sys.exit(1)
+
     url = f"{MT5_HTTP_URL}/api/v1/market/candles/latest"
     params = f"symbol_name={symbol}&timeframe={timeframe}&count={count}"
     req = urllib.request.Request(f"{url}?{params}")
@@ -58,83 +50,143 @@ def fetch_mt5_candles(symbol: str = "EURUSD", timeframe: str = "H1",
         with urllib.request.urlopen(req, timeout=120) as resp:
             data = json.loads(resp.read())
         if not data:
-            raise ValueError("No candles returned")
+            raise ValueError("No candles returned from server")
         df = pd.DataFrame(data)
         df['time'] = pd.to_datetime(df['time'])
         df = df.sort_values('time').reset_index(drop=True)
-        print(f"[Train V3] {len(df)} candles cargados {df['time'].min()} → {df['time'].max()}")
+        print(f"[Train V3] {len(df)} velas cargadas ({df['time'].min()} → {df['time'].max()})")
         return df
     except Exception as e:
         print(f"[Train V3] Error fetching candles: {e}")
         sys.exit(1)
 
 
-# ════════════════════════════════════════════════════════════════
-# Feature Engineering — EXACTO igual que ai.py predict
-# ════════════════════════════════════════════════════════════════
-def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Build the canonical v3 features shared with production inference."""
-    return engineer_market_features(df)
+def run_out_of_sample_backtest(model: PPO, eval_env: VecNormalize, df_eval: pd.DataFrame) -> dict:
+    """Ejecuta un backtest secuencial completo sobre el conjunto de evaluación."""
+    print("\n" + "=" * 60)
+    print("[Train V3] INICIANDO BACKTEST OUT-OF-SAMPLE (Evaluación completa)...")
+    print("=" * 60)
+
+    obs = eval_env.reset()
+    done = False
+    equity_curve = []
+    
+    while not done:
+        # Predicción determinista para evaluación de política
+        action, _ = model.predict(obs, deterministic=True)
+        obs, rewards, dones, infos = eval_env.step(action)
+        
+        info = infos[0]
+        equity_curve.append(info['equity'])
+        done = dones[0]
+
+    equity_series = pd.Series(equity_curve)
+    returns = equity_series.pct_change().dropna()
+    initial_balance = 10000.0
+    final_equity = equity_series.iloc[-1]
+    net_pnl = final_equity - initial_balance
+    net_roi = (net_pnl / initial_balance) * 100.0
+
+    # Métricas clave
+    peak = equity_series.cummax()
+    drawdown = (peak - equity_series) / peak
+    max_drawdown = drawdown.max() * 100.0
+    sharpe = (returns.mean() / (returns.std() + 1e-8)) * np.sqrt(24 * 252)  # Anualizado para H1
+
+    metrics = {
+        'total_trades': info.get('trades', 0),
+        'win_rate': info.get('win_rate', 0.0) * 100.0,
+        'initial_balance': initial_balance,
+        'final_equity': final_equity,
+        'net_pnl': net_pnl,
+        'roi_pct': net_roi,
+        'max_drawdown_pct': max_drawdown,
+        'sharpe_ratio': sharpe,
+    }
+
+    print(f"Resultado Backtest:")
+    print(f" - Trades totales:   {metrics['total_trades']}")
+    print(f" - Win Rate:         {metrics['win_rate']:.2f}%")
+    print(f" - Retorno Neto:     ${metrics['net_pnl']:.2f} ({metrics['roi_pct']:.2f}%)")
+    print(f" - Max Drawdown:     {metrics['max_drawdown_pct']:.2f}%")
+    print(f" - Ratio de Sharpe:  {metrics['sharpe_ratio']:.2f}")
+    print("=" * 60)
+    return metrics
 
 
-# ════════════════════════════════════════════════════════════════
-# Custom callback para logging
-# ════════════════════════════════════════════════════════════════
-class MetricsCallback(BaseCallback):
-    def __init__(self, verbose=0):
-        super().__init__(verbose)
-        self.episode_rewards = []
-        self.episode_lengths = []
-
-    def _on_step(self) -> bool:
-        return True  # Logging ya viene de PPO con verbose=1
-
-
-# ════════════════════════════════════════════════════════════════
-# Main training loop
-# ════════════════════════════════════════════════════════════════
 def main():
     print("=" * 60)
-    print("PPO V3 — ACCIÓN CONTINUA AUTÓNOMA")
+    print("PPO V3 — PIPELINE DE ENTRENAMIENTO Y CALIBRACIÓN")
     print("=" * 60)
 
-    # ── 1. Cargar datos ─────────────────────────────────────────
-    df = fetch_mt5_candles(symbol="EURUSD", timeframe="H1", count=50000)
-    df = engineer_features(df)
-    print(f"[V3 Train] {len(df)} velas con featuresEngineered.")
+    # ── 1. Carga y Feature Engineering ─────────────────────────
+    raw_df = fetch_mt5_candles(symbol="EURUSD", timeframe="H1", count=50000)
+    df = engineer_market_features(raw_df)
+    print(f"[Train V3] {len(df)} velas tras procesar indicadores técnicos.")
 
-    # Validar features
+    # Validar presencia de columnas
     missing = set(FEATURE_NAMES) - set(df.columns)
     if missing:
-        print(f"[V3 Train] ERROR: features faltantes: {missing}")
+        print(f"[Train V3] ERROR: Faltan features en el DataFrame: {missing}")
         sys.exit(1)
 
-    # ── 2. Crear entornos ───────────────────────────────────────
-    env_config = {
-        'window_size': 10,
+    # Split temporal secuencial (80% Train, 20% Validación)
+    split_idx = int(len(df) * 0.8)
+    train_df = df.iloc[:split_idx].reset_index(drop=True)
+    eval_df = df.iloc[split_idx:].reset_index(drop=True)
+    print(f"[Train V3] Train: {len(train_df)} velas | Eval: {len(eval_df)} velas")
+
+    # ── 2. Configuración de Entornos ───────────────────────────
+    # Configuración alineada al entorno refactorizado
+    train_env_config = {
+        'window_size': 20,
         'initial_balance': 10000.0,
-        'commission': 0.0001,
+        'lot_size': 100000.0,
         'max_lot': 0.5,
         'max_sl_pips': 100.0,
         'max_tp_pips': 200.0,
         'pip_size': 0.0001,
-        'max_leverage': 100.0,
+        'spread_pips': 1.5,
+        'commission_per_lot': 7.0,
+        'max_episode_steps': 1000,
+        'max_holding_steps': 120,
+        'random_reset': True,   # Descorrelaciona episodios en train
     }
 
-    def make_env():
-        env = ForexTradingEnvV2(df=df, **env_config)
-        return env
+    eval_env_config = train_env_config.copy()
+    eval_env_config['random_reset'] = False  # Evaluación determinista y continua
+    eval_env_config['max_episode_steps'] = len(eval_df) - 25
 
-    train_env = DummyVecEnv([make_env])
+    # Instanciación con DummyVecEnv
+    train_env = DummyVecEnv([lambda: ForexTradingEnvV2(df=train_df, **train_env_config)])
+    eval_env = DummyVecEnv([lambda: ForexTradingEnvV2(df=eval_df, **eval_env_config)])
 
-    # Normalizar observaciones (importante para redes neuronales)
-    train_env = VecNormalize(train_env, norm_obs=True, norm_reward=True)
+    # Normalización: entrenamos RMS en train, congelamos en evaluación
+    train_env = VecNormalize(train_env, norm_obs=True, norm_reward=True, clip_obs=10.0)
+    eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False, clip_obs=10.0, training=False)
+    eval_env.obs_rms = train_env.obs_rms
 
-    # ── 3. Crear modelo PPO ─────────────────────────────────────
-    # Continuous action space: Box(4,)
+    # ── 3. Callbacks y Monitorización ──────────────────────────
+    output_dir = os.getenv("PPO_OUTPUT_DIR", "/app/ml")
+    best_model_dir = os.path.join(output_dir, "best_model_checkpoints")
+    os.makedirs(best_model_dir, exist_ok=True)
+
+    # EvalCallback evalúa periódicamente y guarda el mejor checkpoint
+    eval_callback = EvalCallback(
+        eval_env,
+        best_model_save_path=best_model_dir,
+        log_path=best_model_dir,
+        eval_freq=10000,
+        n_eval_episodes=3,
+        deterministic=True,
+        render=False,
+        verbose=1
+    )
+
+    # ── 4. Inicialización del Modelo PPO ───────────────────────
     model = PPO(
-        "MlpPolicy",
-        train_env,
+        policy="MlpPolicy",
+        env=train_env,
         learning_rate=3e-4,
         n_steps=2048,
         batch_size=64,
@@ -142,80 +194,59 @@ def main():
         gamma=0.99,
         gae_lambda=0.95,
         clip_range=0.2,
-        ent_coef=0.01,       # exploration bonus
+        ent_coef=0.01,         # Evita el colapso temprano de exploración
         vf_coef=0.5,
         max_grad_norm=0.5,
-        verbose=0,             # 0 = silent, 1 = progress bar (requires tqdm/rich)
-        tensorboard_log=None,  # disabled - tensorboard not installed
+        verbose=1,             # Muestra tablas de métricas en consola
         device="auto",
     )
 
-    # ── 4. Callback simple para tracking de progreso ─────────────
-    class ProgressCallback(BaseCallback):
-        def __init__(self, total_steps: int, print_freq: int = 10000):
-            super().__init__()
-            self.total_steps = total_steps
-            self.print_freq = print_freq
-
-        def _on_step(self) -> bool:
-            if self.num_timesteps % self.print_freq == 0:
-                pct = self.num_timesteps * 100 // self.total_steps
-                print(f"[V3 Train] {self.num_timesteps:,}/{self.total_steps:,} steps ({pct}%)")
-            return True
-
-    # ── 5. Entrenar ─────────────────────────────────────────────
-    print("[V3 Train] Iniciando entrenamiento...")
-    print(f"[V3 Train] Total steps: 200,000")
-    print(f"[V3 Train] Action space: CONTINUOUS (direction, volume, sl_pips, tp_pips)")
-    print(f"[V3 Train] Observation space: {train_env.observation_space}")
-    sys.stdout.flush()
-
-    progress_cb = ProgressCallback(total_steps=200_000, print_freq=10000)
+    # ── 5. Entrenamiento ───────────────────────────────────────
+    total_timesteps = 200_000
+    print(f"\n[Train V3] Iniciando entrenamiento PPO ({total_timesteps:,} steps)...")
     model.learn(
-        total_timesteps=200_000,
-        callback=progress_cb,
+        total_timesteps=total_timesteps,
+        callback=eval_callback,
     )
 
-    # ── 6. Guardar modelo ────────────────────────────────────────
-    model_path = "/app/ml/ppo_trading_bot_v3.zip"
-    model.save(model_path)
-    print(f"[V3 Train] Modelo guardado: {model_path}")
+    # ── 6. Guardado del Modelo y Estadísticas Críticas ─────────
+    model_output_path = os.getenv("PPO_OUTPUT_PATH", os.path.join(output_dir, "ppo_trading_bot_v3.zip"))
+    model.save(model_output_path)
+    print(f"[Train V3] Modelo final guardado en: {model_output_path}")
 
-    # Guardar metadata
+    # GUARDADO CRÍTICO: Estadísticas de VecNormalize
+    norm_output_path = os.path.splitext(model_output_path)[0] + "_vec_norm.pkl"
+    train_env.save(norm_output_path)
+    print(f"[Train V3] Estadísticas de normalización guardadas en: {norm_output_path}")
+
+    # Metadata de configuración para ai.py
     metadata = {
         'feature_names': FEATURE_NAMES,
         'n_features': len(FEATURE_NAMES),
-        'window_size': env_config['window_size'],
+        'window_size': train_env_config['window_size'],
         'version': '3.0',
-        'total_steps': 200_000,
+        'total_steps': total_timesteps,
         'action_type': 'continuous',
         'action_space': ['direction', 'volume', 'sl_pips', 'tp_pips'],
-        'env_config': env_config,
-        'note': 'El agente aprende volumen, SL y TP de forma totalmente autónoma',
+        'env_config': train_env_config,
+        'train_date_range': (str(train_df['time'].min()), str(train_df['time'].max())),
+        'eval_date_range': (str(eval_df['time'].min()), str(eval_df['time'].max())),
+        'vec_normalize_file': os.path.basename(norm_output_path),
     }
 
-    with open("/app/ml/model_v3.pkl", "wb") as f:
+    metadata_path = os.path.splitext(model_output_path)[0] + ".pkl"
+    with open(metadata_path, "wb") as f:
         pickle.dump(metadata, f)
+    print(f"[Train V3] Metadata guardada en: {metadata_path}")
 
-    print("[V3 Train] Metadata guardada: /app/ml/model_v3.pkl")
-    print("[V3 Train] ENTRENAMIENTO COMPLETADO")
-
-    # ── 7. Test rápido de inferencia ────────────────────────────
-    print("\n[V3 Train] Test de inferencia con últimos 10 candles...")
-    test_env = ForexTradingEnvV2(df=df, **env_config)
-    obs, _ = test_env.reset()
-    total_r = 0
-    for i in range(10):
-        action, _ = model.predict(obs, deterministic=True)
-        obs, reward, term, trunc, info = test_env.step(action)
-        total_r += reward
-        print(f"  Step {i}: action={action}  reward={reward:.4f}  "
-              f"pos={info['position']}  vol={info['volume']:.2f}  "
-              f"sl={info['sl_pips']:.1f}  tp={info['tp_pips']:.1f}  "
-              f"balance={info['balance']:.2f}")
-    print(f"  Total reward: {total_r:.4f}")
+    # ── 7. Validación Final Fuera de Muestra ───────────────────
+    # Sincronizar estadísticas definitivas con el entorno de test
+    eval_env.obs_rms = train_env.obs_rms
+    eval_metrics = run_out_of_sample_backtest(model, eval_env, eval_df)
 
     train_env.close()
+    eval_env.close()
+    print("[Train V3] Pipeline completado con éxito.")
 
 
 if __name__ == "__main__":

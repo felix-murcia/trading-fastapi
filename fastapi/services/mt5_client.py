@@ -70,10 +70,7 @@ async def get_candles(symbol: str, timeframe: str, count: int) -> list[dict]:
         if isinstance(t, (int, float)):
             return int(t)
         from datetime import datetime, timezone
-        try:
-            return int(datetime.fromisoformat(str(t).replace("Z", "+00:00")).timestamp())
-        except Exception:
-            return 0
+        return int(datetime.fromisoformat(str(t).replace("Z", "+00:00")).timestamp())
 
     return [
         {
@@ -120,44 +117,23 @@ async def place_order_with_fallback(symbol: str, order_type: str, volume: float,
     Intenta colocar orden en MT5. Si falla, la guarda en la cola deferred.
     Ajusta volumen según correlación con posiciones abiertas.
     """
-    # 1. Correlation-aware sizing (skip in paper mode)
     if not settings.paper_mode:
-        try:
-            positions_data = await get_positions()
-            open_pos = positions_data.get("open", [])
-            if open_pos:
-                open_symbols = [p.get("symbol") for p in open_pos if isinstance(p, dict)]
-                open_lots = [float(p.get("volume", 0)) for p in open_pos if isinstance(p, dict)]
-                from services.correlation_sizing import get_correlated_lot_multiplier
-                multiplier = get_correlated_lot_multiplier(symbol, open_symbols, open_lots)
-                volume = round(volume * multiplier, 2)
-                if multiplier < 1.0:
-                    logger.info("[MT5-CLIENT] Volume ajustado por correlación: %.2f → %.2f (mult=%.2f)",
-                               volume / multiplier, volume, multiplier)
-        except Exception as corr_exc:
-            logger.warning("[MT5-CLIENT] Error en correlation sizing: %s. Usando volumen original.", corr_exc)
+        positions_data = await get_positions()
+        open_pos = positions_data.get("open", [])
+        if open_pos:
+            open_symbols = [p.get("symbol") for p in open_pos if isinstance(p, dict)]
+            open_lots = [float(p.get("volume", 0)) for p in open_pos if isinstance(p, dict)]
+            from services.correlation_sizing import get_correlated_lot_multiplier
+            multiplier = get_correlated_lot_multiplier(symbol, open_symbols, open_lots)
+            volume = round(volume * multiplier, 2)
+            if multiplier < 1.0:
+                logger.info("[MT5-CLIENT] Volume ajustado por correlación: %.2f → %.2f (mult=%.2f)",
+                           volume / multiplier, volume, multiplier)
 
-    # 2. Paper mode: simula la orden
     if settings.paper_mode:
         return await place_order_paper(symbol, order_type, volume, price, sl, tp, comment)
 
-    # 3. Place order real
-    try:
-        return await place_order(symbol, order_type, volume, price, sl, tp, comment)
-    except Exception as exc:
-        logger.warning("[MT5-CLIENT] Orden directa falló: %s. Guardando en cola diferida.", exc)
-        from services.order_queue import enqueue_order
-        order_id = await enqueue_order(
-            symbol=symbol,
-            order_type=order_type,
-            volume=volume,
-            entry_price=price,
-            stop_loss=sl,
-            take_profit=tp,
-            comment=comment,
-            cycle_id=cycle_id,
-        )
-        return {"ticket": None, "deferred": True, "order_id": order_id}
+    return await place_order(symbol, order_type, volume, price, sl, tp, comment)
 
 
 async def place_order_paper(symbol: str, order_type: str, volume: float,

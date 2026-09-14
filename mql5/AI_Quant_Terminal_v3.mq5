@@ -1,416 +1,250 @@
 /*
-AI_Quant_Terminal_v3.mq5
-========================
-EA que soporta predicción AUTÓNOMA del modelo PPO v3.
-
-Cuando el servidor FastAPI responde con campos desde el modelo v3:
-  - volume    → usa ese lote directamente (sin CalculateLots)
-  - sl_pips   → usa esa distancia de SL directamente
-  - tp_pips   → usa esa distancia de TP directamente
-
-Cuando NO hay campos v3 (modelo v2 legacy), cae back a los inputs estáticos
-de RiskPercent / StopLossPips / TakeProfitPips.
-
-Cambios vs v11.1:
-  - JSON parsing extensible para volume/sl_pips/tp_pips/model_version
-  -Uso directo de lot/SL/TP del modelo cuando están disponibles
-  - Backwards compatible con respuestas v2 (sin esos campos)
+AI_Quant_Terminal_v3.mq5 (Refactorizado)
+========================================
+Terminal de Ejecución y Telemetría para Cerebro Autónomo (FastAPI + PPO v3).
+- Rol del EA: Sensor de datos y ejecutor pasivo.
+- Rol del Servidor: Decisión direccional, dimensionamiento de lotes, SL, TP y gestión de riesgo.
 */
 #property copyright "AI Quant Terminal v3"
-#property version   "11.2"
+#property version   "12.0"
 #property strict
 
 #include <Trade\Trade.mqh>
 
-//--- Forward Declarations
-void ManageOpenPositions();
-double CalculateLots(double slDistancePrice);
-bool IsCircuitBreakerOpen();
-void CloseAllPositions();
-bool HasActivePosition();
-void NotifyTradeClosed(ulong ticket, string comment,
-                       double entryPrice, double closePrice, double volume,
-                       double pnl, long posType, datetime entryTime);
-void NotifyTradeOpened(string direction, double entryPrice);
+#define MAX_RETRIES             3
+#define BASE_RETRY_DELAY_MS     1000
+#define MAX_CIRCUIT_BREAKERS    5
+#define CIRCUIT_BREAK_COOLDOWN  300
 
-//--- Macros MQL5
-#define IsTesting() ((bool)MQLInfoInteger(MQL_TESTER))
+input group "=== Configuración del Cerebro ==="
+input string FastAPI_URL    = "http://127.0.0.1:8090"; // URL del servidor FastAPI
+input string InternalToken  = "YOUR_INTERNAL_TOKEN";  // Token de autenticación
+input bool   EnableAI       = true;                    // Habilitar operativa por IA
+input ulong  MagicNumber    = 90001;                   // Identificador de órdenes
 
-//--- Retry & Circuit Breaker
-#define MAX_RETRIES           3
-#define BASE_RETRY_DELAY_MS   1000    // 1 segundo base
-#define MAX_CIRCUIT_BREAKERS  5       // Max errors before cooldown
-#define CIRCUIT_BREAK_COOLDOWN 300     // 5 minutos de cooldown
-
-input group "=== AI Brain Server ==="
-input string FastAPI_URL = "http://YOUR_FASTAPI_IP:8090"; // IP del servidor FastAPI
-input string InternalToken = "YOUR_INTERNAL_TOKEN_HERE"; // Setear en MT5 Inputs o variable env
-input bool EnableAI= true;
-
-input group "=== Position Sizing (Legacy / Fallback v2) ==="
-input double RiskPercent = 5.0;       // % equity por trade (fallback si no hay modelo v3)
-input int StopLossPips = 150;        // SL fallback (pips)
-input int TakeProfitPips = 300;       // TP fallback (pips)
-input bool UseATRForSL = true;       // Usar ATR en vez de StopLossPips fijo
-input int ATRPeriod = 14;
-
-input group "=== Autonomous Mode (v3 Model) ==="
-input bool UseModelRiskParams = true; // Si true: usa volume/sl/tp del modelo directamente
-
-input group "=== Trailing Stop ==="
-input double TrailingPercent = 0.25;
-input int TrailingMinPips = 15;
-input int TrailingATRMult = 2;
-
-input group "=== Terminal Management ==="
-input ulong MagicNumber = 90001;
-
-CTrade trade;
+CTrade   trade;
 datetime lastCheckedBar = 0;
-datetime lastManagedPositions = 0;
-
-//--- Circuit Breaker State
 datetime g_circuitBreakerReset = 0;
-int g_consecutiveErrors = 0;
+int      g_consecutiveErrors = 0;
+ulong    g_lastClosedTicket = 0;
 
-//--- Deal history tracking (avoid duplicate close notifications)
-ulong g_lastClosedTicket = 0;
+//+------------------------------------------------------------------+
+//| Parser JSON ligero y tolerante a tipos                           |
+//+------------------------------------------------------------------+
+string GetJsonValue(const string json, const string key)
+  {
+   string token = "\"" + key + "\":";
+   int start = StringFind(json, token);
+   if(start < 0) return "";
+   start += StringLen(token);
 
+   // Omitir espacios
+   while(start < StringLen(json) && (StringGetCharacter(json, start) == ' ' || StringGetCharacter(json, start) == '\t'))
+      start++;
+
+   if(start >= StringLen(json)) return "";
+
+   ushort firstChar = StringGetCharacter(json, start);
+   if(firstChar == '"') // Valor string
+     {
+      start++;
+      int end = StringFind(json, "\"", start);
+      if(end < 0) return "";
+      return StringSubstr(json, start, end - start);
+     }
+   else // Valor numérico / booleano / null
+     {
+      int end = start;
+      while(end < StringLen(json))
+        {
+         ushort c = StringGetCharacter(json, end);
+         if(c == ',' || c == '}' || c == ']' || c == ' ' || c == '\r' || c == '\n') break;
+         end++;
+        }
+      return StringSubstr(json, start, end - start);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Inicialización                                                   |
+//+------------------------------------------------------------------+
 int OnInit()
   {
    trade.SetExpertMagicNumber(MagicNumber);
    trade.SetDeviationInPoints(30);
    trade.SetTypeFillingBySymbol(Symbol());
-   Print("[AI Terminal v3] Version=11.2 Iniciado. Autonomous=", UseModelRiskParams);
+   PrintFormat("[AI Terminal] Iniciado v12.0. Conectando a %s", FastAPI_URL);
    return INIT_SUCCEEDED;
   }
 
+//+------------------------------------------------------------------+
+//| Ciclo Principal (Por barra cerrada de H1)                        |
+//+------------------------------------------------------------------+
 void OnTick()
   {
-   datetime now = TimeCurrent();
-   if(now - lastManagedPositions >= 30) {
-      ManageOpenPositions();
-      lastManagedPositions = now;
-   }
-
+   // Ejecutar exclusivamente en la apertura de una nueva barra
    datetime currentBar = iTime(Symbol(), PERIOD_CURRENT, 0);
    if(currentBar == lastCheckedBar) return;
    lastCheckedBar = currentBar;
-   
-   if(!IsTesting() && EnableAI)
+
+   if(!EnableAI || MQLInfoInteger(MQL_TESTER)) return;
+
+   // Circuito de protección ante caídas de red
+   if(g_consecutiveErrors >= MAX_CIRCUIT_BREAKERS && g_circuitBreakerReset > TimeCurrent())
      {
-      if(IsCircuitBreakerOpen())
+      PrintFormat("[AI Terminal] Circuit Breaker activo. Enfriamiento hasta: %s", TimeToString(g_circuitBreakerReset));
+      return;
+     }
+
+   // 1. RECOLECCIÓN DE TELEMETRÍA (Sensor)
+   int currentPos = 0;       // 0=Flat, 1=Long, 2=Short
+   double entryPrice = 0.0;
+   double currentSL  = 0.0;
+   double currentTP  = 0.0;
+   int stepsInTrade  = 0;
+
+   if(PositionSelect(Symbol()))
+     {
+      if(PositionGetInteger(POSITION_MAGIC) == MagicNumber)
         {
-         static datetime lastCircuitLog = 0;
-         if(TimeCurrent() - lastCircuitLog > 60) {
-            PrintFormat("[AI Terminal v3] Circuit Breaker ACTIVO. Esperando %d segundos...", CIRCUIT_BREAK_COOLDOWN);
-            lastCircuitLog = TimeCurrent();
-         }
+         long posType = PositionGetInteger(POSITION_TYPE);
+         currentPos = (posType == POSITION_TYPE_BUY) ? 1 : 2;
+         entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+         currentSL  = PositionGetDouble(POSITION_SL);
+         currentTP  = PositionGetDouble(POSITION_TP);
+         datetime pTime = (datetime)PositionGetInteger(POSITION_TIME);
+         if(pTime > 0)
+            stepsInTrade = (int)((TimeCurrent() - pTime) / PeriodSeconds(PERIOD_CURRENT));
+        }
+     }
+
+   // Construcción del payload extendido
+   string body = StringFormat(
+      "{\"symbol\":\"%s\",\"timeframe\":\"H1\",\"position\":%d,\"entry_price\":%.5f,\"sl_price\":%.5f,\"tp_price\":%.5f,\"steps_in_trade\":%d}",
+      Symbol(), currentPos, entryPrice, currentSL, currentTP, stepsInTrade
+   );
+
+   // 2. LLAMADA AL CEREBRO
+   char postData[], resultArr[];
+   string headers = "Content-Type: application/json\r\n"
+                    "X-Internal-Token: " + InternalToken + "\r\n";
+   StringToCharArray(body, postData, 0, StringLen(body));
+   ArrayResize(postData, StringLen(body));
+
+   string responseHeaders;
+   int res = -1;
+   for(int attempt = 0; attempt < MAX_RETRIES; attempt++)
+     {
+      if(attempt > 0) Sleep(BASE_RETRY_DELAY_MS * attempt);
+      ArrayFree(resultArr);
+       res = WebRequest("POST", FastAPI_URL + "/api/v1/ai/predict", headers, 30000, postData, resultArr, responseHeaders);
+      if(res == 200) break;
+     }
+
+   if(res != 200)
+     {
+      g_consecutiveErrors++;
+      if(g_consecutiveErrors >= MAX_CIRCUIT_BREAKERS)
+         g_circuitBreakerReset = TimeCurrent() + CIRCUIT_BREAK_COOLDOWN;
+      PrintFormat("[AI Terminal] Error HTTP %d comunicando con Cerebro.", res);
+      return;
+     }
+
+   g_consecutiveErrors = 0;
+   string r = CharArrayToString(resultArr);
+   PrintFormat("[AI Terminal] Respuesta Cerebro: %s", r);
+
+   // 3. EJECUCIÓN PURA DE LA ORDEN (Actuador)
+   string decision = GetJsonValue(r, "decision");
+
+   // A. Si la decisión es cerrar
+   if(decision == "CLOSE")
+     {
+      Print("[AI Terminal] Orden de CIERRE ejecutada por el Cerebro.");
+      CloseAllPositions();
+      return;
+     }
+
+   // B. Si la decisión es mantener
+   if(decision == "HOLD")
+     {
+      Print("[AI Terminal] Decisión HOLD. Sin cambios en mercado.");
+      return;
+     }
+
+   // C. Si la decisión es operar (BUY / SELL)
+   if(decision == "BUY" || decision == "SELL")
+     {
+      double rawVolume = StringToDouble(GetJsonValue(r, "volume"));
+      double slPips    = StringToDouble(GetJsonValue(r, "sl_pips"));
+      double tpPips    = StringToDouble(GetJsonValue(r, "tp_pips"));
+
+      if(rawVolume <= 0 || slPips <= 0 || tpPips <= 0)
+        {
+         PrintFormat("[AI Terminal] Descartado: Parámetros inválidos recibidos (vol=%.2f, sl=%.1f, tp=%.1f)", rawVolume, slPips, tpPips);
          return;
         }
 
-      string url = FastAPI_URL + "/api/v1/ai/predict";
-      char postData[], result[];
-      string headers = "Content-Type: application/json\r\n"
-                       "X-Internal-Token: " + InternalToken + "\r\n";
-      
-      int current_pos = 0;
-      if(PositionsTotal() > 0) {
-         for(int i = PositionsTotal() - 1; i >= 0; i--) {
-            ulong t = PositionGetTicket(i);
-            if(PositionGetString(POSITION_SYMBOL) == Symbol() && PositionGetInteger(POSITION_MAGIC) == MagicNumber) {
-               current_pos = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? 1 : 2;
-               break;
+      // Normalizar exclusivamente según reglas del Broker (Lotes y Stops)
+      double stepLot = SymbolInfoDouble(Symbol(), SYMBOL_VOLUME_STEP);
+      double minLot  = SymbolInfoDouble(Symbol(), SYMBOL_VOLUME_MIN);
+      double maxLot  = SymbolInfoDouble(Symbol(), SYMBOL_VOLUME_MAX);
+      double lot     = MathFloor(rawVolume / stepLot + 0.00001) * stepLot;
+      lot            = MathMax(minLot, MathMin(maxLot, lot));
+
+       int digits     = (int)SymbolInfoInteger(Symbol(), SYMBOL_DIGITS);
+       double point   = SymbolInfoDouble(Symbol(), SYMBOL_POINT);
+       double pipSize = (digits == 3 || digits == 5) ? point * 10.0 : point;
+       double spread  = (decision == "BUY")
+                        ? (SymbolInfoDouble(Symbol(), SYMBOL_ASK) - SymbolInfoDouble(Symbol(), SYMBOL_BID))
+                        : (SymbolInfoDouble(Symbol(), SYMBOL_ASK) - SymbolInfoDouble(Symbol(), SYMBOL_BID));
+
+       double slDist  = slPips * pipSize;
+       double tpDist  = tpPips * pipSize;
+
+       long minStopLevel = SymbolInfoInteger(Symbol(), SYMBOL_TRADE_STOPS_LEVEL);
+       double spreadDist = 3.0 * pipSize;
+       double minStopDist = MathMax(minStopLevel * point, spreadDist);
+       if(slDist < minStopDist) slDist = minStopDist;
+       if(tpDist < minStopDist) tpDist = minStopDist;
+
+       // Ejecutar BUY
+       if(decision == "BUY")
+         {
+          if(currentPos == 2) CloseAllPositions(); // Si estaba vendido, cierra primero
+          if(currentPos != 1)
+            {
+             double ask = SymbolInfoDouble(Symbol(), SYMBOL_ASK);
+             double spread = (ask - SymbolInfoDouble(Symbol(), SYMBOL_BID));
+             double slPrice = NormalizeDouble(ask - slDist - spread, digits);
+             double tpPrice = NormalizeDouble(ask + tpDist + spread, digits);
+             bool placed = trade.Buy(lot, Symbol(), ask, slPrice, tpPrice, "AI-Predict-v3");
+             if(!placed)
+               PrintFormat("[AI Terminal] ERROR BUY retcode=%d comment=%s | ask=%.5f sl=%.5f tp=%.5f slDist=%.5f tpDist=%.5f spread=%.5f minStop=%.5f",
+                            (int)trade.ResultRetcode(), trade.ResultComment(), ask, slPrice, tpPrice, slDist, tpDist, spread, minStopDist);
             }
          }
-      }
-      string body = StringFormat("{\"symbol\":\"%s\",\"timeframe\":\"H1\",\"position\":%d}", Symbol(), current_pos);
-      StringToCharArray(body, postData, 0, StringLen(body));
-      ArrayResize(postData, StringLen(body));
-
-      string responseHeaders;
-      int res = -1;
-      bool success = false;
-
-      for(int attempt = 0; attempt < MAX_RETRIES && !success; attempt++) {
-         if(attempt > 0) Sleep(BASE_RETRY_DELAY_MS * attempt);
-         res = WebRequest("POST", url, headers, 30000, postData, result, responseHeaders);
-         success = (res == 200);
-      }
-
-      if(res == 200)
-        {
-         g_consecutiveErrors = 0;
-         string r = CharArrayToString(result);
-         PrintFormat("[AI Terminal v3] Respuesta del Cerebro: %s", r);
-         
-         // ───────────────────────────────────────────────────────────────────
-         // PARSE v3 AUTONOMOUS PARAMETERS desde JSON
-         // Se extraen del JSON si el modelo v3 los incluyó en la respuesta
-         // ───────────────────────────────────────────────────────────────────
-         double modelLot = 0.0;
-         double modelSlPips = 0.0;
-         double modelTpPips = 0.0;
-         bool hasModelParams = false;
-         
-         if(UseModelRiskParams)
-           {
-            // Intentar extraer "volume" (lote directo del modelo)
-            string volumeToken = "\"volume\":";
-            int volIdx = StringFind(r, volumeToken);
-            if(volIdx >= 0) {
-               string volSub = StringSubstr(r, volIdx + StringLen(volumeToken));
-               int endVol = StringFind(volSub, ",");
-               if(endVol < 0) endVol = StringFind(volSub, "}");
-               if(endVol > 0) {
-                  string volStr = StringSubstr(volSub, 0, endVol);
-                  modelLot = StringToDouble(volStr);
-               }
+       // Ejecutar SELL
+       else if(decision == "SELL")
+         {
+          if(currentPos == 1) CloseAllPositions(); // Si estaba comprado, cierra primero
+          if(currentPos != 2)
+            {
+             double bid = SymbolInfoDouble(Symbol(), SYMBOL_BID);
+             double spread = (SymbolInfoDouble(Symbol(), SYMBOL_ASK) - bid);
+             double slPrice = NormalizeDouble(bid + slDist + spread, digits);
+             double tpPrice = NormalizeDouble(bid - tpDist - spread, digits);
+             bool placed = trade.Sell(lot, Symbol(), bid, slPrice, tpPrice, "AI-Predict-v3");
+             if(!placed)
+               PrintFormat("[AI Terminal] ERROR SELL retcode=%d comment=%s | bid=%.5f sl=%.5f tp=%.5f slDist=%.5f tpDist=%.5f spread=%.5f minStop=%.5f",
+                            (int)trade.ResultRetcode(), trade.ResultComment(), bid, slPrice, tpPrice, slDist, tpDist, spread, minStopDist);
             }
-            
-            // Extraer "sl_pips"
-            string slToken = "\"sl_pips\":";
-            int slIdx = StringFind(r, slToken);
-            if(slIdx >= 0) {
-               string slSub = StringSubstr(r, slIdx + StringLen(slToken));
-               int endSl = StringFind(slSub, ",");
-               if(endSl < 0) endSl = StringFind(slSub, "}");
-               if(endSl > 0) {
-                  string slStr = StringSubstr(slSub, 0, endSl);
-                  modelSlPips = StringToDouble(slStr);
-               }
-            }
-            
-            // Extraer "tp_pips"
-            string tpToken = "\"tp_pips\":";
-            int tpIdx = StringFind(r, tpToken);
-            if(tpIdx >= 0) {
-               string tpSub = StringSubstr(r, tpIdx + StringLen(tpToken));
-               int endTp = StringFind(tpSub, ",");
-               if(endTp < 0) endTp = StringFind(tpSub, "}");
-               if(endTp > 0) {
-                  string tpStr = StringSubstr(tpSub, 0, endTp);
-                  modelTpPips = StringToDouble(tpStr);
-               }
-            }
-            
-            // Si tenemos los 3 parámetros del modelo → modo autónomo
-            if(modelLot > 0.0 && modelSlPips > 0.0 && modelTpPips > 0.0) {
-               if(modelTpPips > modelSlPips * 2.0) {
-                  PrintFormat("[AI Terminal v3] RR corregido: %.1f -> %.1f (máximo 2:1)", modelTpPips, modelSlPips * 2.0);
-                  modelTpPips = modelSlPips * 2.0;
-               }
-               if(modelTpPips < modelSlPips) {
-                  PrintFormat("[AI Terminal v3] RR corregido: %.1f -> %.1f (mínimo 1:1 en salida)", modelTpPips, modelSlPips);
-                  modelTpPips = modelSlPips;
-               }
-               hasModelParams = true;
-               PrintFormat("[AI Terminal v3] MODO AUTÓNOMO: lot=%.2f sl=%.1f tp=%.1f",
-                           modelLot, modelSlPips, modelTpPips);
-            }
-           }
-         
-         // ───────────────────────────────────────────────────────────────────
-         // CALCULAR PARÁMETROS DE TRADE
-         // ───────────────────────────────────────────────────────────────────
-         double slPips, tpPips, lot;
-         double slDistance, tpDistance;
-         double p = SymbolInfoDouble(Symbol(), SYMBOL_POINT);
-         int digits = (int)SymbolInfoInteger(Symbol(), SYMBOL_DIGITS);
-         double pipSize = (digits == 3 || digits == 5) ? p * 10.0 : p;
-         int dig = (int)SymbolInfoInteger(Symbol(), SYMBOL_DIGITS);
-         
-         if(hasModelParams)
-           {
-            // ── MODO AUTÓNOMO (modelo v3) ───────────────────────────────────
-            slPips = modelSlPips;
-            tpPips = modelTpPips;
-            lot    = modelLot;
-            slDistance = slPips * pipSize;
-            tpDistance = tpPips * pipSize;
-           }
-         else
-           {
-            // ── MODO LEGACY (modelo v2 o sin parámetros v3) ─────────────────
-            slPips = StopLossPips;
-            if(UseATRForSL) {
-               double atrArr[];
-               int atrHandle = iATR(Symbol(), PERIOD_CURRENT, ATRPeriod);
-               if(CopyBuffer(atrHandle, 0, 0, 1, atrArr) > 0) {
-                  slPips = MathMax(atrArr[0] / pipSize * 1.5, StopLossPips);
-               }
-               IndicatorRelease(atrHandle);
-            }
-            tpPips = TakeProfitPips;
-            slDistance = slPips * pipSize;
-            tpDistance = tpPips * pipSize;
-            lot = CalculateLots(slDistance);
-           }
-         
-         PrintFormat("[AI Terminal v3] SL: %.0f pips, TP: %.0f pips, Lote: %.2f", slPips, tpPips, lot);
-         
-         // ───────────────────────────────────────────────────────────────────
-         // DECISIÓN Y EJECUCIÓN
-         // ───────────────────────────────────────────────────────────────────
-         if(StringFind(r, "\"decision\":\"CLOSE\"") >= 0)
-           {
-            Print("[AI Terminal v3] Cerebro indica CIERRE de posiciones.");
-            CloseAllPositions();
-           }
-         else if(StringFind(r, "\"decision\":\"BUY\"") >= 0)
-           {
-            double entry = SymbolInfoDouble(Symbol(), SYMBOL_ASK);
-            if(current_pos == 2) CloseAllPositions();
-            if(current_pos != 1) {
-               bool buyOk = trade.Buy(lot, Symbol(), entry,
-                                      NormalizeDouble(entry - slDistance, dig),
-                                      NormalizeDouble(entry + tpDistance, dig),
-                                      "AI Predict BUY v3[sl][tp]");
-               PrintFormat("[AI Terminal v3] BUY — entry=%.5f lot=%.2f SL=%.5f TP=%.5f → %s",
-                           entry, lot, NormalizeDouble(entry - slDistance, dig),
-                           NormalizeDouble(entry + tpDistance, dig),
-                           buyOk ? "OK" : "FALLO");
-               if(buyOk) NotifyTradeOpened("BUY", entry);
-            }
-           }
-         else if(StringFind(r, "\"decision\":\"SELL\"") >= 0)
-           {
-            double entry = SymbolInfoDouble(Symbol(), SYMBOL_BID);
-            if(current_pos == 1) CloseAllPositions();
-            if(current_pos != 2) {
-               bool sellOk = trade.Sell(lot, Symbol(), entry,
-                                       NormalizeDouble(entry + slDistance, dig),
-                                       NormalizeDouble(entry - tpDistance, dig),
-                                       "AI Predict SELL v3[sl][tp]");
-               PrintFormat("[AI Terminal v3] SELL — entry=%.5f lot=%.2f SL=%.5f TP=%.5f → %s",
-                           entry, lot, NormalizeDouble(entry + slDistance, dig),
-                           NormalizeDouble(entry - tpDistance, dig),
-                           sellOk ? "OK" : "FALLO");
-               if(sellOk) NotifyTradeOpened("SELL", entry);
-            }
-           }
-        }
-      else
-        {
-         g_consecutiveErrors++;
-         if(g_consecutiveErrors >= MAX_CIRCUIT_BREAKERS)
-           {
-            g_circuitBreakerReset = TimeCurrent() + CIRCUIT_BREAK_COOLDOWN;
-           }
-         PrintFormat("[AI Terminal v3] Error HTTP %d. Intentos fallidos: %d", res, g_consecutiveErrors);
-        }
+         }
      }
   }
 
 //+------------------------------------------------------------------+
-//| Lot Calculator (legacy fallback)                                  |
-//+------------------------------------------------------------------+
-double CalculateLots(double slDistancePrice)
-  {
-   if(slDistancePrice <= 0) return SymbolInfoDouble(Symbol(), SYMBOL_VOLUME_MIN);
-   double equity     = AccountInfoDouble(ACCOUNT_EQUITY);
-   double riskMoney  = equity * (RiskPercent / 100.0);
-   double tickValue  = SymbolInfoDouble(Symbol(), SYMBOL_TRADE_TICK_VALUE);
-   double tickSize   = SymbolInfoDouble(Symbol(), SYMBOL_TRADE_TICK_SIZE);
-   if(tickSize <= 0 || tickValue <= 0) return SymbolInfoDouble(Symbol(), SYMBOL_VOLUME_MIN);
-   double lossPerLot = (slDistancePrice / tickSize) * tickValue;
-   if(lossPerLot <= 0) return SymbolInfoDouble(Symbol(), SYMBOL_VOLUME_MIN);
-   double stepLot    = SymbolInfoDouble(Symbol(), SYMBOL_VOLUME_STEP);
-   double minLot     = SymbolInfoDouble(Symbol(), SYMBOL_VOLUME_MIN);
-   double maxLot     = SymbolInfoDouble(Symbol(), SYMBOL_VOLUME_MAX);
-   double rawLots    = riskMoney / lossPerLot;
-   double lots       = MathFloor((rawLots / stepLot) + 1e-7) * stepLot;
-   return MathMin(maxLot, MathMax(minLot, lots));
-  }
-
-//+------------------------------------------------------------------+
-//| Manage Open Positions (Trailing Stop)                             |
-//+------------------------------------------------------------------+
-void ManageOpenPositions()
-  {
-   if(PositionsTotal() == 0) return;
-
-   int digits = (int)SymbolInfoInteger(Symbol(), SYMBOL_DIGITS);
-   double pointVal = SymbolInfoDouble(Symbol(), SYMBOL_POINT);
-
-   static int cachedAtrHandle = INVALID_HANDLE;
-   static datetime atrCacheTime = 0;
-   double atrArr[];
-   if(cachedAtrHandle == INVALID_HANDLE || TimeCurrent() - atrCacheTime > 60) {
-      if(cachedAtrHandle != INVALID_HANDLE) IndicatorRelease(cachedAtrHandle);
-      cachedAtrHandle = iATR(Symbol(), PERIOD_CURRENT, ATRPeriod);
-      atrCacheTime = TimeCurrent();
-   }
-   double atrPips = TrailingMinPips * pointVal;
-   if(cachedAtrHandle != INVALID_HANDLE && CopyBuffer(cachedAtrHandle, 0, 0, 1, atrArr) > 0) {
-      atrPips = MathMax(atrArr[0] * TrailingATRMult, TrailingMinPips * pointVal);
-   }
-
-   long minStopLevel = SymbolInfoInteger(Symbol(), SYMBOL_TRADE_STOPS_LEVEL);
-   double minStopDist = minStopLevel * pointVal;
-   double dig = SymbolInfoInteger(Symbol(), SYMBOL_DIGITS);
-
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-     {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket <= 0) continue;
-      if(PositionGetString(POSITION_SYMBOL) == Symbol() && PositionGetInteger(POSITION_MAGIC) == MagicNumber)
-        {
-         long type        = PositionGetInteger(POSITION_TYPE);
-         double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-         double currentSL = PositionGetDouble(POSITION_SL);
-         double tpPrice   = PositionGetDouble(POSITION_TP);
-         double currentPr = PositionGetDouble(POSITION_PRICE_CURRENT);
-
-         if(type == POSITION_TYPE_BUY)
-           {
-            double riskDist = openPrice - currentSL;
-            if(riskDist <= 0) continue;
-            double newSL = currentPr - atrPips;
-            double minSL = openPrice + (TrailingPercent * riskDist);
-            double candNewSL = MathMax(newSL, minSL);
-            // Validar: SL debe estar por debajo del precio actual Y respetar distancia mínima
-            double slDistFromPr = currentPr - candNewSL;
-            if(candNewSL > currentSL + pointVal && candNewSL < currentPr && slDistFromPr >= minStopDist) {
-               trade.PositionModify(ticket, NormalizeDouble(candNewSL, dig), tpPrice);
-            }
-           }
-         else if(type == POSITION_TYPE_SELL)
-           {
-            double riskDist = currentSL - openPrice;
-            if(riskDist <= 0) continue;
-            double newSL = currentPr + atrPips;
-            double maxSL = currentPr - atrPips;
-            double minSL = openPrice - (TrailingPercent * riskDist);
-            double candNewSL = MathMin(newSL, maxSL);
-            // Validar: SL debe estar por encima del precio actual Y respetar distancia mínima
-            double slDistFromPr = candNewSL - currentPr;
-            if(candNewSL < currentSL - pointVal && candNewSL > currentPr && slDistFromPr >= minStopDist) {
-               trade.PositionModify(ticket, NormalizeDouble(candNewSL, dig), tpPrice);
-            }
-           }
-        }
-     }
-  }
-
-//+------------------------------------------------------------------+
-//| Circuit Breaker                                                  |
-//+------------------------------------------------------------------+
-bool IsCircuitBreakerOpen()
-  {
-   if(g_consecutiveErrors >= MAX_CIRCUIT_BREAKERS && g_circuitBreakerReset > TimeCurrent())
-      return true;
-   if(g_circuitBreakerReset > 0 && g_circuitBreakerReset <= TimeCurrent())
-     {
-      g_consecutiveErrors = 0;
-      g_circuitBreakerReset = 0;
-      Print("[AI Terminal v3] Circuit Breaker RESET.");
-     }
-   return false;
-  }
-
-//+------------------------------------------------------------------+
-//| Close All Positions                                              |
+//| Cierra todas las posiciones gestionadas por este EA              |
 //+------------------------------------------------------------------+
 void CloseAllPositions()
   {
@@ -420,234 +254,149 @@ void CloseAllPositions()
       if(ticket <= 0) continue;
       if(PositionGetString(POSITION_SYMBOL) == Symbol() && PositionGetInteger(POSITION_MAGIC) == MagicNumber)
         {
-         // Capture all data BEFORE closing (PositionGet* fails after close)
-         string comment    = PositionGetString(POSITION_COMMENT);
-         double entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-         double closePrice = SymbolInfoDouble(Symbol(), SYMBOL_BID);
-         double volume     = PositionGetDouble(POSITION_VOLUME);
-         double pnl        = PositionGetDouble(POSITION_PROFIT);
-         long   posType    = PositionGetInteger(POSITION_TYPE);
-         datetime entryTime= (datetime)PositionGetInteger(POSITION_TIME);
-
          trade.PositionClose(ticket);
-         // NOTE: OnTradeTransaction will fire automatically for this close
         }
      }
   }
 
 //+------------------------------------------------------------------+
-//| Notify FastAPI that a trade was closed (data captured BEFORE close)|
+//| Notificación asíncrona de cierre de trade hacia el Cerebro       |
 //+------------------------------------------------------------------+
-void NotifyTradeClosed(ulong ticket, string comment,
-                       double entryPrice, double closePrice, double volume,
-                       double pnl, long posType, datetime entryTime)
-  {
-   string url = FastAPI_URL + "/api/v1/ai/trade/filled";
-   string direction = (posType == POSITION_TYPE_BUY) ? "LONG" : "SHORT";
-
-   // Parse exit reason from comment
-   string exitReason = "manual";
-   bool slHit = false;
-   bool tpHit = false;
-   if(StringFind(comment, "[sl") >= 0) { slHit = true; exitReason = "sl"; }
-   else if(StringFind(comment, "[tp") >= 0) { tpHit = true; exitReason = "tp"; }
-
-   // Calculate pnl_pct
-   double pnlPct = 0.0;
-   if(entryPrice > 0 && volume > 0) {
-      double directionMult = (posType == POSITION_TYPE_BUY) ? 1.0 : -1.0;
-      double priceDiff = (closePrice - entryPrice) * directionMult;
-      double tickValue = SymbolInfoDouble(Symbol(), SYMBOL_TRADE_TICK_VALUE);
-      double tickSize = SymbolInfoDouble(Symbol(), SYMBOL_TRADE_TICK_SIZE);
-      if(tickSize > 0 && tickValue > 0) {
-         pnlPct = (priceDiff / tickSize) * tickValue * volume / (entryPrice * volume) * 100.0;
-      }
-   }
-
-   // Build JSON body
-   string body = StringFormat(
-      "{\"symbol\":\"%s\",\"entry_time\":\"%s\",\"exit_time\":\"%s\","
-      "\"pnl\":%.2f,\"pnl_pct\":%.4f,\"direction\":\"%s\","
-      "\"sl_hit\":%s,\"tp_hit\":%s,\"exit_reason\":\"%s\"}",
-      Symbol(),
-      IntegerToString(entryTime),
-      IntegerToString(TimeCurrent()),
-      pnl, pnlPct, direction,
-      slHit ? "true" : "false",
-      tpHit ? "true" : "false",
-      exitReason
-   );
-
-   char postData[], result[];
-   string headers = "Content-Type: application/json\r\n"
-                    "X-Internal-Token: " + InternalToken + "\r\n";
-   StringToCharArray(body, postData, 0, StringLen(body));
-   ArrayResize(postData, StringLen(body));
-
-   string responseHeaders;
-   int res = WebRequest("POST", url, headers, 5000, postData, result, responseHeaders);
-   if(res == 200) {
-      PrintFormat("[AI Terminal v3] Trade closed notified: ticket=%d pnl=%.2f exit=%s", ticket, pnl, exitReason);
-   } else {
-      PrintFormat("[AI Terminal v3] NotifyTradeClosed failed: HTTP %d", res);
-   }
-  }
-
-//+------------------------------------------------------------------+
-//| Log trade open to file for debugging                              |
-//+------------------------------------------------------------------+
-void NotifyTradeOpened(string direction, double entryPrice)
-  {
-   datetime now = TimeCurrent();
-   string entryLog = StringFormat(
-      "%s|%s|%s|%.5f\n",
-      IntegerToString(now),
-      direction,
-      Symbol(),
-      entryPrice
-   );
-   
-   int handle = FileOpen("trade_entries.csv", FILE_READ|FILE_WRITE|FILE_SHARE_WRITE|FILE_CSV, ',');
-   if(handle != INVALID_HANDLE) {
-      FileSeek(handle, 0, SEEK_END);
-      FileWriteString(handle, entryLog);
-      FileClose(handle);
-   }
-   
-   PrintFormat("[AI Terminal v3] Trade OPENED: %s @ %.5f", direction, entryPrice);
-  }
-
-//+------------------------------------------------------------------+
-//| Detect trade closes triggered by MT5 (SL/TP/Manual) via events    |
-//+------------------------------------------------------------------+
-void OnTradeTransaction(const MqlTradeTransaction& trans,
+ void OnTradeTransaction(const MqlTradeTransaction& trans,
                         const MqlTradeRequest& request,
                         const MqlTradeResult& result)
-  {
-   // Only handle deals that close one of our positions.
-   if(trans.type != TRADE_TRANSACTION_DEAL_ADD) return;
-
-   ulong dealTicket = trans.deal;
-   if(dealTicket <= 0) return;
-
-   // Only our symbol
-   if(trans.symbol != Symbol()) return;
-
-   long dealEntry = HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
-   if(dealEntry != DEAL_ENTRY_OUT && dealEntry != DEAL_ENTRY_OUT_BY) {
-      PrintFormat("[AI Terminal v3] OnTradeTransaction skip ticket=%I64u entry=%d (not an exit)",
-                  dealTicket, dealEntry);
-      return;
-   }
-
-   // Avoid duplicate notifications for the last confirmed ticket. Do not mark
-   // it yet: a failed HTTP request must remain retryable.
-   if(dealTicket == g_lastClosedTicket) return;
-
-   // Get the original opening deal from position history. The closing deal
-   // has the opposite type and must not be used as entry/direction.
-   ulong openingDeal = 0;
-   long positionId = HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID);
-   if(positionId <= 0) positionId = (long)trans.position;
-   datetime historyFrom = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME) - 86400;
-   datetime historyTo = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME) + 60;
-   if(HistorySelect(historyFrom, historyTo)) {
-      for(int i = 0; i < HistoryDealsTotal(); i++) {
-         ulong historyTicket = HistoryDealGetTicket(i);
-         if(historyTicket <= 0) continue;
-         if(HistoryDealGetInteger(historyTicket, DEAL_POSITION_ID) != positionId) continue;
-         if(HistoryDealGetInteger(historyTicket, DEAL_ENTRY) != DEAL_ENTRY_IN) continue;
-         openingDeal = historyTicket;
-         break;
+   {
+    if(trans.type != TRADE_TRANSACTION_DEAL_ADD)
+      {
+       PrintFormat("[AI Terminal] OnTradeTransaction descartado: type=%d", (int)trans.type);
+       return;
       }
-   }
-   if(openingDeal <= 0) {
-      PrintFormat("[AI Terminal v3] OnTradeTransaction skip ticket=%I64u: opening deal not found position=%I64u magic=%d",
-                  dealTicket, positionId, MagicNumber);
-      return;
-   }
 
-   long openingMagic = HistoryDealGetInteger(openingDeal, DEAL_MAGIC);
-   long closingMagic = HistoryDealGetInteger(dealTicket, DEAL_MAGIC);
-   if(openingMagic != (long)MagicNumber && closingMagic != (long)MagicNumber) {
-      PrintFormat("[AI Terminal v3] OnTradeTransaction skip ticket=%I64u: magic mismatch open=%d close=%d expected=%d",
-                  dealTicket, openingMagic, closingMagic, MagicNumber);
-      return;
-   }
+    ulong dealTicket = trans.deal;
+    if(dealTicket <= 0 || trans.symbol != Symbol())
+      {
+       PrintFormat("[AI Terminal] OnTradeTransaction descartado: deal=%I64u symbol=%s", dealTicket, trans.symbol);
+       return;
+      }
 
-   double entryPrice  = HistoryDealGetDouble(openingDeal, DEAL_PRICE);
-   double volume      = HistoryDealGetDouble(dealTicket, DEAL_VOLUME);
-   double pnl         = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
-   string comment    = HistoryDealGetString(dealTicket, DEAL_COMMENT);
+    long dealEntry = HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
+    if(dealEntry != DEAL_ENTRY_OUT && dealEntry != DEAL_ENTRY_OUT_BY)
+      {
+       PrintFormat("[AI Terminal] OnTradeTransaction descartado: dealEntry=%d ticket=%I64u", (int)dealEntry, dealTicket);
+       return;
+      }
+
+    if(dealTicket == g_lastClosedTicket)
+      {
+       PrintFormat("[AI Terminal] OnTradeTransaction descartado: duplicado ticket=%I64u", dealTicket);
+       return;
+      }
+
+    long positionId = HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID);
+    if(positionId <= 0) positionId = (long)trans.position;
+
+    datetime historyFrom = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME) - 86400 * 30;
+    datetime historyTo   = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME) + 60;
+
+    ulong openingDeal = 0;
+    if(HistorySelect(historyFrom, historyTo))
+      {
+       for(int i = 0; i < HistoryDealsTotal(); i++)
+         {
+          ulong hTicket = HistoryDealGetTicket(i);
+          if(hTicket <= 0) continue;
+          if(HistoryDealGetInteger(hTicket, DEAL_POSITION_ID) == positionId &&
+             HistoryDealGetInteger(hTicket, DEAL_ENTRY) == DEAL_ENTRY_IN)
+            {
+             openingDeal = hTicket;
+             break;
+            }
+         }
+      }
+
+    if(openingDeal <= 0)
+      {
+       PrintFormat("[AI Terminal] OnTradeTransaction descartado: openingDeal=0 positionId=%I64d ticket=%I64u", positionId, dealTicket);
+       return;
+      }
+
+    long openingMagic = HistoryDealGetInteger(openingDeal, DEAL_MAGIC);
+    if(openingMagic != (long)MagicNumber)
+      {
+       PrintFormat("[AI Terminal] OnTradeTransaction descartado: magic=%d esperado=%d", (int)openingMagic, (int)MagicNumber);
+       return;
+      }
+
+   double entryPrice = HistoryDealGetDouble(openingDeal, DEAL_PRICE);
+   double exitPrice  = HistoryDealGetDouble(dealTicket, DEAL_PRICE);
+   double pnl        = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
    long openingType  = HistoryDealGetInteger(openingDeal, DEAL_TYPE);
-   datetime entryTime = (datetime)HistoryDealGetInteger(openingDeal, DEAL_TIME);
-   datetime closeTime = TimeCurrent();                                   // no trans.time field available
-   if(entryTime <= 0 || closeTime <= 0) {
-      PrintFormat("[AI Terminal v3] OnTradeTransaction skip ticket=%I64u: invalid timestamps entry=%d close=%d",
-                  dealTicket, entryTime, closeTime);
-      return;
-   }
+   datetime entryTime= (datetime)HistoryDealGetInteger(openingDeal, DEAL_TIME);
+   datetime closeTime= (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME);
 
-   // Map direction from the opening deal, not the closing deal.
    bool isBuy = (openingType == DEAL_TYPE_BUY);
    string direction = isBuy ? "LONG" : "SHORT";
 
-   // Parse exit reason from comment
+   // Clasificar razón de salida por propiedad DEAL_REASON nativa
+   long dealReason = HistoryDealGetInteger(dealTicket, DEAL_REASON);
+   string comment  = HistoryDealGetString(dealTicket, DEAL_COMMENT);
    string exitReason = "manual";
    bool slHit = false, tpHit = false;
-   if(StringFind(comment, "[sl") >= 0) { slHit = true; exitReason = "sl"; }
-   else if(StringFind(comment, "[tp") >= 0) { tpHit = true; exitReason = "tp"; }
 
-   // Calculate pnl_pct
+   if(dealReason == DEAL_REASON_SL || StringFind(comment, "sl") >= 0)
+     {
+      slHit = true;
+      exitReason = "sl";
+     }
+   else if(dealReason == DEAL_REASON_TP || StringFind(comment, "tp") >= 0)
+     {
+      tpHit = true;
+      exitReason = "tp";
+     }
+
+   // PnL porcentual exacto sobre variación del precio subyacente
    double pnlPct = 0.0;
-   if(entryPrice > 0 && volume > 0) {
-      double directionMult = isBuy ? 1.0 : -1.0;
-      double priceDiff = (pnl / volume) * directionMult;  // pnl per lot / direction
-      if(entryPrice > 0) {
-         pnlPct = (priceDiff / entryPrice) * 100.0;
+   if(entryPrice > 0.0)
+     {
+      double dir = isBuy ? 1.0 : -1.0;
+      pnlPct = ((exitPrice - entryPrice) / entryPrice) * dir * 100.0;
+     }
+
+    // Enviar webhook de telemetría a FastAPI
+    string body = "";
+    StringConcatenate(body, "{",
+       "\"symbol\":\"", Symbol(), "\",",
+       "\"entry_time\":\"", IntegerToString(entryTime), "\",",
+       "\"exit_time\":\"", IntegerToString(closeTime), "\",",
+       "\"pnl\":", DoubleToString(pnl, 2), ",",
+       "\"pnl_pct\":", DoubleToString(pnlPct, 4), ",",
+       "\"direction\":\"", direction, "\",",
+       "\"sl_hit\":", slHit ? "true" : "false", ",",
+       "\"tp_hit\":", tpHit ? "true" : "false", ",",
+       "\"exit_reason\":\"", exitReason, "\",",
+       "\"deal_ticket\":", IntegerToString((long)dealTicket), ",",
+       "\"position_id\":", IntegerToString(positionId),
+       "}"
+    );
+    PrintFormat("[AI Terminal] Webhook body: %s", body);
+
+    char postData[], resultArr[];
+    string headers = "Content-Type: application/json\r\n"
+                     "X-Internal-Token: " + InternalToken + "\r\n";
+    StringToCharArray(body, postData, 0, StringLen(body));
+    ArrayResize(postData, StringLen(body));
+
+    string responseHeaders;
+    int res = WebRequest("POST", FastAPI_URL + "/api/v1/ai/trade/filled", headers, 10000, postData, resultArr, responseHeaders);
+    PrintFormat("[AI Terminal] Webhook HTTP res=%d Err=%d", res, GetLastError());
+    if(res == 200)
+      {
+       g_lastClosedTicket = dealTicket;
+       PrintFormat("[AI Terminal] Cierre reportado exitosamente. Ticket=%I64u PnL=%.2f Motivo=%s", dealTicket, pnl, exitReason);
       }
-   }
-
-   // Build JSON body — Fase 1 observable contract: deal_ticket + position_id
-   string body = StringFormat(
-      "{\"symbol\":\"%s\",\"entry_time\":\"%s\",\"exit_time\":\"%s\","
-      "\"pnl\":%.2f,\"pnl_pct\":%.4f,\"direction\":\"%s\","
-      "\"sl_hit\":%s,\"tp_hit\":%s,\"exit_reason\":\"%s\","
-      "\"deal_ticket\":%I64u,\"position_id\":%I64u}",
-      Symbol(),
-      IntegerToString(entryTime),
-      IntegerToString(closeTime),
-      pnl, pnlPct,
-      direction,
-      slHit ? "true" : "false",
-      tpHit ? "true" : "false",
-      exitReason,
-      dealTicket,
-      (ulong)positionId
-   );
-
-   char postData[], resultArr[];
-   string headers = "Content-Type: application/json\r\n"
-                  "X-Internal-Token: " + InternalToken + "\r\n";
-   StringToCharArray(body, postData, 0, StringLen(body));
-   ArrayResize(postData, StringLen(body));
-
-   string responseHeaders;
-   int res = -1;
-   for(int attempt = 0; attempt < MAX_RETRIES && res != 200; attempt++) {
-      if(attempt > 0) Sleep(BASE_RETRY_DELAY_MS * attempt);
-      ArrayFree(resultArr);
-      res = WebRequest("POST", FastAPI_URL + "/api/v1/ai/trade/filled",
-                       headers, 5000, postData, resultArr, responseHeaders);
-   }
-   if(res == 200) {
-      g_lastClosedTicket = dealTicket;
-      PrintFormat("[AI Terminal v3] Version=11.2 close confirmed ticket=%I64u pnl=%.2f exit=%s",
-                  dealTicket, pnl, exitReason);
-   } else {
-      PrintFormat("[AI Terminal v3] Version=11.2 close NOT confirmed ticket=%I64u HTTP=%d err=%d body=%s",
-            dealTicket, res, GetLastError(), CharArrayToString(resultArr));
-   }
+    else
+      {
+       PrintFormat("[AI Terminal] Error reportando trade cerrado HTTP %d (Err %d)", res, GetLastError());
+      }
   }
-
 //+------------------------------------------------------------------+

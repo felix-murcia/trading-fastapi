@@ -109,12 +109,7 @@ async def _load_persisted_outcomes() -> list[TradeOutcome]:
 def _parse_timestamp(ts: float | str) -> float:
     """Acepta Unix timestamp (float or numeric string) o ISO string, devuelve Unix timestamp (float)."""
     if isinstance(ts, str):
-        # Try numeric string first (Unix timestamp as string like "1725450000")
-        try:
-            return float(ts)
-        except ValueError:
-            # Fall back to ISO format
-            return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+        return float(ts)
     return float(ts)
 
 
@@ -134,23 +129,19 @@ async def _persist_trade_outcome(
     pool = get_pool()
     entry_ts = _parse_timestamp(entry_time)
     exit_ts = _parse_timestamp(exit_time)
-    try:
-        trade_id = await pool.fetchval(
-            """
-            INSERT INTO trade_outcomes
-                (symbol, direction, entry_time, exit_time, pnl, pnl_pct, exit_reason, sl_hit, tp_hit)
-            VALUES ($1,$2,to_timestamp($3::double precision),to_timestamp($4::double precision),$5,$6,$7,$8,$9)
-            RETURNING id
-            """,
-            symbol, direction,
-            entry_ts, exit_ts,
-            pnl, pnl_pct,
-            exit_reason, sl_hit, tp_hit,
-        )
-        return trade_id
-    except Exception as exc:
-        logger.error("[AUTO-RETRAIN] No se pudo persistir trade_outcome: %s — entry_ts=%.0f, exit_ts=%.0f", exc, entry_ts, exit_ts)
-        raise  # Re-lanzar para no ocultar errores de la DB
+    trade_id = await pool.fetchval(
+        """
+        INSERT INTO trade_outcomes
+            (symbol, direction, entry_time, exit_time, pnl, pnl_pct, exit_reason, sl_hit, tp_hit)
+        VALUES ($1,$2,to_timestamp($3::double precision),to_timestamp($4::double precision),$5,$6,$7,$8,$9)
+        RETURNING id
+        """,
+        symbol, direction,
+        entry_ts, exit_ts,
+        pnl, pnl_pct,
+        exit_reason, sl_hit, tp_hit,
+    )
+    return trade_id
 
 
 async def record_trade_filled(
@@ -171,39 +162,23 @@ async def record_trade_filled(
     entry_ts = _parse_timestamp(entry_time)
     exit_ts = _parse_timestamp(exit_time)
 
-    # Persistir a la tabla trade_outcomes (re-lanza excepciones)
-    trade_id = None
-    try:
-        trade_id = await _persist_trade_outcome(
-            symbol, entry_ts, exit_ts, pnl, pnl_pct, direction, sl_hit, tp_hit, exit_reason,
-        )
-    except Exception:
-        logger.error("[RETRAIN] _persist_trade_outcome falló — el trade NO se guardó en DB")
-        raise
+    trade_id = await _persist_trade_outcome(
+        symbol, entry_ts, exit_ts, pnl, pnl_pct, direction, sl_hit, tp_hit, exit_reason,
+    )
 
     # Opción 5: Post-Trade Journal — análisis asíncrono con Qwen
-    try:
-        from services.trade_journal import record_trade_closed
-        await record_trade_closed(
-            trade_id=trade_id or 0,
-            symbol=symbol,
-            direction=direction,
-            entry_time=entry_ts,
-            exit_time=exit_ts,
-            pnl_pct=pnl_pct,
-            exit_reason=exit_reason,
-            sl_hit=sl_hit,
-            tp_hit=tp_hit,
-        )
-    except Exception as j_err:
-        from services.alerting import send_alert, AlertLevel
-        send_alert(
-            AlertLevel.WARNING,
-            "TRADE-JOURNAL",
-            f"Post-trade journal falló (no bloquea recording): {j_err}",
-            exc=j_err,
-            context={"trade_id": trade_id, "symbol": symbol}
-        )
+    from services.trade_journal import record_trade_closed
+    await record_trade_closed(
+        trade_id=trade_id or 0,
+        symbol=symbol,
+        direction=direction,
+        entry_time=entry_ts,
+        exit_time=exit_ts,
+        pnl_pct=pnl_pct,
+        exit_reason=exit_reason,
+        sl_hit=sl_hit,
+        tp_hit=tp_hit,
+    )
 
     outcome = TradeOutcome(
         symbol=symbol,
@@ -309,29 +284,16 @@ async def _do_retrain() -> None:
     cfg = RetrainConfig
     logger.warning("[RETRAIN] ===== INICIANDO RETRAIN =====")
 
-    # 1. Recolectar velas del último período
-    try:
-        candles = await _fetch_historical_candles(symbol="EURUSD", count=cfg.lookback_candles)
-        if len(candles) < 100:
-            logger.error("[RETRAIN] No hay suficientes velas: %d", len(candles))
-            return
-        df = _build_training_dataframe(candles)
-    except Exception as exc:
-        logger.error("[RETRAIN] Error obteniendo velas: %s", exc)
-        return
+    candles = await _fetch_historical_candles(symbol="EURUSD", count=cfg.lookback_candles)
+    if len(candles) < 100:
+        raise RuntimeError(f"[RETRAIN] No hay suficientes velas: {len(candles)}")
+    df = _build_training_dataframe(candles)
 
-    # 2. Separar entrenamiento y validación para no reemplazar el modelo
-    # activo sin medir aperturas, win rate y reward en datos no vistos.
     split_idx = max(cfg.retrain_window_size + 1, int(len(df) * 0.8))
     train_df = df.iloc[:split_idx].reset_index(drop=True)
     eval_df = df.iloc[split_idx - cfg.retrain_window_size:].reset_index(drop=True)
 
-    # Cargar desde DB: el estado en memoria se pierde al reiniciar el contenedor.
-    try:
-        real_outcomes = await _load_persisted_outcomes()
-    except Exception as outcomes_err:
-        logger.error("[RETRAIN] No se pudieron cargar outcomes persistidos: %s", outcomes_err)
-        real_outcomes = list(_state.outcomes)
+    real_outcomes = await _load_persisted_outcomes()
     n_real = len(real_outcomes)
     if n_real > 0:
         logger.warning(
@@ -350,39 +312,22 @@ async def _do_retrain() -> None:
         real_outcome_weight=cfg.real_outcome_weight,
     )
 
-    # 3. Cargar modelo existente o crear nuevo
-    try:
-        from stable_baselines3 import PPO
-        from stable_baselines3.common.vec_env import DummyVecEnv
+    from stable_baselines3 import PPO
+    from stable_baselines3.common.vec_env import DummyVecEnv
 
-        if os.path.exists(MODEL_PATH):
-            try:
-                # Crear env primero para que SB3 valide dimensiones
-                env = DummyVecEnv([lambda: ForexTradingEnvV2(**env_cfg)])
-                model = PPO.load(MODEL_PATH, env=env)
-                logger.info("[RETRAIN] Modelo existente cargado — continuando entrenamiento")
-            except ValueError as dim_err:
-                # Mismatch de dimensiones (modelo viejo con features diferentes)
-                logger.warning(
-                    "[RETRAIN] Dimensiones incompatibles (%s) — reentrenando desde cero",
-                    dim_err,
-                )
-                env = DummyVecEnv([lambda: ForexTradingEnvV2(**env_cfg)])
-                model = PPO(
-                    "MlpPolicy",
-                    env,
-                    learning_rate=cfg.learning_rate,
-                    verbose=cfg.verbose,
-                )
-        else:
-            logger.warning("[RETRAIN] No hay modelo previo — creando nuevo")
-            env = DummyVecEnv([lambda: ForexTradingEnvV2(**env_cfg)])
-            model = PPO(
-                "MlpPolicy",
-                env,
-                learning_rate=cfg.learning_rate,
-                verbose=cfg.verbose,
-            )
+    if os.path.exists(MODEL_PATH):
+        env = DummyVecEnv([lambda: ForexTradingEnvV2(**env_cfg)])
+        model = PPO.load(MODEL_PATH, env=env)
+        logger.info("[RETRAIN] Modelo existente cargado — continuando entrenamiento")
+    else:
+        logger.warning("[RETRAIN] No hay modelo previo — creando nuevo")
+        env = DummyVecEnv([lambda: ForexTradingEnvV2(**env_cfg)])
+        model = PPO(
+            "MlpPolicy",
+            env,
+            learning_rate=cfg.learning_rate,
+            verbose=cfg.verbose,
+        )
 
         # 4. Fine-tune con datos recientes
         if "env" not in dir() or env is None:
@@ -399,11 +344,8 @@ async def _do_retrain() -> None:
         candidate_metrics = _evaluate_model(model, eval_df, env_cfg)
         baseline_metrics = None
         if os.path.exists(MODEL_PATH):
-            try:
-                from stable_baselines3 import PPO
-                baseline_metrics = _evaluate_model(PPO.load(MODEL_PATH), eval_df, env_cfg)
-            except Exception as baseline_err:
-                logger.warning("[RETRAIN] No se pudo evaluar baseline: %s", baseline_err)
+            from stable_baselines3 import PPO
+            baseline_metrics = _evaluate_model(PPO.load(MODEL_PATH), eval_df, env_cfg)
 
         logger.warning(
             "[RETRAIN-EVAL] candidate openings=%d win_rate=%.3f reward=%.3f trades=%d | baseline=%s",
@@ -433,19 +375,10 @@ async def _do_retrain() -> None:
         _state.last_retrain_time = time.time()
 
         # 6. Backup a GCS
-        try:
-            backup_url = await upload_model(MODEL_PATH)
-            logger.warning("[RETRAIN] ===== RETRAIN COMPLETADO ===== model=%s backup=%s", MODEL_PATH, backup_url)
-        except Exception as backup_err:
-            logger.error("[RETRAIN] Backup falló: %s — modelo guardado localmente", backup_err)
-            logger.warning("[RETRAIN] ===== RETRAIN COMPLETADO (sin backup) =====")
+        backup_url = await upload_model(MODEL_PATH)
+        logger.warning("[RETRAIN] ===== RETRAIN COMPLETADO ===== model=%s backup=%s", MODEL_PATH, backup_url)
 
-        # 7. Guardar métricas de retrain en DB
-        await _save_retrain_metrics(df, cfg)
-
-    except Exception as exc:
-        logger.error("[RETRAIN] Error en entrenamiento: %s", exc)
-        raise
+    await _save_retrain_metrics(df, cfg)
 
 
 async def _fetch_historical_candles(symbol: str, count: int) -> list:
@@ -493,15 +426,12 @@ async def _save_retrain_metrics(df: pd.DataFrame, cfg: RetrainConfig) -> None:
         },
     }
 
-    try:
-        await pool.execute(
-            "INSERT INTO audit_log(cycle_id, event, data) VALUES($1, $2, $3)",
-            f"retrain_{int(_state.last_retrain_time)}",
-            "retrain_completed",
-            json.dumps(metrics),
-        )
-    except Exception as exc:
-        logger.warning("[RETRAIN] No se pudo guardar métricas: %s", exc)
+    await pool.execute(
+        "INSERT INTO audit_log(cycle_id, event, data) VALUES($1, $2, $3)",
+        f"retrain_{int(_state.last_retrain_time)}",
+        "retrain_completed",
+        json.dumps(metrics),
+    )
 
 
 # ─── HTTP Endpoint para forzar retrain manualmente ────────────────────────────
