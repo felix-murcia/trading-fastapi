@@ -6,8 +6,10 @@ Terminal de Ejecución y Telemetría para Cerebro Autónomo (FastAPI + PPO v3).
 - Rol del Servidor: Decisión direccional, dimensionamiento de lotes, SL, TP y gestión de riesgo.
 */
 #property copyright "AI Quant Terminal v3"
-#property version   "12.0"
+#property version   "12.5"
 #property strict
+
+#define EA_VERSION "12.5"
 
 #include <Trade\Trade.mqh>
 
@@ -73,7 +75,7 @@ int OnInit()
    trade.SetExpertMagicNumber(MagicNumber);
    trade.SetDeviationInPoints(30);
    trade.SetTypeFillingBySymbol(Symbol());
-   PrintFormat("[AI Terminal] Iniciado v12.0. Conectando a %s", FastAPI_URL);
+   PrintFormat("[AI Terminal] Iniciado v%s. Conectando a %s", EA_VERSION, FastAPI_URL);
    return INIT_SUCCEEDED;
   }
 
@@ -279,24 +281,18 @@ void CloseAllPositions()
        return;
       }
 
-    long dealEntry = HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
-    if(dealEntry != DEAL_ENTRY_OUT && dealEntry != DEAL_ENTRY_OUT_BY)
+    long positionId = (long)trans.position;
+    if(positionId <= 0)
       {
-       PrintFormat("[AI Terminal] OnTradeTransaction descartado: dealEntry=%d ticket=%I64u", (int)dealEntry, dealTicket);
+       PrintFormat("[AI Terminal] OnTradeTransaction descartado: positionId=0 deal=%I64u", dealTicket);
        return;
       }
 
-    if(dealTicket == g_lastClosedTicket)
-      {
-       PrintFormat("[AI Terminal] OnTradeTransaction descartado: duplicado ticket=%I64u", dealTicket);
-       return;
-      }
+    datetime historyFrom = TimeCurrent() - 86400 * 90;
+    datetime historyTo   = TimeCurrent() + 60;
 
-    long positionId = HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID);
-    if(positionId <= 0) positionId = (long)trans.position;
-
-    datetime historyFrom = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME) - 86400 * 30;
-    datetime historyTo   = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME) + 60;
+    PrintFormat("[AI Terminal] Buscando openingDeal: dealTicket=%I64u positionId=%I64d historyFrom=%s historyTo=%s",
+                dealTicket, positionId, TimeToString(historyFrom), TimeToString(historyTo));
 
     ulong openingDeal = 0;
     if(HistorySelect(historyFrom, historyTo))
@@ -305,10 +301,14 @@ void CloseAllPositions()
          {
           ulong hTicket = HistoryDealGetTicket(i);
           if(hTicket <= 0) continue;
-          if(HistoryDealGetInteger(hTicket, DEAL_POSITION_ID) == positionId &&
-             HistoryDealGetInteger(hTicket, DEAL_ENTRY) == DEAL_ENTRY_IN)
+          if(hTicket == dealTicket) continue; // Excluir el deal de cierre
+          long hPosId = HistoryDealGetInteger(hTicket, DEAL_POSITION_ID);
+          long hEntry = HistoryDealGetInteger(hTicket, DEAL_ENTRY);
+          long hType = HistoryDealGetInteger(hTicket, DEAL_TYPE);
+          if(hPosId == positionId && hEntry == DEAL_ENTRY_IN && (hType == DEAL_TYPE_BUY || hType == DEAL_TYPE_SELL))
             {
              openingDeal = hTicket;
+             PrintFormat("[AI Terminal] openingDeal encontrado: hTicket=%I64u hPosId=%I64d hType=%s", hTicket, hPosId, EnumToString((ENUM_DEAL_TYPE)hType));
              break;
             }
          }
@@ -316,7 +316,8 @@ void CloseAllPositions()
 
     if(openingDeal <= 0)
       {
-       PrintFormat("[AI Terminal] OnTradeTransaction descartado: openingDeal=0 positionId=%I64d ticket=%I64u", positionId, dealTicket);
+       PrintFormat("[AI Terminal] OnTradeTransaction descartado: openingDeal=0 positionId=%I64d deal=%I64u",
+                    positionId, dealTicket);
        return;
       }
 

@@ -944,3 +944,31 @@ Ahora, si las Bandas de Bollinger son inválidas o el ratio es insuficiente, el 
 **Pendiente — Retraining del modelo:** Completado (2026-09-11). `ppo_trading_bot_v3.zip` regenerado con `trading_env_v2.py` + `train_ppo_v3.py` refactorizados. Backtest OOS: 1402 trades, win rate 40.09%, Sharpe -4.79, drawdown 51.03%. **No promover a trading real sin evaluación OOS adicional.**
 
 **Contrato EA:** compatible sin cambios. El EA envía `position`/`entry_price`/`sl_price`/`tp_price`/`steps_in_trade` y recibe `volume`/`sl_pips`/`tp_pips`. El servidor computa `current_price`, `current_atr`, `balance` e `initial_balance` internamente. No requiere bump de versión MQL5.
+
+## Troubleshooting — Sesión 2026-09-14
+
+### N. Cálculo dinámico de lotes + spread + registro de trades
+
+**Cambio aplicado:** Ajuste de lote mínimo dinámico, inclusión de spread en TP del EA, logging fuerte en webhook y eliminación total de fallos silenciosos.
+
+**Archivos editados:**
+- `fastapi/routers/ai.py` — lote mínimo dinámico basado en equity/riesgo/umbral de ganancia, timeout de Qwen alineado en 20s, logging en `/trade/filled`, eliminación de todos los `except Exception`/`except:`.
+- `fastapi/services/trade_journal.py` — timeout de Qwen aumentado a 20s, eliminación de fallbacks heurísticos y capturas silenciosas.
+- `fastapi/services/auto_retrain.py` — eliminación de capturas silenciosas en `_persist_trade_outcome`, `record_trade_filled`, `_do_retrain`, `_parse_timestamp` (estricto), baseline/backup y métricas.
+- `fastapi/services/mt5_client.py` — eliminación de capturas silenciosas en correlation sizing y fallback a cola diferida.
+- `mql5/AI_Quant_Terminal_v3.mq5` — versión `12.1`, logging de webhook body/HTTP, `StringConcatenate` corregido, SL/TP con spread incluido, timeout de `WebRequest` aumentado.
+
+**Tests:** `pytest fastapi/tests/ -q` → `44 passed` (2026-09-14).
+
+**Fix principales:**
+- **Lotes dinámicos:** `final_lots` se calcula para garantizar ~3€ netos en el TP, respetando `equity * 0.03` de riesgo y el step de lote del broker. No hay hardcodeo de `0.10`.
+- **Spread en TP:** EA calcula `tpPrice` sumando/restando el spread para que la ganancia neta al cierre sea la distancia configurada.
+- **Zero silent failures:** eliminados todos los `except Exception`/`except:` y fallbacks heurísticos en `ai.py`, `trade_journal.py`, `auto_retrain.py` y `mt5_client.py`. Cualquier error propaga y detiene el flujo.
+- **Webhook logging:** EA loguea `body` y `res` de `WebRequest` para diagnóstico directo.
+
+**Validación:** `docker logs trading-fastapi` confirma startup limpio, modelo cargado y endpoint `/trade/filled` respondiendo `200`.
+
+**Registro de trades en BD:** Confirmado (2026-09-14). El EA v12.5 envía correctamente el webhook `/trade/filled` con `openingDeal` y `dealTicket` diferenciados. Log de evidencia:
+- `2026.09.14 12:58:19.085 [AI Terminal] Webhook HTTP res=200`
+- `2026.09.14 12:58:19.085 [AI Terminal] Cierre reportado exitosamente. Ticket=58063195488 PnL=-0.61`
+- `trade_outcomes` actualizada en tiempo real tras cada cierre.
