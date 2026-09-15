@@ -20,6 +20,17 @@ from db.connection import get_pool
 from config import settings
 
 
+async def _audit(cycle_id: str, event: str, data: dict) -> None:
+    try:
+        pool = get_pool()
+        await pool.execute(
+            "INSERT INTO audit_log(cycle_id, event, data) VALUES($1,$2,$3)",
+            cycle_id, event, json.dumps(data),
+        )
+    except Exception as exc:
+        logger.warning("[ORDER-MANAGER] audit_log failed: %s", exc)
+
+
 VALID_RANGES = {
     "EURUSD": (1.05, 1.20),
     "GBPUSD": (1.20, 1.45),
@@ -77,6 +88,7 @@ async def prepare(req: OrderPrepareRequest) -> OrderPrepareResponse:
         req.cycle_id,
     )
     if existing:
+        await _audit(req.cycle_id, "order_rejected", {"reason": "cycle_already_has_order", "symbol": req.symbol})
         return _reject("cycle_already_has_order")
 
     # 1b. Risk Guardian: ¿se puede abrir nueva posición?
@@ -88,6 +100,7 @@ async def prepare(req: OrderPrepareRequest) -> OrderPrepareResponse:
         open_count = len(positions_data.get("open", []))
         can_open, reason = check_risk(acct["equity"], open_count)
         if not can_open:
+            await _audit(req.cycle_id, "order_rejected", {"reason": f"risk_guardian_blocked:{reason}", "symbol": req.symbol})
             return _reject(f"risk_guardian_blocked: {reason}")
     except Exception as rg_err:
         logger.warning("[ORDER-MANAGER] RiskGuardian check falló: %s — continuando", rg_err)
@@ -95,32 +108,41 @@ async def prepare(req: OrderPrepareRequest) -> OrderPrepareResponse:
     # 2. Rango de precio
     lo, hi = VALID_RANGES.get(req.symbol, (0, 99999))
     if not (lo <= req.entry <= hi):
+        await _audit(req.cycle_id, "order_rejected", {"reason": f"entry_out_of_range:{req.entry}", "symbol": req.symbol, "entry": req.entry})
         return _reject(f"entry_out_of_range:{req.entry}")
 
     # 3. Geometría (tp=0 = sin take profit, permitido)
     if req.type == "BUY":
         if not (req.sl < req.entry):
+            await _audit(req.cycle_id, "order_rejected", {"reason": "invalid_geometry_buy", "symbol": req.symbol})
             return _reject("invalid_geometry_buy")
         if req.tp != 0 and req.tp <= req.entry:
+            await _audit(req.cycle_id, "order_rejected", {"reason": "invalid_geometry_buy", "symbol": req.symbol})
             return _reject("invalid_geometry_buy")
     elif req.type == "SELL":
         if not (req.entry < req.sl):
+            await _audit(req.cycle_id, "order_rejected", {"reason": "invalid_geometry_sell", "symbol": req.symbol})
             return _reject("invalid_geometry_sell")
         if req.tp != 0 and req.tp >= req.entry:
+            await _audit(req.cycle_id, "order_rejected", {"reason": "invalid_geometry_sell", "symbol": req.symbol})
             return _reject("invalid_geometry_sell")
     else:
+        await _audit(req.cycle_id, "order_rejected", {"reason": f"unknown_order_type:{req.type}", "symbol": req.symbol})
         return _reject(f"unknown_order_type:{req.type}")
 
     # 4. SL en pips
     sl_pips = _pips(req.symbol, req.entry, req.sl)
     min_pips, max_pips = SL_LIMITS.get(req.symbol, _SL_DEFAULT)
     if sl_pips < min_pips:
+        await _audit(req.cycle_id, "order_rejected", {"reason": f"sl_too_tight:{round(sl_pips,1)}pips", "symbol": req.symbol, "sl_pips": round(sl_pips,1)})
         return _reject(f"sl_too_tight:{round(sl_pips,1)}pips")
     if sl_pips > max_pips:
+        await _audit(req.cycle_id, "order_rejected", {"reason": f"sl_too_wide:{round(sl_pips,1)}pips", "symbol": req.symbol, "sl_pips": round(sl_pips,1)})
         return _reject(f"sl_too_wide:{round(sl_pips,1)}pips")
 
     # 5. Volumen
     if not (settings.min_volume <= req.volume <= settings.max_volume):
+        await _audit(req.cycle_id, "order_rejected", {"reason": f"volume_out_of_range:{req.volume}", "symbol": req.symbol, "volume": req.volume})
         return _reject(f"volume_out_of_range:{req.volume}")
 
     # 6. Duplicado: mismo símbolo + entry ± 1 pip (solo órdenes recientes)
@@ -132,6 +154,7 @@ async def prepare(req: OrderPrepareRequest) -> OrderPrepareResponse:
         req.symbol, req.entry, tolerance,
     )
     if dup:
+        await _audit(req.cycle_id, "order_rejected", {"reason": f"duplicate_order:{req.symbol}@{req.entry}", "symbol": req.symbol})
         return _reject(f"duplicate_order:{req.symbol}@{req.entry}")
 
     # 7. Registrar en DB como pending
@@ -141,6 +164,11 @@ async def prepare(req: OrderPrepareRequest) -> OrderPrepareResponse:
         req.cycle_id, req.symbol, req.type,
         req.entry, req.sl, req.tp, req.volume
     )
+
+    await _audit(req.cycle_id, "order_approved", {
+        "symbol": req.symbol, "type": req.type, "entry": req.entry,
+        "sl": req.sl, "tp": req.tp, "volume": req.volume, "order_db_id": order_id,
+    })
 
     # 8. Firmar payload
     to_sign = {

@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     min_volume: float = 0.01
     max_volume: float = 0.50
     order_max_age_hours: int = 48
-    simple_pipeline_enabled: bool = False
+    simple_pipeline_enabled: bool = True
     paper_mode: bool = False              # Si true, simula órdenes sin ejecutarlas
     signal_cooldown_minutes: int = 60     # H1: 1 vela = 60 min
     sl_risk_usd: float = 15.0

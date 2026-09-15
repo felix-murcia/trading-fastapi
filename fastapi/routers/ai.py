@@ -30,6 +30,7 @@ from services.auto_retrain import (
     record_trade_filled,
 )
 from services.performance_metrics import record_cycle_metrics
+from services.structured_logging import log_to_audit
 from .deps import verify_token
 
 
@@ -56,11 +57,27 @@ MODEL_V3_PATH = os.path.join(MODEL_DIR, "ppo_trading_bot_v3.zip")
 VEC_NORM_PATH = os.path.join(MODEL_DIR, "ppo_trading_bot_v3_vec_norm.pkl")
 QWEN_URL = getattr(settings, "qwen_url", "http://100.90.16.33:8080/v1/chat/completions")
 
-QUALITY_THRESHOLD = 4.0
+QUALITY_THRESHOLD = 6.0
+RANGING_VETO = True
 SL_MIN_NORM = 0.05
 SL_MAX_NORM = 0.30
 TP_MIN_NORM = 0.05
 TP_MAX_NORM = 0.50
+
+
+def _veto_reason(original: str, final: str, qwen: dict) -> str | None:
+    if original == final:
+        return None
+    if final == "HOLD" and qwen.get("regime") == "RANGING":
+        return "ranging_veto"
+    if final == "HOLD" and qwen.get("quality", 10) < QUALITY_THRESHOLD:
+        return "quality_veto"
+    if original == "BUY" and final == "HOLD" and qwen.get("bias") == "BEARISH":
+        return "bias_veto_bearish"
+    if original == "SELL" and final == "HOLD" and qwen.get("bias") == "BULLISH":
+        return "bias_veto_bullish"
+    return "unknown_veto"
+
 
 # Estado en memoria para inferencia rápida
 _CACHED_MODEL: Optional[PPO] = None
@@ -93,294 +110,6 @@ def load_inference_artifacts():
 @router.on_event("startup")
 async def on_startup():
     load_inference_artifacts()
-
-
-def _build_qwen_candle_context(df: pd.DataFrame, count: int = 10) -> str:
-    """Compact candle sequence for Qwen: trend information without raw OHLC noise."""
-    recent = df.tail(count).copy()
-    if recent.empty:
-        return "Unavailable"
-
-    close = recent["close"].astype(float)
-    previous_close = close.shift(1).fillna(close.iloc[0])
-    returns = (close / previous_close - 1.0) * 100.0
-    ranges = (recent["high"].astype(float) - recent["low"].astype(float)) / close * 100.0
-    bodies = (close - recent["open"].astype(float)).abs() / close * 100.0
-    median_volume = recent["tick_volume"].astype(float).median() if "tick_volume" in recent else 0.0
-
-    rows = []
-    for index, (_, candle) in enumerate(recent.iterrows()):
-        direction = "U" if close.iloc[index] >= float(candle["open"]) else "D"
-        volume_ratio = (
-            float(candle.get("tick_volume", 0.0)) / median_volume
-            if median_volume > 0 else 0.0
-        )
-        rows.append(
-            f"{index + 1}:r={returns.iloc[index]:+.2f}% "
-            f"rng={ranges.iloc[index]:.2f}% body={bodies.iloc[index]:.2f}% "
-            f"d={direction} v={volume_ratio:.1f}x"
-        )
-
-    total_return = (close.iloc[-1] / close.iloc[0] - 1.0) * 100.0
-    up_count = int((returns > 0).sum())
-    down_count = int((returns < 0).sum())
-    return (
-        f"last {len(recent)} H1 candles (oldest→newest), "
-        f"return={total_return:+.2f}%, up/down={up_count}/{down_count}\n"
-        + " | ".join(rows)
-    )
-
-
-async def _query_qwen_unified(
-    symbol: str,
-    decision: str,
-    ml_prob: float,
-    rsi: float,
-    atr: float,
-    atr_pct: float,
-    macd_hist: float,
-    bb_pos: float,
-    range_pct: float,
-    last_ret: float,
-    hour: int,
-    news: str,
-    candle_context: str,
-    sl_proposed: float,
-    tp_proposed: float,
-    cycle_id: str,
-) -> dict:
-    """
-    Opciones 1+2+3 unificadas — una sola llamada a Qwen por candle.
-
-    Retorna:
-      - quality_score: 0-10
-      - quality_reason: str
-      - llm_bias: BULLISH/BEARISH/NEUTRAL
-      - confidence_modifier: 0.5-1.5 (Opción 3)
-      - sl_adjusted / tp_adjusted: norm values (Opción 2)
-      - regime: TRENDING/RANGING/VOLATILE/BREAKOUT (Opción 4 anticipado)
-    """
-    # Clasificar sesión
-    if 7 <= hour < 12:
-        session = "London"
-    elif 12 <= hour < 17:
-        session = "NY"
-    elif 17 <= hour < 23:
-        session = "Asia"
-    else:
-        session = "Weekend/Closed"
-
-    # Clasificar régimen
-    if abs(bb_pos) > 0.8:
-        regime = "TRENDING"
-    elif atr_pct > 0.015:
-        regime = "VOLATILE"
-    elif abs(macd_hist) < 0.0002:
-        regime = "RANGING"
-    else:
-        regime = "BREAKOUT"
-
-    sl_pips = sl_proposed * 100.0
-    tp_pips = tp_proposed * 200.0
-    news_context = " ".join(str(news).split())[:600] or "Unavailable"
-
-    prompt = f"""Analyze this {symbol} H1 setup. Use the candle sequence as context.
-
-Context:
-- RSI(14): {rsi:.1f}
-- ATR: {atr:.5f} ({atr_pct:.2%} of price)
-- MACD histogram: {macd_hist:.6f}
-- Bollinger position: {bb_pos:.2f}
-- Range: {range_pct:.2%} of price
-- Last return: {last_ret:.3%}
-- Session: {session}
-- Regime: {regime}
-- Candles: {candle_context}
-
-News:
-{news_context}
-
-ML Signal: {decision} with ML confidence {ml_prob:.3f}
-
-Return EXACTLY JSON, no extra text:
-{{"quality": 7.5, "reason": "brief reason", "bias": "NEUTRAL", "confidence_modifier": 1.0,
-  "sl_ok": true, "tp_ok": true, "sl_adjusted": {sl_proposed:.4f}, "tp_adjusted": {tp_proposed:.4f},
-  "regime": "{regime}"}}
-
-Fields: quality 0-10; reason max 12 words; bias BULLISH/BEARISH/NEUTRAL;
-confidence_modifier 0.5-1.5; sl_ok/tp_ok booleans; adjusted SL 0.15-0.30,
-TP 0.125-0.30 with TP:SL >=1.5; regime TRENDING/RANGING/VOLATILE/BREAKOUT."""
-
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        res = await client.post(QWEN_URL, json={
-            "messages": [
-                {"role": "system", "content": "You are a quantitative trading analyst. Always respond in valid JSON."},
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": 0.2,
-            "max_tokens": 160,
-            "response_format": {"type": "json_object"},
-        })
-
-    if res.status_code == 200:
-        content = res.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-        if "{" in content:
-            json_str = content[content.index("{"):]
-            parsed, _ = json.JSONDecoder().raw_decode(json_str)
-            q = float(parsed.get("quality", 5.0))
-            reason = str(parsed.get("reason", ""))[:120]
-            bias_raw = str(parsed.get("bias", "NEUTRAL")).upper()
-            bias = "NEUTRAL"
-            if "BULL" in bias_raw: bias = "BULLISH"
-            elif "BEAR" in bias_raw: bias = "BEARISH"
-
-            conf_mod = float(parsed.get("confidence_modifier", 1.0))
-            conf_mod = max(0.5, min(1.5, conf_mod))
-
-            sl_adj = float(parsed.get("sl_adjusted", sl_proposed))
-            tp_adj = float(parsed.get("tp_adjusted", tp_proposed))
-            sl_adj = max(SL_MIN_NORM, min(SL_MAX_NORM, sl_adj))
-            tp_adj = max(TP_MIN_NORM, min(TP_MAX_NORM, tp_adj))
-
-            tp_adj = sl_adj
-
-            effective_prob = float(np.exp(np.log(max(ml_prob, 1e-6)) + np.log(conf_mod)))
-            effective_prob = max(0.0, min(1.0, effective_prob))
-
-            logger.info(
-                "[%s] QWEN-UNIFIED ║ q=%.1f bias=%s conf_mod=%.2f eff_prob=%.4f | "
-                "sl=%.3f→%.3f tp=%.3f→%.3f regime=%s | %s",
-                cycle_id, q, bias, conf_mod, effective_prob,
-                sl_proposed, sl_adj, tp_proposed, tp_adj,
-                parsed.get("regime", regime), reason[:60]
-            )
-            return {
-                "quality": q,
-                "reason": reason,
-                "bias": bias,
-                "confidence_modifier": conf_mod,
-                "effective_prob": effective_prob,
-                "sl_adjusted": sl_adj,
-                "tp_adjusted": tp_adj,
-                "regime": parsed.get("regime", regime),
-            }
-        raise RuntimeError(f"[{cycle_id}] QWEN-UNIFIED respuesta sin JSON: {content[:80]}")
-    res.raise_for_status()
-    raise RuntimeError(f"[{cycle_id}] QWEN-UNIFIED HTTP {res.status_code}: {res.text[:120]}")
-
-
-# ── Opción 2: SL/TP Validator ─────────────────────────────────────────────────
-SL_MIN_NORM = 0.15   # 15 pips minimum
-SL_MAX_NORM = 0.30   # 30 pips maximum
-TP_MIN_NORM = 0.125  # 25 pips minimum (SL*0.5 para ratio 2:1 mínimo)
-TP_MAX_NORM = 0.30   # 60 pips maximum
-
-
-async def _query_qwen_sltp_validator(
-    symbol: str,
-    decision: str,
-    atr: float,
-    atr_pct: float,
-    rsi: float,
-    bb_pos: float,
-    macd_hist: float,
-    range_pct: float,
-    hour: int,
-    sl_proposed: float,
-    tp_proposed: float,
-    cycle_id: str,
-) -> tuple[float, float, str]:
-    """
-    Opción 2 — SL/TP Validator:
-    Qwen analiza si el SL y TP propuestos son razonables para el régimen
-    de mercado actual (volatilidad, sesión, momentum).
-
-    Retorna: (sl_norm_final, tp_norm_final, reason)
-    """
-    if abs(bb_pos) > 0.8:
-        regime = "TRENDING"
-    elif atr_pct > 0.015:
-        regime = "VOLATILE"
-    elif abs(macd_hist) < 0.0002:
-        regime = "RANGING"
-    else:
-        regime = "BREAKOUT"
-
-    if 7 <= hour < 12:
-        session = "London"
-    elif 12 <= hour < 17:
-        session = "NY"
-    else:
-        session = "Asia"
-
-    sl_pips = sl_proposed * 100.0
-    tp_pips = tp_proposed * 200.0
-
-    prompt = f"""Validate the proposed stop-loss and take-profit for {symbol} {decision}.
-
-Current Market Regime:
-- ATR: {atr:.5f} ({atr_pct:.2%} of price → regime is {'HIGH VOLATILITY' if atr_pct > 0.015 else 'NORMAL'})
-- RSI: {rsi:.1f}
-- MACD histogram: {macd_hist:.6f} ({'bullish' if macd_hist > 0 else 'bearish'})
-- Bollinger position: {bb_pos:.2f} ({regime})
-- Range size: {range_pct:.2%} of price
-- Session: {session}
-
-Proposed Trade:
-- Direction: {decision}
-- Stop-Loss: {sl_pips:.1f} pips (norm={sl_proposed:.4f})
-- Take-Profit: {tp_pips:.1f} pips (norm={tp_proposed:.4f})
-- Current ATR: {atr:.5f} pips
-
-Is the SL reasonable for this regime? Is the TP at least 1.5x the SL distance?
-Reply EXACTLY JSON (no extra text):
-{{"sl_ok": true/false, "tp_ok": true/false, "sl_adjusted": 0.20, "tp_adjusted": 0.28, "reason": "brief"}}
-If both are OK, return the same values. If adjustment needed, propose sensible ones."""
-
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        res = await client.post(QWEN_URL, json={
-            "messages": [
-                {"role": "system", "content": "You are a quantitative risk analyst. Always respond in valid JSON."},
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": 0.15,
-            "max_tokens": 150,
-            "response_format": {"type": "json_object"},
-        })
-
-    if res.status_code == 200:
-        content = res.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-        if "{" in content:
-            json_str = content[content.index("{"):]
-            parsed, _ = json.JSONDecoder().raw_decode(json_str)
-            sl_ok = bool(parsed.get("sl_ok", True))
-            tp_ok = bool(parsed.get("tp_ok", True))
-            sl_adj = float(parsed.get("sl_adjusted", sl_proposed))
-            tp_adj = float(parsed.get("tp_adjusted", tp_proposed))
-
-            sl_adj = max(SL_MIN_NORM, min(SL_MAX_NORM, sl_adj))
-            tp_adj = max(TP_MIN_NORM, min(TP_MAX_NORM, tp_adj))
-            tp_adj = sl_adj
-
-            if not sl_ok or not tp_ok:
-                logger.warning(
-                    "[%s] SLTP-REJECTED ║ sl_ok=%s tp_ok=%s → adjusted sl=%.4f tp=%.4f | reason=%s",
-                    cycle_id, sl_ok, tp_ok, sl_adj, tp_adj,
-                    parsed.get("reason", "")[:80]
-                )
-            return sl_adj, tp_adj, parsed.get("reason", "")[:100]
-        raise RuntimeError(f"[{cycle_id}] SLTP-VALIDATOR respuesta sin JSON: {content[:80]}")
-    res.raise_for_status()
-    raise RuntimeError(f"[{cycle_id}] SLTP-VALIDATOR HTTP {res.status_code}: {res.text[:120]}")
-
-
-async def _get_equity_estimate() -> float:
-    """Equity aproximado desde MT5 para logging."""
-    async with httpx.AsyncClient() as client:
-        r = await client.get(f"{settings.mt5_http_url}/api/v1/account/info", timeout=2.0)
-        if r.status_code == 200:
-            return float(r.json().get("equity", 0.0))
-    return 0.0
 
 
 def _build_qwen_candle_context(df: pd.DataFrame, count: int = 10) -> str:
@@ -835,7 +564,10 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     )
 
     final_decision = decision
-    if qwen["quality"] < QUALITY_THRESHOLD and final_decision in ("BUY", "SELL"):
+    if RANGING_VETO and qwen.get("regime") == "RANGING" and final_decision in ("BUY", "SELL"):
+        logger.warning("[%s] VETO RANGING ║ Régimen lateral detectado → HOLD", cycle_id)
+        final_decision = "HOLD"
+    elif qwen["quality"] < QUALITY_THRESHOLD and final_decision in ("BUY", "SELL"):
         logger.warning("[%s] VETO CALIDAD ║ Score %.1f < %.1f → HOLD", cycle_id, qwen["quality"], QUALITY_THRESHOLD)
         final_decision = "HOLD"
     elif final_decision == "BUY" and qwen["bias"] == "BEARISH":
@@ -853,6 +585,29 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         latency_ms=(time.time() - t_start) * 1000,
         mt5_available=True,
         order_placed=final_decision in ("BUY", "SELL"),
+    )
+
+    await log_to_audit(
+        "ai_predict_cycle",
+        {
+            "symbol": req.symbol,
+            "timeframe": req.timeframe,
+            "position": req.position,
+            "decision": final_decision,
+            "ml_prob": round(ml_prob, 4),
+            "effective_prob": round(qwen["effective_prob"], 4),
+            "llm_bias": qwen["bias"],
+            "quality_score": round(qwen["quality"], 2),
+            "quality_reason": qwen["reason"],
+            "confidence_modifier": round(qwen["confidence_modifier"], 2),
+            "regime": qwen["regime"],
+            "volume": final_lots if final_decision in ("BUY", "SELL") else None,
+            "sl_pips": round(sl_pips_final, 1) if final_decision in ("BUY", "SELL") else None,
+            "tp_pips": round(tp_pips_final, 1) if final_decision in ("BUY", "SELL") else None,
+            "latency_ms": round((time.time() - t_start) * 1000, 2),
+            "veto": decision != final_decision,
+            "veto_reason": _veto_reason(decision, final_decision, qwen),
+        },
     )
 
     return PredictResponse(
@@ -879,6 +634,16 @@ async def force_retrain_endpoint(_: None = Depends(verify_token)):
     """
     state = _get_retrain_state()
     result = await _force_retrain()
+    await log_to_audit(
+        "retrain_forced",
+        {
+            "status": result.get("status"),
+            "filled_count": state.filled_count,
+            "in_progress": state.retrain_in_progress,
+            "last_retrain_time": state.last_retrain_time,
+            "outcomes_count": len(state.outcomes),
+        },
+    )
     return {"status": result["status"], "filled_count": state.filled_count, "in_progress": state.retrain_in_progress}
 
 
