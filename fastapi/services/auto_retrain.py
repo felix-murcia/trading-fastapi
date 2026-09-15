@@ -32,7 +32,7 @@ class RetrainConfig:
     trades_before_retrain: int = 10       # ← 50 era demasiado: 10 permite aprender rápido
     min_trades_for_retrain: int = 5      # ← mínimo razonable tras primer trade
     lookback_candles: int = 500           # Velas históricas a usar para retrain
-    retrain_window_size: int = 10         # Window size del entorno
+    retrain_window_size: int = 20         # Window size del entorno
     initial_balance: float = 1000.0
     commission: float = 0.0001            # 0.01% por trade (MT5 typical)
     n_epochs: int = 3                    # Epochs de entrenamiento (compatibilidad/auditoría)
@@ -207,8 +207,12 @@ async def record_trade_filled(
 
     # Trigger retrain si corresponde
     if _state.filled_count >= RetrainConfig.min_trades_for_retrain:
-        if _state.filled_count % RetrainConfig.trades_before_retrain == 0:
-            asyncio.create_task(_trigger_retrain())
+        logger.warning(
+            "[RETRAIN] Trigger automático: filled_count=%d >= min_trades=%d — disparando _trigger_retrain()",
+            _state.filled_count,
+            RetrainConfig.min_trades_for_retrain,
+        )
+        asyncio.create_task(_trigger_retrain())
 
 
 async def _trigger_retrain() -> None:
@@ -220,6 +224,7 @@ async def _trigger_retrain() -> None:
         logger.warning("[RETRAIN] Retrain ya en progreso — skip")
         return
 
+    logger.warning("[RETRAIN] ===== RETRAIN AUTOMÁTICO INICIADO =====")
     async with RETRAIN_LOCK:
         _state.retrain_in_progress = True
         try:
@@ -307,7 +312,17 @@ async def _do_retrain() -> None:
         df=train_df,
         window_size=cfg.retrain_window_size,
         initial_balance=cfg.initial_balance,
-        commission=cfg.commission,
+        lot_size=100000.0,
+        max_lot=0.5,
+        max_sl_pips=100.0,
+        max_tp_pips=200.0,
+        pip_size=0.0001,
+        spread_pips=1.5,
+        commission_per_lot=cfg.commission,
+        max_episode_steps=1000,
+        max_holding_steps=120,
+        reward_scale=100.0,
+        random_reset=True,
         real_outcomes=real_outcomes,
         real_outcome_weight=cfg.real_outcome_weight,
     )
@@ -376,7 +391,12 @@ async def _do_retrain() -> None:
 
         # 6. Backup a GCS
         backup_url = await upload_model(MODEL_PATH)
-        logger.warning("[RETRAIN] ===== RETRAIN COMPLETADO ===== model=%s backup=%s", MODEL_PATH, backup_url)
+        logger.warning(
+            "[RETRAIN] ===== RETRAIN COMPLETADO ===== model=%s backup=%s candidates=%s",
+            MODEL_PATH,
+            backup_url,
+            candidate_metrics,
+        )
 
     await _save_retrain_metrics(df, cfg)
 
