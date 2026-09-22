@@ -413,9 +413,11 @@ class PredictRequest(BaseModel):
     sl_price: float = 0.0
     tp_price: float = 0.0
     steps_in_trade: int = 0
+    mt5_time: float | None = None  # epoch desde MT5; si falta, se usa time.time() como fallback
 
 
 class PredictResponse(BaseModel):
+    cycle_id: str
     ml_prob: float
     llm_bias: str
     decision: str
@@ -433,27 +435,34 @@ class PredictResponse(BaseModel):
 @router.post("/predict", response_model=PredictResponse)
 async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)):
     t_start = time.time()
-    cycle_id = f"{req.symbol}_{int(t_start * 1000)}"
+    mt5_ts = req.mt5_time if req.mt5_time is not None else t_start
+    cycle_id = f"{req.symbol}_{int(mt5_ts * 1000)}"
 
     env_position = 1 if req.position == 1 else (-1 if req.position == 2 else 0)
 
-    async with httpx.AsyncClient() as client:
-        equity_task = client.get(
-            f"{settings.mt5_http_url}/api/v1/account/info",
-            timeout=2.0,
-        )
-        candles_task = client.get(
-            f"{settings.mt5_http_url}/api/v1/market/candles/latest?symbol_name={req.symbol}&timeframe={req.timeframe}&count=120",
-            timeout=3.0,
-        )
-        equity_res, candles_res = await asyncio.gather(equity_task, candles_task)
-
     equity_val = 0.0
+    candles = []
+    try:
+        async with httpx.AsyncClient() as client:
+            equity_task = client.get(
+                f"{settings.mt5_http_url}/api/v1/account/info",
+                timeout=2.0,
+            )
+            candles_task = client.get(
+                f"{settings.mt5_http_url}/api/v1/market/candles/latest?symbol_name={req.symbol}&timeframe={req.timeframe}&count=120",
+                timeout=3.0,
+            )
+            equity_res, candles_res = await asyncio.gather(equity_task, candles_task)
+    except (httpx.ConnectTimeout, httpx.TimeoutException, httpx.HTTPError) as exc:
+        logger.warning("[%s] MT5 connection error in predict: %s", cycle_id, exc)
+        return PredictResponse(ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
+
     if equity_res.status_code == 200:
         equity_val = equity_res.json().get("equity", 0.0)
 
     if candles_res.status_code != 200:
-        raise HTTPException(status_code=502, detail="Error de conexión con servicio MT5")
+        logger.warning("[%s] candles HTTP %s from MT5", cycle_id, candles_res.status_code)
+        return PredictResponse(ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
     data = candles_res.json()
     candles = data if isinstance(data, list) else data.get("candles", [])
 
@@ -607,10 +616,12 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             "latency_ms": round((time.time() - t_start) * 1000, 2),
             "veto": decision != final_decision,
             "veto_reason": _veto_reason(decision, final_decision, qwen),
+            "mt5_time": mt5_ts,
         },
     )
 
     return PredictResponse(
+        cycle_id=cycle_id,
         ml_prob=round(ml_prob, 4),
         llm_bias=qwen["bias"],
         decision=final_decision,
@@ -737,17 +748,54 @@ async def pipeline_health() -> HealthCheckResponse:
 
 class TradeFilledRequest(BaseModel):
     symbol: str
-    entry_time: float | str  # Unix timestamp (float) or ISO string
-    exit_time: float | str   # Unix timestamp (float) or ISO string
-    pnl: float
-    pnl_pct: float
-    direction: str   # "LONG" or "SHORT"
+    entry_time: float | str  # Unix timestamp (float) or numeric string
+    exit_time: float | str   # Unix timestamp (float) or numeric string
+    pnl: float | str
+    pnl_pct: float | str
+    direction: str   # "LONG", "SHORT", "BUY", "SELL"
     sl_hit: bool
     tp_hit: bool
-    exit_reason: str  # "sl", "tp", "manual", "news"
-    # Fase 1 — observable contract: identificadores del deal en MT5
-    deal_ticket: int | None = None
-    position_id: int | None = None
+    exit_reason: str  # "sl", "tp", "manual", "news", "signal_end"
+    deal_ticket: int | str | None = None
+    position_id: int | str | None = None
+
+
+class EADecisionRequest(BaseModel):
+    cycle_id: str
+    symbol: str
+    received_decision: str
+    action: str
+    order_ticket: str | None = None
+    volume: float | None = None
+    sl: float | None = None
+    tp: float | None = None
+    reason: str | None = None
+    latency_ms: float | None = None
+    raw_response: str | None = None
+    mt5_time: float | None = None  # epoch desde MT5; si falta, se usa time.time() como fallback
+
+
+@router.post("/ea/decision")
+async def ea_decision_webhook(req: EADecisionRequest, _: None = Depends(verify_token)):
+    mt5_ts = req.mt5_time if req.mt5_time is not None else time.time()
+    await log_to_audit(
+        "ea_decision",
+        {
+            "symbol": req.symbol,
+            "received_decision": req.received_decision,
+            "action": req.action,
+            "order_ticket": req.order_ticket,
+            "volume": req.volume,
+            "sl": req.sl,
+            "tp": req.tp,
+            "reason": req.reason,
+            "latency_ms": req.latency_ms,
+            "raw_response": req.raw_response,
+            "mt5_time": mt5_ts,
+        },
+        cycle_id=req.cycle_id,
+    )
+    return {"status": "recorded"}
 
 
 @router.post("/trade/filled")
@@ -760,21 +808,31 @@ async def trade_filled_webhook(req: TradeFilledRequest, _: None = Depends(verify
     entry_ts = _parse_timestamp(req.entry_time)
     exit_ts = _parse_timestamp(req.exit_time)
     minimum_timestamp = 946684800.0  # 2000-01-01 UTC
+    if entry_ts == 0:
+        entry_ts = exit_ts - 1
+    if exit_ts == 0:
+        exit_ts = entry_ts + 1
+    if entry_ts == exit_ts:
+        exit_ts = entry_ts + 1
     if entry_ts < minimum_timestamp or exit_ts < minimum_timestamp:
         raise HTTPException(status_code=422, detail="entry_time/exit_time must be >= 2000-01-01 UTC")
     if exit_ts <= entry_ts:
         raise HTTPException(status_code=422, detail="exit_time must be greater than entry_time")
+    entry_time_out = str(int(entry_ts))
+    exit_time_out = str(int(exit_ts))
 
     logger.info("[TRADE-FILLED] payload symbol=%s entry=%s exit=%s pnl=%.2f pct=%.4f dir=%s reason=%s",
-                req.symbol, req.entry_time, req.exit_time, req.pnl, req.pnl_pct, req.direction, req.exit_reason)
-    # Normalize direction to uppercase to match DB constraint (LONG/SHORT)
-    direction = req.direction.upper() if req.direction else req.direction
+                req.symbol, entry_time_out, exit_time_out, req.pnl, req.pnl_pct, req.direction, req.exit_reason)
+    direction_map = {"BUY": "LONG", "SELL": "SHORT", "LONG": "LONG", "SHORT": "SHORT"}
+    direction = direction_map.get(req.direction.upper()) if req.direction else req.direction
+    pnl = float(req.pnl) if isinstance(req.pnl, str) else req.pnl
+    pnl_pct = float(req.pnl_pct) if isinstance(req.pnl_pct, str) else req.pnl_pct
     await record_trade_filled(
         symbol=req.symbol,
-        entry_time=req.entry_time,
-        exit_time=req.exit_time,
-        pnl=req.pnl,
-        pnl_pct=req.pnl_pct,
+        entry_time=entry_time_out,
+        exit_time=exit_time_out,
+        pnl=pnl,
+        pnl_pct=pnl_pct,
         direction=direction,
         sl_hit=req.sl_hit,
         tp_hit=req.tp_hit,

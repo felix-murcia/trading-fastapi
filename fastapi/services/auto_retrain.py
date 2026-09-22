@@ -65,8 +65,55 @@ class RetrainState:
     retrain_in_progress: bool = False
 
 
-# Estado global en memoria (se pierde en restart — aceptable para auto-retrain)
+def _retrain_state_row_key(key: str) -> str:
+    return f"retrain_state.{key}"
+
+
+async def _load_retrain_state() -> RetrainState:
+    from db.connection import get_pool
+
+    pool = get_pool()
+    rows = await pool.fetch("SELECT key, value FROM retrain_state WHERE key = ANY($1::text[])", ["retrain_state.filled_count", "retrain_state.last_retrain_time"])
+    payload = {row["key"]: row["value"] for row in rows}
+    state = RetrainState(
+        filled_count=int(payload.get(_retrain_state_row_key("filled_count"), 0)),
+        last_retrain_time=float(payload.get(_retrain_state_row_key("last_retrain_time"), 0.0)),
+        outcomes=[],
+        retrain_in_progress=False,
+    )
+    if state.filled_count == 0:
+        state.outcomes = await _load_persisted_outcomes()
+        state.filled_count = len(state.outcomes)
+    return state
+
+
+async def _save_retrain_state(state: RetrainState) -> None:
+    from db.connection import get_pool
+
+    pool = get_pool()
+    rows = [
+        (_retrain_state_row_key("filled_count"), str(state.filled_count)),
+        (_retrain_state_row_key("last_retrain_time"), str(state.last_retrain_time)),
+    ]
+    for key, value in rows:
+        await pool.execute(
+            "INSERT INTO retrain_state(key, value) VALUES($1, $2::jsonb) ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = now()",
+            key, value,
+        )
+
+
 _state = RetrainState()
+_initialized = False
+_initialization_lock = asyncio.Lock()
+
+
+async def _ensure_retrain_state() -> RetrainState:
+    global _state, _initialized
+    async with _initialization_lock:
+        if not _initialized:
+            _state = await _load_retrain_state()
+            _initialized = True
+    return _state
 
 
 def get_state() -> RetrainState:
@@ -191,25 +238,27 @@ async def record_trade_filled(
         tp_hit=tp_hit,
         exit_reason=exit_reason,
     )
-    _state.outcomes.append(outcome)
-    _state.filled_count += 1
+    state = await _ensure_retrain_state()
+    state.outcomes.append(outcome)
+    state.filled_count += 1
+    await _save_retrain_state(state)
 
     logger.info(
         "[RETRAIN] Trade #%d cerrado: %s %s pnl=%.2f (%s) — %d/%d trades para retrain",
-        _state.filled_count,
+        state.filled_count,
         symbol,
         direction,
         pnl,
         exit_reason,
-        _state.filled_count % RetrainConfig.trades_before_retrain,
+        state.filled_count % RetrainConfig.trades_before_retrain,
         RetrainConfig.trades_before_retrain,
     )
 
     # Trigger retrain si corresponde
-    if _state.filled_count >= RetrainConfig.min_trades_for_retrain:
+    if state.filled_count >= RetrainConfig.min_trades_for_retrain:
         logger.warning(
             "[RETRAIN] Trigger automático: filled_count=%d >= min_trades=%d — disparando _trigger_retrain()",
-            _state.filled_count,
+            state.filled_count,
             RetrainConfig.min_trades_for_retrain,
         )
         asyncio.create_task(_trigger_retrain())
@@ -220,17 +269,16 @@ async def _trigger_retrain() -> None:
     Dispara el retrain en background.
     Solo una instancia a la vez (Lock).
     """
-    if _state.retrain_in_progress:
-        logger.warning("[RETRAIN] Retrain ya en progreso — skip")
-        return
-
     logger.warning("[RETRAIN] ===== RETRAIN AUTOMÁTICO INICIADO =====")
     async with RETRAIN_LOCK:
-        _state.retrain_in_progress = True
+        state = await _ensure_retrain_state()
+        state.retrain_in_progress = True
+        await _save_retrain_state(state)
         try:
             await _do_retrain()
         finally:
-            _state.retrain_in_progress = False
+            state.retrain_in_progress = False
+            await _save_retrain_state(state)
 
 
 def _evaluate_model(model, df: pd.DataFrame, env_cfg: dict) -> dict:
@@ -344,59 +392,60 @@ async def _do_retrain() -> None:
             verbose=cfg.verbose,
         )
 
-        # 4. Fine-tune con datos recientes
-        if "env" not in dir() or env is None:
-            env = DummyVecEnv([lambda: ForexTradingEnvV2(**env_cfg)])
-        model.set_env(env)
+    if "env" not in dir() or env is None:
+        env = DummyVecEnv([lambda: ForexTradingEnvV2(**env_cfg)])
+    model.set_env(env)
 
-        logger.info("[RETRAIN] Entrenando %d timesteps...", cfg.total_timesteps)
-        model.learn(
-            total_timesteps=cfg.total_timesteps,
-            progress_bar=False,
-        )
+    logger.info("[RETRAIN] Entrenando %d timesteps...", cfg.total_timesteps)
+    model.learn(
+        total_timesteps=cfg.total_timesteps,
+        progress_bar=False,
+    )
 
-        # 5. Evaluar el candidato y el modelo activo antes de reemplazarlo.
-        candidate_metrics = _evaluate_model(model, eval_df, env_cfg)
-        baseline_metrics = None
-        if os.path.exists(MODEL_PATH):
-            from stable_baselines3 import PPO
-            baseline_metrics = _evaluate_model(PPO.load(MODEL_PATH), eval_df, env_cfg)
+    candidate_metrics = _evaluate_model(model, eval_df, env_cfg)
+    baseline_metrics = None
+    if os.path.exists(MODEL_PATH):
+        from stable_baselines3 import PPO
+        baseline_metrics = _evaluate_model(PPO.load(MODEL_PATH), eval_df, env_cfg)
 
+    logger.warning(
+        "[RETRAIN-EVAL] candidate openings=%d win_rate=%.3f reward=%.3f trades=%d | baseline=%s",
+        candidate_metrics["openings"], candidate_metrics["win_rate"],
+        candidate_metrics["reward"], candidate_metrics["closed_trades"],
+        baseline_metrics,
+    )
+
+    candidate_is_valid = (
+        candidate_metrics["openings"] >= cfg.min_validation_openings
+        and np.isfinite(candidate_metrics["reward"])
+    )
+    improves_baseline = (
+        baseline_metrics is None
+        or candidate_metrics["reward"] >= baseline_metrics["reward"]
+    )
+    if not candidate_is_valid or not improves_baseline:
         logger.warning(
-            "[RETRAIN-EVAL] candidate openings=%d win_rate=%.3f reward=%.3f trades=%d | baseline=%s",
-            candidate_metrics["openings"], candidate_metrics["win_rate"],
-            candidate_metrics["reward"], candidate_metrics["closed_trades"],
-            baseline_metrics,
+            "[RETRAIN] Candidato rechazado: valid=%s improves_baseline=%s; modelo activo conservado",
+            candidate_is_valid, improves_baseline,
         )
+        await _save_retrain_metrics(df, cfg)
+        return
 
-        candidate_is_valid = (
-            candidate_metrics["openings"] >= cfg.min_validation_openings
-            and np.isfinite(candidate_metrics["reward"])
-        )
-        improves_baseline = (
-            baseline_metrics is None
-            or candidate_metrics["reward"] >= baseline_metrics["reward"]
-        )
-        if not candidate_is_valid or not improves_baseline:
-            logger.warning(
-                "[RETRAIN] Candidato rechazado: valid=%s improves_baseline=%s; modelo activo conservado",
-                candidate_is_valid, improves_baseline,
-            )
-            return
+    candidate_path = MODEL_PATH.removesuffix(".zip") + ".candidate.zip"
+    model.save(candidate_path)
+    os.replace(candidate_path, MODEL_PATH)
+    state = await _ensure_retrain_state()
+    state.last_retrain_time = time.time()
+    await _save_retrain_state(state)
 
-        candidate_path = MODEL_PATH.removesuffix(".zip") + ".candidate.zip"
-        model.save(candidate_path)
-        os.replace(candidate_path, MODEL_PATH)
-        _state.last_retrain_time = time.time()
-
-        # 6. Backup a GCS
-        backup_url = await upload_model(MODEL_PATH)
-        logger.warning(
-            "[RETRAIN] ===== RETRAIN COMPLETADO ===== model=%s backup=%s candidates=%s",
-            MODEL_PATH,
-            backup_url,
-            candidate_metrics,
-        )
+    # 6. Backup a GCS
+    backup_url = await upload_model(MODEL_PATH)
+    logger.warning(
+        "[RETRAIN] ===== RETRAIN COMPLETADO ===== model=%s backup=%s candidates=%s",
+        MODEL_PATH,
+        backup_url,
+        candidate_metrics,
+    )
 
     await _save_retrain_metrics(df, cfg)
 
@@ -427,28 +476,29 @@ async def _save_retrain_metrics(df: pd.DataFrame, cfg: RetrainConfig) -> None:
     from db.connection import get_pool
 
     pool = get_pool()
+    state = await _ensure_retrain_state()
     metrics = {
         "event": "retrain_completed",
         "lookback_candles": len(df),
-        "trades_since_last_retrain": _state.filled_count,
-        "last_retrain_time": _state.last_retrain_time,
+        "trades_since_last_retrain": state.filled_count,
+        "last_retrain_time": state.last_retrain_time,
         "outcomes_summary": {
-            "total": len(_state.outcomes),
-            "avg_pnl": np.mean([o.pnl for o in _state.outcomes[-cfg.trades_before_retrain:]]) if _state.outcomes else 0,
-            "win_rate": np.mean([o.pnl > 0 for o in _state.outcomes[-cfg.trades_before_retrain:]]) if _state.outcomes else 0,
+            "total": len(state.outcomes),
+            "avg_pnl": np.mean([o.pnl for o in state.outcomes[-cfg.trades_before_retrain:]]) if state.outcomes else 0,
+            "win_rate": np.mean([o.pnl > 0 for o in state.outcomes[-cfg.trades_before_retrain:]]) if state.outcomes else 0,
         },
         "config": {
             "trades_before_retrain": cfg.trades_before_retrain,
             "n_epochs": cfg.n_epochs,
             "total_timesteps": cfg.total_timesteps,
             "learning_rate": cfg.learning_rate,
-            "real_outcome_feedback": bool(_state.outcomes),
+            "real_outcome_feedback": bool(state.outcomes),
         },
     }
 
     await pool.execute(
         "INSERT INTO audit_log(cycle_id, event, data) VALUES($1, $2, $3)",
-        f"retrain_{int(_state.last_retrain_time)}",
+        f"retrain_{int(state.last_retrain_time)}",
         "retrain_completed",
         json.dumps(metrics),
     )
@@ -458,8 +508,9 @@ async def _save_retrain_metrics(df: pd.DataFrame, cfg: RetrainConfig) -> None:
 
 async def force_retrain() -> dict:
     """Fuerza un retrain inmediato (para uso manual/debug)."""
-    if _state.retrain_in_progress:
+    state = await _ensure_retrain_state()
+    if state.retrain_in_progress:
         return {"status": "already_running"}
 
     asyncio.create_task(_trigger_retrain())
-    return {"status": "triggered", "filled_count": _state.filled_count}
+    return {"status": "triggered", "filled_count": state.filled_count}

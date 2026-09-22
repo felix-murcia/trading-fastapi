@@ -122,7 +122,7 @@ class StructuredLogger:
         self._logger.critical(msg_fmt, *args_fmt, **kwargs)
 
 
-async def log_to_audit(audit_event: str, data: dict, pool=None) -> None:
+async def log_to_audit(audit_event: str, data: dict, pool=None, cycle_id: str | None = None) -> None:
     """
     Helper para guardar un evento con trace_id en audit_log.
     Incluye el trace_id automáticamente si está disponible.
@@ -134,19 +134,30 @@ async def log_to_audit(audit_event: str, data: dict, pool=None) -> None:
         pool = _get_pool()
 
     trace = get_trace_id() or "no-trace"
+    mt5_ts = data.get("mt5_time")
     enriched = {
         "trace_id": trace,
         "event": audit_event,
         "data": data,
+        "mt5_time": mt5_ts,
     }
 
     try:
-        await pool.execute(
-            "INSERT INTO audit_log(cycle_id, event, data) VALUES($1, $2, $3)",
-            f"trace_{trace}",
-            audit_event,
-            json.dumps(enriched),
-        )
+        if mt5_ts is not None:
+            await pool.execute(
+                "INSERT INTO audit_log(cycle_id, event, data, created_at) VALUES($1, $2, $3, to_timestamp($4::double precision))",
+                cycle_id or f"trace_{trace}",
+                audit_event,
+                json.dumps(enriched),
+                mt5_ts,
+            )
+        else:
+            await pool.execute(
+                "INSERT INTO audit_log(cycle_id, event, data) VALUES($1, $2, $3)",
+                cycle_id or f"trace_{trace}",
+                audit_event,
+                json.dumps(enriched),
+            )
     except Exception as exc:
         logging.getLogger(__name__).warning(
             "[trace_id=%s] No se pudo guardar audit_log: %s", trace, exc

@@ -6,10 +6,10 @@ Terminal de Ejecución y Telemetría para Cerebro Autónomo (FastAPI + PPO v3).
 - Rol del Servidor: Decisión direccional, dimensionamiento de lotes, SL, TP y gestión de riesgo.
 */
 #property copyright "AI Quant Terminal v3"
-#property version   "12.8"
+#property version   "12.10"
 #property strict
 
-#define EA_VERSION "12.8"
+#define EA_VERSION "12.10"
 
 #include <Trade\Trade.mqh>
 
@@ -43,6 +43,23 @@ int      g_atrHandle = INVALID_HANDLE;
 //+------------------------------------------------------------------+
 //| Parser JSON ligero y tolerante a tipos                           |
 //+------------------------------------------------------------------+
+string EscapeJsonString(const string src)
+  {
+   string result = "";
+   int len = StringLen(src);
+   for(int i = 0; i < len; i++)
+     {
+      string ch = StringSubstr(src, i, 1);
+      if(ch == "\\") result += "\\\\";
+      else if(ch == "\"") result += "\\\"";
+      else if(ch == "\n") result += "\\n";
+      else if(ch == "\r") result += "\\r";
+      else if(ch == "\t") result += "\\t";
+      else result += ch;
+     }
+   return result;
+  }
+
 string GetJsonValue(const string json, const string key)
   {
    string token = "\"" + key + "\":";
@@ -97,6 +114,24 @@ int OnInit()
 //+------------------------------------------------------------------+
 //| Ciclo Principal (Por barra cerrada de H1)                        |
 //+------------------------------------------------------------------+
+void ReportEADecision(const string cycle_id, const string received, const string action, const string raw)
+  {
+   string escaped = EscapeJsonString(raw);
+   double mt5_now = (double)TimeCurrent();
+   string body = StringFormat(
+      "{\"cycle_id\":\"%s\",\"symbol\":\"%s\",\"received_decision\":\"%s\",\"action\":\"%s\",\"reason\":\"\",\"raw_response\":\"%s\",\"mt5_time\":%.3f}",
+      cycle_id, Symbol(), received, action, escaped, mt5_now
+   );
+   char postData[], resultArr[];
+   string headers = "Content-Type: application/json\r\n"
+                    "X-Internal-Token: " + InternalToken + "\r\n";
+   StringToCharArray(body, postData, 0, StringLen(body));
+   ArrayResize(postData, StringLen(body));
+   string responseHeaders;
+   int res = WebRequest("POST", FastAPI_URL + "/api/v1/ai/ea/decision", headers, 10000, postData, resultArr, responseHeaders);
+   PrintFormat("[AI Terminal] EA decision reported cycle=%s decision=%s action=%s HTTP=%d", cycle_id, received, action, res);
+  }
+
 void OnTick()
   {
    // 0. TRAILING STOP — se ejecuta cada tick (o cada N segundos) de forma independiente
@@ -139,11 +174,12 @@ void OnTick()
         }
      }
 
-   // Construcción del payload extendido
-   string body = StringFormat(
-      "{\"symbol\":\"%s\",\"timeframe\":\"H1\",\"position\":%d,\"entry_price\":%.5f,\"sl_price\":%.5f,\"tp_price\":%.5f,\"steps_in_trade\":%d}",
-      Symbol(), currentPos, entryPrice, currentSL, currentTP, stepsInTrade
-   );
+    // Construcción del payload extendido
+    double mt5_now = (double)TimeCurrent();
+    string body = StringFormat(
+       "{\"symbol\":\"%s\",\"timeframe\":\"H1\",\"position\":%d,\"entry_price\":%.5f,\"sl_price\":%.5f,\"tp_price\":%.5f,\"steps_in_trade\":%d,\"mt5_time\":%.3f}",
+       Symbol(), currentPos, entryPrice, currentSL, currentTP, stepsInTrade, mt5_now
+    );
 
    // 2. LLAMADA AL CEREBRO
    char postData[], resultArr[];
@@ -171,113 +207,136 @@ void OnTick()
       return;
      }
 
-   g_consecutiveErrors = 0;
-   string r = CharArrayToString(resultArr);
-   PrintFormat("[AI Terminal] Respuesta Cerebro: %s", r);
+    g_consecutiveErrors = 0;
+    string r = CharArrayToString(resultArr);
+    PrintFormat("[AI Terminal] Respuesta Cerebro: %s", r);
 
-   // 3. EJECUCIÓN PURA DE LA ORDEN (Actuador)
-   string decision = GetJsonValue(r, "decision");
+    string cycle_id = GetJsonValue(r, "cycle_id");
+    if(cycle_id == "") cycle_id = IntegerToString((long)TimeCurrent());
 
-   // A. Si la decisión es cerrar
-   if(decision == "CLOSE")
-     {
-      Print("[AI Terminal] Orden de CIERRE ejecutada por el Cerebro.");
-      CloseAllPositions();
-      return;
-     }
+    // 3. EJECUCIÓN PURA DE LA ORDEN (Actuador)
+    string decision = GetJsonValue(r, "decision");
 
-   // B. Si la decisión es mantener
-   if(decision == "HOLD")
-     {
-      Print("[AI Terminal] Decisión HOLD. Sin cambios en mercado.");
-      return;
-     }
-
-    // C. Si la decisión es operar (BUY / SELL)
-    if(decision == "BUY" || decision == "SELL")
+    // A. Si la decisión es cerrar
+    if(decision == "CLOSE")
       {
-       double rawVolume = StringToDouble(GetJsonValue(r, "volume"));
-       double slPips    = StringToDouble(GetJsonValue(r, "sl_pips"));
-       double tpPips    = StringToDouble(GetJsonValue(r, "tp_pips"));
+       Print("[AI Terminal] Orden de CIERRE ejecutada por el Cerebro.");
+       CloseAllPositions();
+       ReportEADecision(cycle_id, decision, "close", r);
+       return;
+      }
 
-       if(rawVolume <= 0 || slPips <= 0 || tpPips <= 0)
-         {
-          PrintFormat("[AI Terminal] Descartado: Parámetros inválidos recibidos (vol=%.2f, sl=%.1f, tp=%.1f)", rawVolume, slPips, tpPips);
-          return;
-         }
+    // B. Si la decisión es mantener
+    if(decision == "HOLD")
+      {
+       Print("[AI Terminal] Decisión HOLD. Sin cambios en mercado.");
+       ReportEADecision(cycle_id, decision, "hold", r);
+       return;
+      }
 
-       // Solo se permite ejecutar si no hay posición abierta.
-       // Mientras haya posición activa, la salida debe ser exclusivamente por SL/TP.
-       if(currentPos != 0)
-         {
-          PrintFormat("[AI Terminal] Decisión %s descartada: ya hay posición activa currentPos=%d", decision, currentPos);
-          return;
-         }
+     // C. Si la decisión es operar (BUY / SELL)
+     if(decision == "BUY" || decision == "SELL")
+       {
+        double rawVolume = StringToDouble(GetJsonValue(r, "volume"));
+        double slPips    = StringToDouble(GetJsonValue(r, "sl_pips"));
+        double tpPips    = StringToDouble(GetJsonValue(r, "tp_pips"));
 
-       // Normalizar exclusivamente según reglas del Broker (Lotes y Stops)
-       double stepLot = SymbolInfoDouble(Symbol(), SYMBOL_VOLUME_STEP);
-       double minLot  = SymbolInfoDouble(Symbol(), SYMBOL_VOLUME_MIN);
-       double maxLot  = SymbolInfoDouble(Symbol(), SYMBOL_VOLUME_MAX);
-       double lot     = MathFloor(rawVolume / stepLot + 0.00001) * stepLot;
-       lot            = MathMax(minLot, MathMin(maxLot, lot));
-
-       int digits     = (int)SymbolInfoInteger(Symbol(), SYMBOL_DIGITS);
-       double point   = SymbolInfoDouble(Symbol(), SYMBOL_POINT);
-       double pipSize = (digits == 3 || digits == 5) ? point * 10.0 : point;
-       double spread  = (decision == "BUY")
-                        ? (SymbolInfoDouble(Symbol(), SYMBOL_ASK) - SymbolInfoDouble(Symbol(), SYMBOL_BID))
-                        : (SymbolInfoDouble(Symbol(), SYMBOL_ASK) - SymbolInfoDouble(Symbol(), SYMBOL_BID));
-
-       double slDist  = slPips * pipSize;
-       double tpDist  = tpPips * pipSize;
-
-        long minStopLevel = SymbolInfoInteger(Symbol(), SYMBOL_TRADE_STOPS_LEVEL);
-        double spreadDist = 3.0 * pipSize;
-        double minStopDist = MathMax(minStopLevel * point, spreadDist);
-        if(slDist < minStopDist) slDist = minStopDist;
-        if(tpDist < minStopDist) tpDist = minStopDist;
-
-        double currentSpread = SymbolInfoDouble(Symbol(), SYMBOL_ASK) - SymbolInfoDouble(Symbol(), SYMBOL_BID);
-        double buffer = MathMax(currentSpread, 2.0 * pipSize);
-
-        // Ejecutar BUY
-        if(decision == "BUY")
+        if(rawVolume <= 0 || slPips <= 0 || tpPips <= 0)
           {
-           if(currentPos != 0)
-             {
-              PrintFormat("[AI Terminal] Decisión BUY descartada: ya hay posición activa currentPos=%d", currentPos);
-              return;
-             }
-           double ask = SymbolInfoDouble(Symbol(), SYMBOL_ASK);
-           double slPrice = NormalizeDouble(ask - slDist - buffer, digits);
-           double tpPrice = NormalizeDouble(ask + tpDist, digits);
-           if(ask - slPrice < minStopDist) slPrice = NormalizeDouble(ask - minStopDist, digits);
-           if(tpPrice - ask < minStopDist) tpPrice = NormalizeDouble(ask + minStopDist, digits);
-           bool placed = trade.Buy(lot, Symbol(), ask, slPrice, tpPrice, "AI-Predict-v3");
-           if(!placed)
-             PrintFormat("[AI Terminal] ERROR BUY retcode=%d comment=%s | ask=%.5f sl=%.5f tp=%.5f slDist=%.5f tpDist=%.5f buffer=%.5f minStop=%.5f",
-                          (int)trade.ResultRetcode(), trade.ResultComment(), ask, slPrice, tpPrice, slDist, tpDist, buffer, minStopDist);
+           PrintFormat("[AI Terminal] Descartado: Parámetros inválidos recibidos (vol=%.2f, sl=%.1f, tp=%.1f)", rawVolume, slPips, tpPips);
+           ReportEADecision(cycle_id, decision, "rejected_invalid_params", r);
+           return;
           }
-        // Ejecutar SELL
-        else if(decision == "SELL")
+
+        // Solo se permite ejecutar si no hay posición abierta.
+        // Mientras haya posición activa, la salida debe ser exclusivamente por SL/TP.
+        if(currentPos != 0)
           {
-           if(currentPos != 0)
-             {
-              PrintFormat("[AI Terminal] Decisión SELL descartada: ya hay posición activa currentPos=%d", currentPos);
-              return;
-             }
-           double bid = SymbolInfoDouble(Symbol(), SYMBOL_BID);
-           double slPrice = NormalizeDouble(bid + slDist + buffer, digits);
-           double tpPrice = NormalizeDouble(bid - tpDist, digits);
-           if(slPrice - bid < minStopDist) slPrice = NormalizeDouble(bid + minStopDist, digits);
-           if(bid - tpPrice < minStopDist) tpPrice = NormalizeDouble(bid - minStopDist, digits);
-           bool placed = trade.Sell(lot, Symbol(), bid, slPrice, tpPrice, "AI-Predict-v3");
-           if(!placed)
-             PrintFormat("[AI Terminal] ERROR SELL retcode=%d comment=%s | bid=%.5f sl=%.5f tp=%.5f slDist=%.5f tpDist=%.5f buffer=%.5f minStop=%.5f",
-                          (int)trade.ResultRetcode(), trade.ResultComment(), bid, slPrice, tpPrice, slDist, tpDist, buffer, minStopDist);
+           PrintFormat("[AI Terminal] Decisión %s descartada: ya hay posición activa currentPos=%d", decision, currentPos);
+           ReportEADecision(cycle_id, decision, "rejected_position_open", r);
+           return;
           }
-     }
-  }
+
+        // Normalizar exclusivamente según reglas del Broker (Lotes y Stops)
+        double stepLot = SymbolInfoDouble(Symbol(), SYMBOL_VOLUME_STEP);
+        double minLot  = SymbolInfoDouble(Symbol(), SYMBOL_VOLUME_MIN);
+        double maxLot  = SymbolInfoDouble(Symbol(), SYMBOL_VOLUME_MAX);
+        double lot     = MathFloor(rawVolume / stepLot + 0.00001) * stepLot;
+        lot            = MathMax(minLot, MathMin(maxLot, lot));
+
+        int digits     = (int)SymbolInfoInteger(Symbol(), SYMBOL_DIGITS);
+        double point   = SymbolInfoDouble(Symbol(), SYMBOL_POINT);
+        double pipSize = (digits == 3 || digits == 5) ? point * 10.0 : point;
+        double spread  = SymbolInfoDouble(Symbol(), SYMBOL_ASK) - SymbolInfoDouble(Symbol(), SYMBOL_BID);
+
+        double slDist  = slPips * pipSize;
+        double tpDist  = tpPips * pipSize;
+
+         long minStopLevel = SymbolInfoInteger(Symbol(), SYMBOL_TRADE_STOPS_LEVEL);
+         double spreadDist = 3.0 * pipSize;
+         double minStopDist = MathMax(minStopLevel * point, spreadDist);
+         if(slDist < minStopDist) slDist = minStopDist;
+         if(tpDist < minStopDist) tpDist = minStopDist;
+
+         double buffer = MathMax(spread, 2.0 * pipSize);
+
+         // Ejecutar BUY
+         if(decision == "BUY")
+           {
+            if(currentPos != 0)
+              {
+               PrintFormat("[AI Terminal] Decisión BUY descartada: ya hay posición activa currentPos=%d", currentPos);
+               ReportEADecision(cycle_id, decision, "rejected_position_open", r);
+               return;
+              }
+            double ask = SymbolInfoDouble(Symbol(), SYMBOL_ASK);
+            double slPrice = NormalizeDouble(ask - slDist - buffer, digits);
+            double tpPrice = NormalizeDouble(ask + tpDist, digits);
+            if(ask - slPrice < minStopDist) slPrice = NormalizeDouble(ask - minStopDist, digits);
+            if(tpPrice - ask < minStopDist) tpPrice = NormalizeDouble(ask + minStopDist, digits);
+            bool placed = trade.Buy(lot, Symbol(), ask, slPrice, tpPrice, "AI-Predict-v3");
+            if(placed)
+              {
+               ReportEADecision(cycle_id, decision, "buy", r);
+               PrintFormat("[AI Terminal] BUY placed lot=%.2f ticket=%I64u", lot, trade.ResultOrder());
+              }
+            else
+              {
+               ReportEADecision(cycle_id, decision, "error_buy", r);
+               PrintFormat("[AI Terminal] ERROR BUY retcode=%d comment=%s | ask=%.5f sl=%.5f tp=%.5f",
+                           (int)trade.ResultRetcode(), trade.ResultComment(), ask, slPrice, tpPrice);
+              }
+           }
+         // Ejecutar SELL
+         else if(decision == "SELL")
+           {
+            if(currentPos != 0)
+              {
+               PrintFormat("[AI Terminal] Decisión SELL descartada: ya hay posición activa currentPos=%d", currentPos);
+               ReportEADecision(cycle_id, decision, "rejected_position_open", r);
+               return;
+              }
+            double bid = SymbolInfoDouble(Symbol(), SYMBOL_BID);
+            double slPrice = NormalizeDouble(bid + slDist + buffer, digits);
+            double tpPrice = NormalizeDouble(bid - tpDist, digits);
+            if(slPrice - bid < minStopDist) slPrice = NormalizeDouble(bid + minStopDist, digits);
+            if(bid - tpPrice < minStopDist) tpPrice = NormalizeDouble(bid - minStopDist, digits);
+            bool placed = trade.Sell(lot, Symbol(), bid, slPrice, tpPrice, "AI-Predict-v3");
+            if(placed)
+              {
+               ReportEADecision(cycle_id, decision, "sell", r);
+               PrintFormat("[AI Terminal] SELL placed lot=%.2f ticket=%I64u", lot, trade.ResultOrder());
+              }
+            else
+              {
+               ReportEADecision(cycle_id, decision, "error_sell", r);
+               PrintFormat("[AI Terminal] ERROR SELL retcode=%d comment=%s | bid=%.5f sl=%.5f tp=%.5f",
+                           (int)trade.ResultRetcode(), trade.ResultComment(), bid, slPrice, tpPrice);
+              }
+           }
+
+      }
+   }
 
 //+------------------------------------------------------------------+
 //| Trailing Stop independiente del ciclo H1                         |
@@ -324,16 +383,20 @@ void ManageTrailingStop()
       return;
      }
 
-   if(posType == POSITION_TYPE_BUY && currentSL >= openPrice)
-     {
-      PrintFormat("[TRAILING] SL inválido para BUY (sl=%.5f >= entry=%.5f).", currentSL, openPrice);
-      return;
-     }
-   if(posType == POSITION_TYPE_SELL && currentSL <= openPrice)
-     {
-      PrintFormat("[TRAILING] SL inválido para SELL (sl=%.5f <= entry=%.5f).", currentSL, openPrice);
-      return;
-     }
+    if(posType == POSITION_TYPE_BUY && currentSL >= openPrice)
+      {
+       PrintFormat("[TRAILING] SL inválido para BUY (sl=%.5f >= entry=%.5f).", currentSL, openPrice);
+       return;
+      }
+    if(posType == POSITION_TYPE_SELL && currentSL <= openPrice)
+      {
+       PrintFormat("[TRAILING] SL inválido para SELL (sl=%.5f <= entry=%.5f).", currentSL, openPrice);
+       return;
+      }
+
+    long stopsLevel = (long)SymbolInfoInteger(Symbol(), SYMBOL_TRADE_STOPS_LEVEL);
+    if(stopsLevel <= 0) stopsLevel = 10;
+    double minStopDist = stopsLevel * point;
 
    double atr = 0.0;
    if(g_atrHandle != INVALID_HANDLE && TrailingATRMult > 0)
@@ -357,40 +420,44 @@ void ManageTrailingStop()
       double minTrailPrice = minTrailPips * pipSize;
       double newSL = NormalizeDouble(openPrice + MathMax(trailDistPrice, minTrailPrice), digits);
 
-      double currentPr = SymbolInfoDouble(Symbol(), SYMBOL_ASK);
-      if(currentPr >= (openPrice + riskDist) && newSL > currentSL)
-        {
-         if(trade.PositionModify(ticket, newSL, currentTP))
-           {
-            modified = true;
-            PrintFormat("[TRAILING] BUY ticket=%I64u SL movido %.5f -> %.5f (risk=%.1f pips, trail=%.1f pips)",
-                        ticket, currentSL, newSL, riskDist/pipSize, (newSL-openPrice)/pipSize);
-           }
-        }
-     }
-   else if(posType == POSITION_TYPE_SELL)
-     {
-      double riskDist = currentSL - openPrice;
-      if(riskDist <= 0) return;
-      double trailDistPrice = riskDist * TrailingPercent;
-      double minTrailPrice = minTrailPips * pipSize;
-      double newSL = NormalizeDouble(openPrice - MathMax(trailDistPrice, minTrailPrice), digits);
+       double currentPr = SymbolInfoDouble(Symbol(), SYMBOL_ASK);
+       if(currentPr >= (openPrice + riskDist) && newSL > currentSL && newSL <= (currentPr - minStopDist))
+         {
+          if(trade.PositionModify(ticket, newSL, currentTP))
+            {
+             modified = true;
+             PrintFormat("[TRAILING] BUY ticket=%I64u SL movido %.5f -> %.5f (risk=%.1f pips, trail=%.1f pips)",
+                         ticket, currentSL, newSL, riskDist/pipSize, (newSL-openPrice)/pipSize);
+            }
+          else
+            {
+             PrintFormat("[TRAILING] BUY modify failed ret=%d SL=%.5f TP=%.5f", trade.ResultRetcode(), newSL, currentTP);
+            }
+         }
+      }
+    else if(posType == POSITION_TYPE_SELL)
+      {
+       double riskDist = currentSL - openPrice;
+       if(riskDist <= 0) return;
+       double trailDistPrice = riskDist * TrailingPercent;
+       double minTrailPrice = minTrailPips * pipSize;
+       double newSL = NormalizeDouble(openPrice - MathMax(trailDistPrice, minTrailPrice), digits);
 
-      double currentPr = SymbolInfoDouble(Symbol(), SYMBOL_BID);
-      if(currentPr <= (openPrice - riskDist) && newSL < currentSL)
-        {
-         if(trade.PositionModify(ticket, newSL, currentTP))
-           {
-            modified = true;
-            PrintFormat("[TRAILING] SELL ticket=%I64u SL movido %.5f -> %.5f (risk=%.1f pips, trail=%.1f pips)",
-                        ticket, currentSL, newSL, riskDist/pipSize, (openPrice-newSL)/pipSize);
-           }
-        }
-     }
-
-   if(!modified)
-      PrintFormat("[TRAILING] No hay movimiento SL. type=%d open=%.5f sl=%.5f atr=%.5f minTrail=%.1f pips",
-                  (int)posType, openPrice, currentSL, atr, minTrailPips);
+       double currentPr = SymbolInfoDouble(Symbol(), SYMBOL_BID);
+       if(currentPr <= (openPrice - riskDist) && newSL < currentSL && newSL >= (currentPr + minStopDist))
+         {
+          if(trade.PositionModify(ticket, newSL, currentTP))
+            {
+             modified = true;
+             PrintFormat("[TRAILING] SELL ticket=%I64u SL movido %.5f -> %.5f (risk=%.1f pips, trail=%.1f pips)",
+                         ticket, currentSL, newSL, riskDist/pipSize, (openPrice-newSL)/pipSize);
+            }
+          else
+            {
+             PrintFormat("[TRAILING] SELL modify failed ret=%d SL=%.5f TP=%.5f", trade.ResultRetcode(), newSL, currentTP);
+            }
+         }
+      }
   }
 
 
@@ -437,79 +504,95 @@ void CloseAllPositions()
        return;
       }
 
-    datetime historyFrom = TimeCurrent() - 86400 * 90;
-    datetime historyTo   = TimeCurrent() + 60;
+     datetime historyFrom = TimeCurrent() - 86400 * 90;
+     datetime historyTo   = TimeCurrent() + 60;
 
-     PrintFormat("[AI Terminal] Buscando openingDeal: dealTicket=%I64u positionId=%I64d", dealTicket, positionId);
+      PrintFormat("[AI Terminal] Buscando openingDeal: dealTicket=%I64u positionId=%I64d", dealTicket, positionId);
 
-     ulong openingDeal = 0;
-     if(HistorySelectByPosition(positionId))
+      ulong openingDeal = 0;
+      if(HistorySelectByPosition(positionId))
+        {
+         for(int i = 0; i < HistoryDealsTotal(); i++)
+           {
+            ulong hTicket = HistoryDealGetTicket(i);
+            if(hTicket <= 0) continue;
+            if(hTicket == dealTicket) continue;
+            long hEntry = HistoryDealGetInteger(hTicket, DEAL_ENTRY);
+            long hType = HistoryDealGetInteger(hTicket, DEAL_TYPE);
+            if(hEntry == DEAL_ENTRY_IN && (hType == DEAL_TYPE_BUY || hType == DEAL_TYPE_SELL))
+              {
+               openingDeal = hTicket;
+               break;
+              }
+           }
+        }
+
+     if(openingDeal <= 0)
        {
-        for(int i = 0; i < HistoryDealsTotal(); i++)
-          {
-           ulong hTicket = HistoryDealGetTicket(i);
-           if(hTicket <= 0) continue;
-           if(hTicket == dealTicket) continue;
-           long hEntry = HistoryDealGetInteger(hTicket, DEAL_ENTRY);
-           long hType = HistoryDealGetInteger(hTicket, DEAL_TYPE);
-           if(hEntry == DEAL_ENTRY_IN && (hType == DEAL_TYPE_BUY || hType == DEAL_TYPE_SELL))
-             {
-              openingDeal = hTicket;
-              break;
-             }
-          }
+        PrintFormat("[AI Terminal] OnTradeTransaction: openingDeal=0 positionId=%I64d deal=%I64u - registrando de todas formas",
+                     positionId, dealTicket);
        }
 
-    if(openingDeal <= 0)
+     long openingMagic = HistoryDealGetInteger(openingDeal, DEAL_MAGIC);
+     if(openingDeal > 0 && openingMagic != (long)MagicNumber)
+       {
+        PrintFormat("[AI Terminal] OnTradeTransaction: magic=%d esperado=%d - registrando de todas formas",
+                     (int)openingMagic, (int)MagicNumber);
+       }
+
+      // Si llegamos aquí, procesamos el evento independientemente del magic/origin
+      PrintFormat("[AI Terminal] Procesando OnTradeTransaction: positionId=%I64d deal=%I64u openingDeal=%I64u",
+                  positionId, dealTicket, openingDeal);
+
+     double entryPrice = 0.0;
+     double exitPrice  = HistoryDealGetDouble(dealTicket, DEAL_PRICE);
+     double pnl        = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
+     long openingType  = DEAL_TYPE_SELL;
+     datetime entryTime= 0;
+     datetime closeTime= (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME);
+
+     if(openingDeal > 0)
       {
-       PrintFormat("[AI Terminal] OnTradeTransaction descartado: openingDeal=0 positionId=%I64d deal=%I64u",
-                    positionId, dealTicket);
-       return;
+       entryPrice = HistoryDealGetDouble(openingDeal, DEAL_PRICE);
+       openingType = HistoryDealGetInteger(openingDeal, DEAL_TYPE);
+       entryTime = (datetime)HistoryDealGetInteger(openingDeal, DEAL_TIME);
+       openingMagic = HistoryDealGetInteger(openingDeal, DEAL_MAGIC);
+      }
+    else
+      {
+       entryPrice = exitPrice;
+       entryTime = closeTime;
       }
 
-    long openingMagic = HistoryDealGetInteger(openingDeal, DEAL_MAGIC);
-    if(openingMagic != (long)MagicNumber)
+    bool isBuy = (openingType == DEAL_TYPE_BUY);
+    string direction = isBuy ? "LONG" : "SHORT";
+
+    // Clasificar razón de salida por propiedad DEAL_REASON nativa
+    long dealReason = HistoryDealGetInteger(dealTicket, DEAL_REASON);
+    string comment  = HistoryDealGetString(dealTicket, DEAL_COMMENT);
+    string exitReason = "manual";
+    bool slHit = false, tpHit = false;
+
+    if(dealReason == DEAL_REASON_SL || StringFind(comment, "sl") >= 0)
       {
-       PrintFormat("[AI Terminal] OnTradeTransaction descartado: magic=%d esperado=%d", (int)openingMagic, (int)MagicNumber);
-       return;
+       slHit = true;
+       exitReason = "sl";
+      }
+    else if(dealReason == DEAL_REASON_TP || StringFind(comment, "tp") >= 0)
+      {
+       tpHit = true;
+       exitReason = "tp";
       }
 
-   double entryPrice = HistoryDealGetDouble(openingDeal, DEAL_PRICE);
-   double exitPrice  = HistoryDealGetDouble(dealTicket, DEAL_PRICE);
-   double pnl        = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
-   long openingType  = HistoryDealGetInteger(openingDeal, DEAL_TYPE);
-   datetime entryTime= (datetime)HistoryDealGetInteger(openingDeal, DEAL_TIME);
-   datetime closeTime= (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME);
+    // PnL porcentual exacto sobre variación del precio subyacente
+    double pnlPct = 0.0;
+    if(entryPrice > 0.0)
+      {
+       double dir = isBuy ? 1.0 : -1.0;
+       pnlPct = ((exitPrice - entryPrice) / entryPrice) * dir * 100.0;
+      }
 
-   bool isBuy = (openingType == DEAL_TYPE_BUY);
-   string direction = isBuy ? "LONG" : "SHORT";
-
-   // Clasificar razón de salida por propiedad DEAL_REASON nativa
-   long dealReason = HistoryDealGetInteger(dealTicket, DEAL_REASON);
-   string comment  = HistoryDealGetString(dealTicket, DEAL_COMMENT);
-   string exitReason = "manual";
-   bool slHit = false, tpHit = false;
-
-   if(dealReason == DEAL_REASON_SL || StringFind(comment, "sl") >= 0)
-     {
-      slHit = true;
-      exitReason = "sl";
-     }
-   else if(dealReason == DEAL_REASON_TP || StringFind(comment, "tp") >= 0)
-     {
-      tpHit = true;
-      exitReason = "tp";
-     }
-
-   // PnL porcentual exacto sobre variación del precio subyacente
-   double pnlPct = 0.0;
-   if(entryPrice > 0.0)
-     {
-      double dir = isBuy ? 1.0 : -1.0;
-      pnlPct = ((exitPrice - entryPrice) / entryPrice) * dir * 100.0;
-     }
-
-    // Enviar webhook de telemetría a FastAPI
+     // Enviar webhook de telemetría a FastAPI
     string body = "";
     StringConcatenate(body, "{",
        "\"symbol\":\"", Symbol(), "\",",
@@ -522,7 +605,11 @@ void CloseAllPositions()
        "\"tp_hit\":", tpHit ? "true" : "false", ",",
        "\"exit_reason\":\"", exitReason, "\",",
        "\"deal_ticket\":", IntegerToString((long)dealTicket), ",",
-       "\"position_id\":", IntegerToString(positionId),
+       "\"position_id\":", IntegerToString(positionId), ",",
+       "\"opening_deal\":", IntegerToString((long)openingDeal), ",",
+       "\"opening_magic\":", IntegerToString(openingMagic), ",",
+       "\"opening_deal_found\":", openingDeal > 0 ? "true" : "false", ",",
+       "\"magic_match\":", (openingDeal > 0 && openingMagic == (long)MagicNumber) ? "true" : "false",
        "}"
     );
     PrintFormat("[AI Terminal] Webhook body: %s", body);

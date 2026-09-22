@@ -54,8 +54,11 @@ async def backup_model(model_path: str = MODEL_LOCAL_PATH) -> dict:
     try:
         client = _get_gcs_client()
         bucket = client.bucket(MODEL_BUCKET)
+    except Exception as exc:
+        logger.error("[MODEL-BACKUP] Falló: %s", exc)
+        return {"status": "error", "error": str(exc)}
 
-        # Check if this hash already exists
+    try:
         blobs = list(bucket.list_blobs(prefix=f"{GCS_PREFIX}/"))
         existing = [b.name for b in blobs if model_hash in b.name]
         if existing:
@@ -66,7 +69,6 @@ async def backup_model(model_path: str = MODEL_LOCAL_PATH) -> dict:
         blob.upload_from_filename(model_path)
         logger.warning("[MODEL-BACKUP] Backup creado: gs://%s/%s (hash=%s)", MODEL_BUCKET, gcs_path, model_hash)
         return {"status": "success", "hash": model_hash, "gcs_path": f"gs://{MODEL_BUCKET}/{gcs_path}"}
-
     except Exception as exc:
         logger.error("[MODEL-BACKUP] Falló: %s", exc)
         return {"status": "error", "error": str(exc)}
