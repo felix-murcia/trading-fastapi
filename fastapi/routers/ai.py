@@ -417,6 +417,7 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             "llm_bias": qwen["bias"],
             "quality_score": round(qwen["quality"], 2),
             "quality_reason": qwen["reason"],
+            "qwen_degraded": not qwen.get("ok", True),
             "confidence_modifier": round(qwen["confidence_modifier"], 2),
             "regime": qwen["regime"],
             "volume": final_lots if final_decision in ("BUY", "SELL") else None,
@@ -578,10 +579,35 @@ async def pipeline_health() -> HealthCheckResponse:
     if state.filled_count == 0:
         issues.append("No trades recorded yet (EA may not be sending webhooks)")
 
+    # 5. Qwen LLM — estado degradado (P1-6). Mientras falle, /predict usa
+    #    safe defaults (quality=0 → veto fail-closed BUY/SELL → HOLD).
+    from services.qwen_client import get_qwen_state
+    qs = get_qwen_state()
+    qwen_ok = qs.consecutive_failures == 0
+    components["qwen"] = {
+        "ok": qwen_ok,
+        "calls_ok": qs.calls_ok,
+        "calls_failed": qs.calls_failed,
+        "consecutive_failures": qs.consecutive_failures,
+        "last_ok_at": qs.last_ok_at,
+        "last_fail_at": qs.last_fail_at,
+        "last_error": qs.last_error,
+        "error": None if qwen_ok else (qs.last_error or "Qwen degraded"),
+    }
+    if not qwen_ok:
+        issues.append(
+            f"Qwen degradado ({qs.consecutive_failures} fallos seguidos): "
+            f"{qs.last_error} — predict opera con safe defaults (veto a compra/venta)"
+        )
+
     # Determine overall status
     critical_failures = sum(1 for c in components.values() if not c["ok"])
     if critical_failures > 0:
-        status = "critical" if any(c == "database" or c == "ppo_model" for c in components) else "degraded"
+        # Solo database/ppo_model caídos son críticos; el resto (qwen, mt5) degrada
+        critical_component_failed = any(
+            not components[name]["ok"] for name in ("database", "ppo_model")
+        )
+        status = "critical" if critical_component_failed else "degraded"
     else:
         status = "healthy"
 

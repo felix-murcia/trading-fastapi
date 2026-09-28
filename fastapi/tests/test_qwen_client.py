@@ -12,7 +12,32 @@ import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import httpx
 
-from services.qwen_client import query_qwen_unified, query_qwen_sltp_validator
+import services.qwen_client as qwen_client
+from services.qwen_client import (
+    QwenHealthState,
+    get_qwen_state,
+    query_qwen_unified,
+    query_qwen_sltp_validator,
+)
+
+
+@pytest.fixture(autouse=True)
+def fresh_qwen_state(monkeypatch):
+    """Estado de Qwen aislado por test — el módulo es estado compartido."""
+    monkeypatch.setattr(qwen_client, "_QWEN_STATE", QwenHealthState())
+
+
+_UNIFIED_BASE = dict(
+    symbol="EURUSD", decision="BUY", ml_prob=0.75, rsi=55.0, atr=0.00100,
+    atr_pct=0.01, macd_hist=0.0005, bb_pos=0.6, range_pct=0.02, last_ret=0.001,
+    hour=10, news="No major news", candle_context="last 10 H1 candles",
+    sl_proposed=0.20, tp_proposed=0.40, cycle_id="EURUSD_1234567890",
+    logger=MagicMock(),
+)
+
+
+async def _call_unified(**overrides):
+    return await query_qwen_unified(**{**_UNIFIED_BASE, **overrides})
 
 
 class TestQueryQwenUnified:
@@ -66,6 +91,7 @@ class TestQueryQwenUnified:
         assert result["regime"] == "TRENDING"
         assert result["sl_adjusted"] == 0.20
         assert result["tp_adjusted"] == 0.40  # sl_adj * 2.0
+        assert result["ok"] is True
 
     @pytest.mark.asyncio
     async def test_connection_error_returns_safe_defaults(self):
@@ -75,35 +101,23 @@ class TestQueryQwenUnified:
                 side_effect=httpx.ConnectTimeout("timeout")
             )
 
-            result = await query_qwen_unified(
-                symbol="EURUSD",
-                decision="BUY",
-                ml_prob=0.75,
-                rsi=55.0,
-                atr=0.00100,
-                atr_pct=0.01,
-                macd_hist=0.0005,
-                bb_pos=0.6,
-                range_pct=0.02,
-                last_ret=0.001,
-                hour=10,
-                news="No major news",
-                candle_context="last 10 H1 candles",
-                sl_proposed=0.20,
-                tp_proposed=0.40,
-                cycle_id="EURUSD_1234567890",
-                logger=MagicMock(),
-            )
+            result = await _call_unified()
 
         assert result["quality"] == 0.0
         assert result["bias"] == "NEUTRAL"
         assert result["confidence_modifier"] == 1.0
         assert result["sl_adjusted"] == 0.20
         assert result["tp_adjusted"] == 0.40
+        assert result["ok"] is False
+        assert result["reason"] == "Qwen unavailable"
 
     @pytest.mark.asyncio
-    async def test_invalid_json_raises_runtime_error(self):
-        """Should raise RuntimeError when response contains no JSON."""
+    async def test_invalid_json_degrades_to_safe_defaults(self):
+        """P1-6: basura del LLM → safe defaults + estado degradado (nunca crash).
+
+        Antes lanzaba RuntimeError y cascateaba un 500 en /predict sin dejar
+        rastro en /pipeline/health; ahora degrada con razón explícita.
+        """
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
@@ -119,26 +133,85 @@ class TestQueryQwenUnified:
                 return_value=mock_response
             )
 
-            with pytest.raises(RuntimeError, match="sin JSON"):
-                await query_qwen_unified(
-                    symbol="EURUSD",
-                    decision="BUY",
-                    ml_prob=0.75,
-                    rsi=55.0,
-                    atr=0.00100,
-                    atr_pct=0.01,
-                    macd_hist=0.0005,
-                    bb_pos=0.6,
-                    range_pct=0.02,
-                    last_ret=0.001,
-                    hour=10,
-                    news="No major news",
-                    candle_context="last 10 H1 candles",
-                    sl_proposed=0.20,
-                    tp_proposed=0.40,
-                    cycle_id="EURUSD_1234567890",
-                    logger=MagicMock(),
-                )
+            result = await _call_unified()
+
+        assert result["ok"] is False
+        assert result["quality"] == 0.0
+        assert "sin JSON" in result["reason"]
+        assert result["effective_prob"] == 0.75  # ml_prob intacto
+        state = get_qwen_state()
+        assert state.consecutive_failures == 1
+        assert "sin JSON" in state.last_error
+
+    @pytest.mark.asyncio
+    async def test_http_500_degrades_without_crash(self):
+        """P1-6: HTTP 500 del servidor LLM → safe defaults, nunca raise."""
+        mock_response = MagicMock()
+        mock_response.status_code = 500
+        mock_response.text = "boom"
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value.post = AsyncMock(
+                return_value=mock_response
+            )
+
+            result = await _call_unified()
+
+        assert result["ok"] is False
+        assert result["quality"] == 0.0
+        assert result["reason"] == "Qwen degraded: HTTP 500"
+        state = get_qwen_state()
+        assert state.consecutive_failures == 1
+        assert "HTTP 500" in state.last_error
+
+    @pytest.mark.asyncio
+    async def test_success_updates_health_state(self, mock_success_response):
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value.post = AsyncMock(
+                return_value=mock_success_response
+            )
+            result = await _call_unified()
+
+        assert result["ok"] is True
+        state = get_qwen_state()
+        assert (state.calls_ok, state.calls_failed, state.consecutive_failures) == (1, 0, 0)
+        assert state.last_ok_at is not None
+        assert state.last_error is None
+
+    @pytest.mark.asyncio
+    async def test_connection_error_updates_health_state(self):
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value.post = AsyncMock(
+                side_effect=httpx.ConnectTimeout("timeout")
+            )
+            result = await _call_unified()
+
+        assert result["ok"] is False
+        state = get_qwen_state()
+        assert state.calls_failed == 1
+        assert state.consecutive_failures == 1
+        assert state.last_ok_at is None
+        assert state.last_error.startswith("connection")
+
+    @pytest.mark.asyncio
+    async def test_recovery_resets_failure_streak(self, mock_success_response):
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value.post = AsyncMock(
+                side_effect=httpx.ConnectTimeout("timeout")
+            )
+            await _call_unified()
+        assert get_qwen_state().consecutive_failures == 1
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value.post = AsyncMock(
+                return_value=mock_success_response
+            )
+            await _call_unified()
+
+        state = get_qwen_state()
+        assert state.consecutive_failures == 0
+        assert (state.calls_ok, state.calls_failed) == (1, 1)
+        assert state.last_error is None
 
     @pytest.mark.asyncio
     async def test_confidence_modifier_clamped(self):
@@ -332,3 +405,62 @@ class TestQueryQwenSltpValidator:
         assert sl == 0.25
         assert tp == 0.50
         assert "too tight" in reason
+
+    @pytest.mark.asyncio
+    async def test_http_500_returns_originals_without_crash(self):
+        """P1-6: HTTP 500 del validador → propuestos originales, nunca raise."""
+        mock_response = MagicMock()
+        mock_response.status_code = 500
+        mock_response.text = "boom"
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value.post = AsyncMock(
+                return_value=mock_response
+            )
+
+            sl, tp, reason = await query_qwen_sltp_validator(
+                symbol="EURUSD",
+                decision="BUY",
+                atr=0.00100,
+                atr_pct=0.01,
+                rsi=55.0,
+                bb_pos=0.6,
+                macd_hist=0.0005,
+                range_pct=0.02,
+                hour=10,
+                sl_proposed=0.20,
+                tp_proposed=0.40,
+                cycle_id="EURUSD_1234567890",
+                logger=MagicMock(),
+            )
+
+        assert sl == 0.20
+        assert tp == 0.40
+        assert reason == "Qwen degraded: HTTP 500"
+        assert get_qwen_state().consecutive_failures == 1
+
+    @pytest.mark.asyncio
+    async def test_sltp_success_records_state(self, mock_success_response):
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_client.return_value.__aenter__.return_value.post = AsyncMock(
+                return_value=mock_success_response
+            )
+            await query_qwen_sltp_validator(
+                symbol="EURUSD",
+                decision="BUY",
+                atr=0.00100,
+                atr_pct=0.01,
+                rsi=55.0,
+                bb_pos=0.6,
+                macd_hist=0.0005,
+                range_pct=0.02,
+                hour=10,
+                sl_proposed=0.20,
+                tp_proposed=0.40,
+                cycle_id="EURUSD_1234567890",
+                logger=MagicMock(),
+            )
+
+        state = get_qwen_state()
+        assert state.calls_ok == 1
+        assert state.consecutive_failures == 0

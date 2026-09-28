@@ -2,11 +2,15 @@
 Qwen LLM client — extracted from routers/ai.py.
 
 Provides unified Qwen queries for trade analysis and SL/TP validation.
-All functions return safe defaults on connection failure.
+All functions return safe defaults on ANY failure (connection, HTTP != 200,
+malformed response) — Qwen nunca crashea /predict; el estado degradado se
+registra en QwenHealthState y lo reporta /pipeline/health (P1-6).
 """
 import json
 import logging
 import os
+import time
+from dataclasses import dataclass
 from typing import Optional
 
 import httpx
@@ -20,6 +24,62 @@ SL_MIN_NORM = 0.05
 SL_MAX_NORM = 0.30
 TP_MIN_NORM = 0.05
 TP_MAX_NORM = 0.50
+
+
+# ─── Estado de salud de Qwen (P1-6) ──────────────────────────────────────────
+# Toda llamada (éxito o cualquier fallo) lo actualiza. /pipeline/health lo
+# reporta como componente y /predict marca `qwen_degraded` en audit_log.
+
+@dataclass
+class QwenHealthState:
+    calls_ok: int = 0
+    calls_failed: int = 0
+    consecutive_failures: int = 0
+    last_ok_at: float | None = None
+    last_fail_at: float | None = None
+    last_error: str | None = None
+
+
+_QWEN_STATE = QwenHealthState()
+
+
+def get_qwen_state() -> QwenHealthState:
+    return _QWEN_STATE
+
+
+def _record_success() -> None:
+    _QWEN_STATE.calls_ok += 1
+    _QWEN_STATE.consecutive_failures = 0
+    _QWEN_STATE.last_ok_at = time.time()
+    _QWEN_STATE.last_error = None
+
+
+def _record_failure(error: str) -> None:
+    _QWEN_STATE.calls_failed += 1
+    _QWEN_STATE.consecutive_failures += 1
+    _QWEN_STATE.last_fail_at = time.time()
+    _QWEN_STATE.last_error = error[:200]
+
+
+def _degraded_unified(
+    regime: str, sl_proposed: float, tp_proposed: float, ml_prob: float, reason: str,
+) -> dict:
+    """Safe defaults uniformes ante CUALQUIER fallo de Qwen.
+
+    quality=0.0 es deliberadamente fail-closed: por debajo de QUALITY_THRESHOLD
+    el veto de predict revierte BUY/SELL a HOLD mientras Qwen esté degradado.
+    """
+    return {
+        "ok": False,
+        "quality": 0.0,
+        "reason": reason[:120],
+        "bias": "NEUTRAL",
+        "confidence_modifier": 1.0,
+        "effective_prob": float(ml_prob),
+        "sl_adjusted": float(sl_proposed),
+        "tp_adjusted": float(tp_proposed),
+        "regime": regime,
+    }
 
 
 def _classify_session(hour: int) -> str:
@@ -136,23 +196,22 @@ TP 0.125-0.30 with TP:SL >=1.5; regime TRENDING/RANGING/VOLATILE/BREAKOUT."""
             })
     except (httpx.ConnectTimeout, httpx.TimeoutException, httpx.HTTPError) as exc:
         logger.warning("[%s] QWEN-UNIFIED connection failed: %s", cycle_id, repr(exc))
-        return {
-            "quality": 0.0,
-            "reason": "Qwen unavailable",
-            "bias": "NEUTRAL",
-            "confidence_modifier": 1.0,
-            "effective_prob": float(ml_prob),
-            "sl_adjusted": float(sl_proposed),
-            "tp_adjusted": float(tp_proposed),
-            "regime": regime,
-        }
+        _record_failure(f"connection: {repr(exc)[:120]}")
+        return _degraded_unified(
+            regime, sl_proposed, tp_proposed, ml_prob, "Qwen unavailable"
+        )
 
     if res.status_code == 200:
-        content = res.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
         try:
+            content = res.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
             parsed = _parse_json_response(content)
-        except RuntimeError as exc:
-            raise RuntimeError(f"[{cycle_id}] QWEN-UNIFIED {exc}") from exc
+        except (RuntimeError, ValueError, KeyError, IndexError, TypeError) as exc:
+            # Respuesta basura del LLM: degradar, nunca propagar (P1-6)
+            logger.warning("[%s] QWEN-UNIFIED malformed response: %s", cycle_id, exc)
+            _record_failure(f"parse: {exc}")
+            return _degraded_unified(
+                regime, sl_proposed, tp_proposed, ml_prob, f"Qwen degraded: {exc}"
+            )
 
         q = float(parsed.get("quality", 5.0))
         reason = str(parsed.get("reason", ""))[:120]
@@ -179,7 +238,9 @@ TP 0.125-0.30 with TP:SL >=1.5; regime TRENDING/RANGING/VOLATILE/BREAKOUT."""
             sl_proposed, sl_adj, tp_proposed, tp_adj,
             parsed.get("regime", regime), reason[:60]
         )
+        _record_success()
         return {
+            "ok": True,
             "quality": q,
             "reason": reason,
             "bias": bias,
@@ -190,8 +251,11 @@ TP 0.125-0.30 with TP:SL >=1.5; regime TRENDING/RANGING/VOLATILE/BREAKOUT."""
             "regime": parsed.get("regime", regime),
         }
 
-    res.raise_for_status()
-    raise RuntimeError(f"[{cycle_id}] QWEN-UNIFIED HTTP {res.status_code}: {res.text[:120]}")
+    logger.warning("[%s] QWEN-UNIFIED HTTP %s: %s", cycle_id, res.status_code, res.text[:120])
+    _record_failure(f"HTTP {res.status_code}: {res.text[:80]}")
+    return _degraded_unified(
+        regime, sl_proposed, tp_proposed, ml_prob, f"Qwen degraded: HTTP {res.status_code}"
+    )
 
 
 async def query_qwen_sltp_validator(
@@ -254,14 +318,18 @@ If both are OK, return the same values. If adjustment needed, propose sensible o
             })
     except (httpx.ConnectTimeout, httpx.TimeoutException, httpx.HTTPError) as exc:
         logger.warning("[%s] SLTP-VALIDATOR connection failed: %s", cycle_id, exc)
+        _record_failure(f"connection: {repr(exc)[:120]}")
         return float(sl_proposed), float(tp_proposed), "Qwen unavailable"
 
     if res.status_code == 200:
-        content = res.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
         try:
+            content = res.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
             parsed = _parse_json_response(content)
-        except RuntimeError as exc:
-            raise RuntimeError(f"[{cycle_id}] SLTP-VALIDATOR {exc}") from exc
+        except (RuntimeError, ValueError, KeyError, IndexError, TypeError) as exc:
+            # Respuesta basura del LLM: devolver los valores propuestos, nunca propagar
+            logger.warning("[%s] SLTP-VALIDATOR malformed response: %s", cycle_id, exc)
+            _record_failure(f"parse: {exc}")
+            return float(sl_proposed), float(tp_proposed), f"Qwen degraded: {exc}"
 
         sl_ok = bool(parsed.get("sl_ok", True))
         tp_ok = bool(parsed.get("tp_ok", True))
@@ -275,7 +343,9 @@ If both are OK, return the same values. If adjustment needed, propose sensible o
                 cycle_id, sl_ok, tp_ok, sl_adj, tp_adj,
                 parsed.get("reason", "")[:80]
             )
+        _record_success()
         return sl_adj, tp_adj, parsed.get("reason", "")[:100]
 
-    res.raise_for_status()
-    raise RuntimeError(f"[{cycle_id}] SLTP-VALIDATOR HTTP {res.status_code}: {res.text[:120]}")
+    logger.warning("[%s] SLTP-VALIDATOR HTTP %s: %s", cycle_id, res.status_code, res.text[:120])
+    _record_failure(f"HTTP {res.status_code}: {res.text[:80]}")
+    return float(sl_proposed), float(tp_proposed), f"Qwen degraded: HTTP {res.status_code}"

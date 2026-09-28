@@ -1290,3 +1290,20 @@ Ahora, si las Bandas de Bollinger son inválidas o el ratio es insuficiente, el 
 **Validación (2026-09-28):** `pytest fastapi/tests/ -q` → **228 passed** (169 → 228; +59: guardian 12 + sizing 14 + env 10 + webhook +10 + models +13). Contrato de observación corregido en `AGENTS.md`/`README` `(10, 21)` → `(20, 24)` (window 20 × (17 + 7 state channels)) — el contrato anterior estaba en desfase con el código desde la ventana 20.
 
 **Archivos:** `fastapi/tests/test_risk_guardian.py` (nuevo), `fastapi/tests/test_position_sizing.py` (nuevo), `fastapi/tests/test_trading_env_step.py` (nuevo), `fastapi/tests/test_trade_filled_webhook.py` (reescrito), `fastapi/tests/test_models.py` (reescrito), `fastapi/routers/ai.py` (validadores), `AGENTS.md`, `README.md`.
+
+### AH. Fix P1-6: semántica de Qwen — degradación visible + decisión auditable (2026-09-28)
+
+**Problemas (auditoría):**
+- `/pipeline/health` **no reportaba el componente LLM**: con Qwen caído el sistema votaba HOLD (quality=0 → veto) y el health seguía respondiendo `healthy` — degradación invisible.
+- Solo la caída de conexión degradaba en silencio; **HTTP ≠ 200 o respuesta sin JSON cascateaban un 500 en `/predict`** (violaba "If Qwen is unreachable, log and use safe defaults — never crash") y no quedaba rastro en salud.
+- Bug en el status del health: `any(c == "database" or c == "ppo_model" for c in components)` iteraba **claves** → siempre `True` → cualquier fallo marcaba `critical`, `degraded` era inalcanzable.
+- La racional ya se persistía en `audit_log` (`ai_predict_cycle`: quality, bias, veto, veto_reason, regime) pero sin flag explícito de degradación.
+
+**Cambios:**
+- **`services/qwen_client.py`**: `QwenHealthState` (calls_ok/failed, racha consecutiva, last_ok_at/last_fail_at, last_error) + `get_qwen_state()`; **toda llamada** — éxito o cualquier fallo — lo actualiza. Todos los modos de fallo (conexión, HTTP ≠ 200, JSON basura) → `_degraded_unified(...)` con safe defaults y razón explícita (`"Qwen unavailable"` / `"Qwen degraded: HTTP 500"` / `"Qwen degraded: sin JSON..."`) — **nunca raise**. Éxito añade `ok: True` y resetea la racha. Mismo tratamiento en `query_qwen_sltp_validator` (devuelve los valores propuestos originales).
+- **`routers/ai.py`**: `/pipeline/health` añade el componente `qwen` (ok, contadores, last_error) con issue + alerta `PIPELINE-HEALTH` cuando está degradado; fix del bug de status (solo `database`/`ppo_model` caídos → `critical`; el resto → `degraded`). `/predict` persiste **`qwen_degraded`** en `audit_log` junto a la racional.
+- **Semántica fail-closed documentada y testeada**: mientras Qwen esté caído, quality=0 < umbral → veto BUY/SELL → **HOLD**; el EA ve `quality_reason="Qwen unavailable"` en la respuesta.
+
+**Validación (2026-09-28):** `pytest fastapi/tests/ -q` → **239 passed** (228 → 239; +6 en `test_qwen_client.py` — HTTP 500/bad-JSON degradan en vez de raise, estado y recuperación de racha — y +5 en `test_qwen_semantics.py` nuevo: componente en health, status `degraded` + alerta, y `qwen_degraded` en audit_log con veto fail-closed).
+
+**Archivos:** `fastapi/services/qwen_client.py`, `fastapi/routers/ai.py`, `fastapi/tests/test_qwen_client.py`, `fastapi/tests/test_qwen_semantics.py` (nuevo), `README.md`.
