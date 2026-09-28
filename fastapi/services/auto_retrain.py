@@ -634,8 +634,8 @@ async def _do_retrain() -> None:
 
     # P0-5: certificar el bundle promovido. Sin manifest válido el próximo
     # arranque fallará en validate_bundle (fail-fast: nunca sirve binarios sucios).
-    from services.model_registry import build_manifest, write_manifest
-    write_manifest(MODEL_PATH, build_manifest(
+    from services.model_registry import build_manifest, record_promotion, write_manifest
+    manifest = build_manifest(
         MODEL_PATH,
         obs_shape=getattr(model.observation_space, "shape", ()),
         vec_norm_file=os.path.basename(norm_path),
@@ -644,7 +644,19 @@ async def _do_retrain() -> None:
             "walk_forward": report.to_dict(),
             "gate": {"ok": decision.ok, "reason": decision.reason},
         },
-    ))
+    )
+    write_manifest(MODEL_PATH, manifest)
+
+    # P1-2: historial de promociones (model_registry) + hot-reload del bundle en
+    # memoria. Sin la recarga, la promoción no surte efecto hasta reiniciar
+    # (disco ≠ memoria). El swap en ai.py es atómico y valida antes de tocar la caché.
+    await record_promotion(
+        manifest,
+        {"ok": decision.ok, "reason": decision.reason,
+         "checks": decision.details.get("checks")},
+    )
+    from routers.ai import reload_inference_artifacts
+    reload_inference_artifacts()
 
     state = await _ensure_retrain_state()
     state.last_retrain_time = time.time()

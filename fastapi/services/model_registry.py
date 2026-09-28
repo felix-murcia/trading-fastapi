@@ -161,3 +161,39 @@ def assert_obs_shape(manifest: dict, obs_shape) -> None:
             f"[MODEL-REGISTRY] obs_shape incoherente: manifest {declared} vs modelo {actual}. "
             "El zip no corresponde al manifest que lo certifica."
         )
+
+
+async def record_promotion(manifest: dict, gate: dict) -> None:
+    """P1-2: registra la promoción en la tabla model_registry (historial vivo).
+
+    Desactiva la fila activa anterior e inserta la nueva en UNA sola sentencia
+    (CTE): o queda exactamente un bundle activo o la operación entera falla —
+    sin ventana con 0 o 2 activos.
+    """
+    from db.connection import get_pool
+
+    pool = get_pool()
+    await pool.execute(
+        """
+        WITH deactivated AS (
+            UPDATE model_registry SET is_active = FALSE WHERE is_active
+        )
+        INSERT INTO model_registry
+            (model_sha256, vec_norm_sha256, source, obs_shape, extra, gate_reason, is_active)
+        VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, TRUE)
+        """,
+        manifest["model_sha256"],
+        manifest.get("vec_norm_sha256"),
+        manifest["source"],
+        json.dumps([int(d) for d in manifest["obs_shape"]]),
+        json.dumps(
+            {"gate": gate, "manifest_extra": manifest.get("extra", {})},
+            default=float,
+            ensure_ascii=False,
+        ),
+        gate.get("reason"),
+    )
+    logger.info(
+        "[MODEL-REGISTRY] Promoción registrada: sha=%s… reason=%s",
+        manifest["model_sha256"][:12], gate.get("reason"),
+    )

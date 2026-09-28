@@ -1255,3 +1255,19 @@ Ahora, si las Bandas de Bollinger son inválidas o el ratio es insuficiente, el 
 **Validación (2026-09-28):** `pytest fastapi/tests/ -q` → **160 passed** (140 → 160). Tests nuevos `test_walk_forward.py` (25): partición sin solape ×5 + contexto/embargo ×3, fallos ruidosos del split ×3... desglose: split 8, métricas 6, gate 7, patrón de llamadas y agregados 4. Integración `_do_retrain` ampliada: promoción verifica informe walk-forward en manifest/evento (+1 **rechazo por empate** con el bundle real copiado → bundle intacto, sin reset). −6 tests del gate antiguo (cubiertos por los del nuevo gate). **E2E actualizado:** el mock del modelo usa `Box` reales porque el bundle certificado ahora declara `vec_norm_file` → el startup ejecuta la rama VecNormalize (SB3 rechaza spaces MagicMock).
 
 **Archivos:** `fastapi/services/walk_forward.py` (nuevo), `fastapi/services/auto_retrain.py`, `fastapi/tests/test_walk_forward.py` (nuevo), `fastapi/tests/test_auto_retrain.py`, `fastapi/tests/test_e2e_ai_predict.py`.
+
+### AF. Fix P1-2: historial de modelos + hot-reload + salud disco≠memoria (2026-09-28)
+
+**Problemas (auditoría):** no había histórico de promociones (no se sabía qué modelo corre ni por qué); la promoción **no se aplicaba hasta reiniciar** (`_CACHED_MODEL` en memoria divergía del disco); no había forma de ver esa divergencia; y `load_inference_artifacts` asignaba `_CACHED_MODEL` ANTES de cargar VecNorm → si el pkl fallaba, la caché quedaba con modelo nuevo + stats viejas (swap a medias).
+
+**Cambios:**
+- **Tabla `model_registry`** (`schema.sql` + migración manual aplicada): historial de bundles (sha256 modelo/pkl, `source`, `obs_shape`, `gate_reason`, `promoted_at`) con **índice único parcial `WHERE is_active`** → exactamente un bundle activo a la vez (rollback informado).
+- **`record_promotion(manifest, gate)`**: desactivar-la-anterior + insertar-la-nueva en **UNA sola sentencia CTE** (atómica). Si la DB falla, propaga → alerta vía done-callback del retrain y el ciclo NO se resetea.
+- **Swap atómico en `load_inference_artifacts`**: modelo y VecNorm se cargan en variables locales y la caché se asigna al **final** → un fallo de validación/carga deja el bundle anterior íntegro (test con pkl corrupto).
+- **`reload_inference_artifacts()` (hot-reload)**: `_do_retrain` lo llama tras promover → la promoción surte efecto **sin reiniciar**; si falla, propaga (alerta) y se sigue sirviendo el bundle anterior.
+- **`GET /api/v1/ai/model/status`**: `memory` (sha/`source`/`loaded_at` de la caché) vs `disk` (manifest) + **`in_sync`** → disco≠memoria visible de inmediato.
+- `_do_retrain`: captura el manifest, lo registra en `model_registry` y recarga la caché tras cada promoción (en rechazo: ni registro ni recarga).
+
+**Validación (2026-09-28):** `pytest fastapi/tests/ -q` → **169 passed** (160 → 169; +9 en `test_model_hot_reload.py`: CTE+parámetros, fallo de DB propaga, swap atómico ante pkl corrupto, reload devuelve estado, endpoint ruta + 422/401 + `in_sync` ×2, índice único del schema). Integración `_do_retrain`: promoción exige `record_promotion` y `reload` llamados; rechazo exige que **no** se llamen. **En vivo:** `GET /api/v1/ai/model/status` → `in_sync: true` (sha `2c84c903…` = memoria = disco, `source=auto_retrain_normalized`); migración aplicada a la DB viva (`\d model_registry`); contenedor: **169 passed**.
+
+**Archivos:** `fastapi/db/schema.sql`, `fastapi/services/model_registry.py`, `fastapi/routers/ai.py`, `fastapi/services/auto_retrain.py`, `fastapi/tests/test_model_hot_reload.py` (nuevo), `fastapi/tests/test_auto_retrain.py`.

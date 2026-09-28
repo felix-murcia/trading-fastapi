@@ -86,3 +86,24 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_outcomes_deal_ticket
 
 CREATE INDEX IF NOT EXISTS idx_trade_outcomes_symbol ON trade_outcomes(symbol);
 CREATE INDEX IF NOT EXISTS idx_trade_outcomes_exit_time ON trade_outcomes(exit_time);
+
+-- P1-2: historial de bundles promovidos — qué modelo corre, por qué, cuándo
+CREATE TABLE IF NOT EXISTS model_registry (
+    id              BIGSERIAL PRIMARY KEY,
+    model_sha256    TEXT        NOT NULL,
+    vec_norm_sha256 TEXT,
+    source          TEXT        NOT NULL,
+    obs_shape       JSONB       NOT NULL,
+    extra           JSONB,
+    gate_reason     TEXT,
+    promoted_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    is_active       BOOLEAN     NOT NULL DEFAULT TRUE
+);
+
+-- Un único bundle activo a la vez (rollback informado)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_model_registry_one_active
+    ON model_registry(is_active)
+    WHERE is_active;
+
+CREATE INDEX IF NOT EXISTS idx_model_registry_promoted_at
+    ON model_registry(promoted_at DESC);

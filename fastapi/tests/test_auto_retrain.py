@@ -3,7 +3,7 @@ Tests for services/auto_retrain.py
 """
 import pytest
 from datetime import datetime
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch, AsyncMock, MagicMock
 import numpy as np
 import pandas as pd
 
@@ -379,6 +379,10 @@ class TestDoRetrainPromotion:
                             AsyncMock(return_value=_candles(candles)))
         monkeypatch.setattr(ar, "_load_persisted_outcomes", AsyncMock(return_value=[]))
         monkeypatch.setattr(ar, "_log_retrain_event", AsyncMock())
+        record_promo = AsyncMock()
+        reload_mock = MagicMock()
+        monkeypatch.setattr("services.model_registry.record_promotion", record_promo)
+        monkeypatch.setattr("routers.ai.reload_inference_artifacts", reload_mock)
         monkeypatch.setattr("services.model_backup.backup_model",
                             AsyncMock(return_value=None))
 
@@ -389,7 +393,7 @@ class TestDoRetrainPromotion:
         # learn() sin-op: 100k steps no cabe en la suite. Se valida la mecánica
         # de promoción/rechazo (bundle + gate + eventos), no el entrenamiento.
         monkeypatch.setattr(sb3.PPO, "learn", lambda self, *a, **k: self)
-        return ar, state, path
+        return ar, state, path, record_promo, reload_mock
 
     @staticmethod
     def _fake_metrics(*a, **k):
@@ -405,7 +409,9 @@ class TestDoRetrainPromotion:
     async def test_promotes_normalized_bundle_and_resets_counter(self, tmp_path, monkeypatch):
         from services.model_registry import validate_bundle
 
-        ar, state, model_path = self._patch_common(monkeypatch, tmp_path)
+        ar, state, model_path, record_promo, reload_mock = self._patch_common(
+            monkeypatch, tmp_path
+        )
         # Sin baseline (primer modelo): gate exige solo validez (P1-1).
         monkeypatch.setattr(ar, "_evaluate_model", self._fake_metrics)
 
@@ -431,6 +437,12 @@ class TestDoRetrainPromotion:
         assert report["holdout"]["candidate"]["reward"] > 0   # congelado reportado
         assert report["fold_wins"] is None                    # sin baseline
 
+        # P1-2: historial en model_registry + hot-reload del bundle en memoria.
+        record_promo.assert_awaited_once()
+        assert record_promo.await_args.args[0]["model_sha256"] == manifest["model_sha256"]
+        assert record_promo.await_args.args[1]["reason"] == "first_model_validated"
+        reload_mock.assert_called_once()
+
         # Contador de ciclo reiniciado: los próximos N cierres cuentan para el
         # siguiente retrain (antes: filled_count nunca se reseteaba → storm).
         assert state.filled_count == 0
@@ -449,7 +461,7 @@ class TestDoRetrainPromotion:
         tmp_model = tmp_path / "ppo_trading_bot_v3.zip"
         shutil.copy(real_zip, tmp_model)
 
-        ar, state, model_path = self._patch_common(
+        ar, state, model_path, record_promo, reload_mock = self._patch_common(
             monkeypatch, tmp_path, model_path=str(tmp_model)
         )
         # Mismas métricas para candidato y baseline → empate → gate falla.
@@ -457,10 +469,12 @@ class TestDoRetrainPromotion:
 
         await ar._do_retrain()
 
-        # Bundle activo intacto: ni manifest nuevo ni reset de ciclo.
+        # Bundle activo intacto: ni manifest nuevo, ni registro, ni recarga.
         assert not os.path.exists(str(tmp_path / "ppo_trading_bot_v3.manifest.json"))
         assert state.filled_count == 7
         assert state.last_retrain_time == 1.0
+        record_promo.assert_not_awaited()
+        reload_mock.assert_not_called()
 
         ar._log_retrain_event.assert_awaited_once()
         assert ar._log_retrain_event.await_args.args[0] == "retrain_rejected"

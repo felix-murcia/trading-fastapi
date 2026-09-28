@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import time
+from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
@@ -83,6 +84,7 @@ def _veto_reason(original: str, final: str, qwen: dict) -> str | None:
 # Estado en memoria para inferencia rápida
 _CACHED_MODEL: Optional[PPO] = None
 _CACHED_VEC_NORM: Optional[VecNormalize] = None
+_CACHED_BUNDLE: dict = {}   # P1-2: procedencia del bundle EN MEMORIA (sha, source, loaded_at)
 
 
 def load_inference_artifacts():
@@ -91,30 +93,60 @@ def load_inference_artifacts():
     Cualquier incoherencia (manifest ausente, hash distinto, obs_shape distinto)
     lanza RuntimeError y detiene el arranque: nunca se sirve un binario sin
     certificar ni se degrada en silencio.
+
+    El swap de la caché es ATÓMICO (se asigna al final): si la validación o la
+    carga de VecNormalize fallan, se mantiene íntegro el bundle anterior — nunca
+    un estado mitad nuevo, mitad viejo.
     """
-    global _CACHED_MODEL, _CACHED_VEC_NORM
+    global _CACHED_MODEL, _CACHED_VEC_NORM, _CACHED_BUNDLE
     from services.model_registry import assert_obs_shape, validate_bundle
 
     manifest = validate_bundle(MODEL_V3_PATH)
-    _CACHED_MODEL = PPO.load(MODEL_V3_PATH, device="cpu")
+    model = PPO.load(MODEL_V3_PATH, device="cpu")
     logger.info("[AI-STARTUP] Modelo PPO v3 cargado en memoria exitosamente.")
 
-    obs_space = getattr(_CACHED_MODEL, "observation_space", None)
+    obs_space = getattr(model, "observation_space", None)
     assert_obs_shape(manifest, getattr(obs_space, "shape", None))
 
     vec_norm_file = manifest.get("vec_norm_file")
     if vec_norm_file:
         vec_path = os.path.join(os.path.dirname(MODEL_V3_PATH), vec_norm_file)
-        dummy_env = DummyVecEnv([lambda: _DummyEnv(obs_space, _CACHED_MODEL.action_space)])
-        _CACHED_VEC_NORM = VecNormalize.load(vec_path, dummy_env)
-        _CACHED_VEC_NORM.training = False
-        _CACHED_VEC_NORM.norm_reward = False
+        dummy_env = DummyVecEnv([lambda: _DummyEnv(obs_space, model.action_space)])
+        vec_norm = VecNormalize.load(vec_path, dummy_env)
+        vec_norm.training = False
+        vec_norm.norm_reward = False
         logger.info("[AI-STARTUP] Estadísticas de VecNormalize cargadas (hash verificado).")
     else:
-        _CACHED_VEC_NORM = None
+        vec_norm = None
         logger.warning(
             "[AI-STARTUP] Bundle certificado SIN normalización — inferencia en crudo (declarado en manifest)."
         )
+
+    # Swap atómico al final: solo aquí deja de valer el bundle anterior.
+    _CACHED_MODEL = model
+    _CACHED_VEC_NORM = vec_norm
+    _CACHED_BUNDLE = {
+        "model_sha256": manifest["model_sha256"],
+        "vec_norm_sha256": manifest.get("vec_norm_sha256"),
+        "source": manifest["source"],
+        "loaded_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def reload_inference_artifacts() -> dict:
+    """P1-2: hot-reload del bundle tras una promoción, sin reiniciar el proceso.
+
+    Valida el bundle nuevo ANTES de tocar la caché: si falla, la excepción se
+    propaga (el done-callback del retrain emite alerta) y se sigue sirviendo el
+    bundle anterior — nunca un swap parcial ni degradación silenciosa.
+    """
+    load_inference_artifacts()
+    logger.warning(
+        "[AI-RELOAD] Bundle recargado en memoria: source=%s sha=%s…",
+        _CACHED_BUNDLE.get("source"),
+        str(_CACHED_BUNDLE.get("model_sha256"))[:12],
+    )
+    return dict(_CACHED_BUNDLE)
 
 
 @router.on_event("startup")
@@ -450,6 +482,33 @@ async def approve_retrain_endpoint(_: None = Depends(verify_token)):
         },
     )
     return result
+
+
+@router.get("/model/status")
+async def model_status(_: None = Depends(verify_token)):
+    """P1-2: qué bundle corre EN MEMORIA vs qué certifica EL DISCO (in_sync).
+
+    `in_sync=false` = hubo una promoción que no se recargó (o un cambio en disco
+    no certificado): el operador ve de inmediato disco ≠ memoria.
+    """
+    from services.model_registry import load_manifest
+
+    disk = load_manifest(MODEL_V3_PATH)  # RuntimeError si no está certificado
+    memory = dict(_CACHED_BUNDLE)
+    in_sync = (
+        memory.get("model_sha256") == disk["model_sha256"]
+        and memory.get("vec_norm_sha256") == disk.get("vec_norm_sha256")
+    )
+    return {
+        "memory": memory,
+        "disk": {
+            "model_sha256": disk["model_sha256"],
+            "vec_norm_sha256": disk.get("vec_norm_sha256"),
+            "source": disk["source"],
+            "created_at": disk.get("created_at"),
+        },
+        "in_sync": in_sync,
+    }
 
 
 @router.get("/retrain/status")
