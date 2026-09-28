@@ -193,16 +193,20 @@ confidence: how certain you are (0-1)
 regime: market regime at time of entry (TRENDING/RANGING/VOLATILE/BREAKOUT)
 quality_score: how good was the original setup (0-10)"""
 
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        res = await client.post(QWEN_URL, json={
-            "messages": [
-                {"role": "system", "content": "You are a quantitative trading analyst. Always respond in valid JSON."},
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": 0.2,
-            "max_tokens": 100,
-            "response_format": {"type": "json_object"},
-        })
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            res = await client.post(QWEN_URL, json={
+                "messages": [
+                    {"role": "system", "content": "You are a quantitative trading analyst. Always respond in valid JSON."},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.2,
+                "max_tokens": 100,
+                "response_format": {"type": "json_object"},
+            })
+    except (httpx.ConnectTimeout, httpx.TimeoutException, httpx.HTTPError) as exc:
+        logger.warning("[JOURNAL] QWEN-INSIGHT conexión fallida: %s", exc)
+        raise RuntimeError(f"[JOURNAL] QWEN-INSIGHT conexión fallida: {exc}") from exc
 
     if res.status_code == 200:
         content = res.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()

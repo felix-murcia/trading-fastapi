@@ -57,7 +57,7 @@ MODEL_V3_PATH = os.path.join(MODEL_DIR, "ppo_trading_bot_v3.zip")
 VEC_NORM_PATH = os.path.join(MODEL_DIR, "ppo_trading_bot_v3_vec_norm.pkl")
 QWEN_URL = getattr(settings, "qwen_url", "http://100.90.16.33:8080/v1/chat/completions")
 
-QUALITY_THRESHOLD = 6.0
+QUALITY_THRESHOLD = 5.0
 RANGING_VETO = True
 SL_MIN_NORM = 0.05
 SL_MAX_NORM = 0.30
@@ -230,16 +230,29 @@ Fields: quality 0-10; reason max 12 words; bias BULLISH/BEARISH/NEUTRAL;
 confidence_modifier 0.5-1.5; sl_ok/tp_ok booleans; adjusted SL 0.15-0.30,
 TP 0.125-0.30 with TP:SL >=1.5; regime TRENDING/RANGING/VOLATILE/BREAKOUT."""
 
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        res = await client.post(QWEN_URL, json={
-            "messages": [
-                {"role": "system", "content": "You are a quantitative trading analyst. Always respond in valid JSON."},
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": 0.2,
-            "max_tokens": 160,
-            "response_format": {"type": "json_object"},  # Forzar JSON válido
-        })
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            res = await client.post(QWEN_URL, json={
+                "messages": [
+                    {"role": "system", "content": "You are a quantitative trading analyst. Always respond in valid JSON."},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.2,
+                "max_tokens": 160,
+                "response_format": {"type": "json_object"},  # Forzar JSON válido
+            })
+    except (httpx.ConnectTimeout, httpx.TimeoutException, httpx.HTTPError) as exc:
+        logger.warning("[%s] QWEN-UNIFIED conexión fallida: %s", cycle_id, repr(exc))
+        return {
+            "quality": 5.0,
+            "reason": "Qwen unavailable",
+            "bias": "NEUTRAL",
+            "confidence_modifier": 1.0,
+            "effective_prob": float(ml_prob),
+            "sl_adjusted": float(sl_proposed),
+            "tp_adjusted": float(tp_proposed),
+            "regime": regime,
+        }
 
     if res.status_code == 200:
         content = res.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
@@ -357,16 +370,20 @@ Reply EXACTLY JSON (no extra text):
 {{"sl_ok": true/false, "tp_ok": true/false, "sl_adjusted": 0.20, "tp_adjusted": 0.28, "reason": "brief"}}
 If both are OK, return the same values. If adjustment needed, propose sensible ones."""
 
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        res = await client.post(QWEN_URL, json={
-            "messages": [
-                {"role": "system", "content": "You are a quantitative risk analyst. Always respond in valid JSON."},
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": 0.15,
-            "max_tokens": 150,
-            "response_format": {"type": "json_object"},
-        })
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            res = await client.post(QWEN_URL, json={
+                "messages": [
+                    {"role": "system", "content": "You are a quantitative risk analyst. Always respond in valid JSON."},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.15,
+                "max_tokens": 150,
+                "response_format": {"type": "json_object"},
+            })
+    except (httpx.ConnectTimeout, httpx.TimeoutException, httpx.HTTPError) as exc:
+        logger.warning("[%s] SLTP-VALIDATOR conexión fallida: %s", cycle_id, exc)
+        return float(sl_proposed), float(tp_proposed), "Qwen unavailable"
 
     if res.status_code == 200:
         content = res.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
@@ -449,7 +466,7 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
                 timeout=2.0,
             )
             candles_task = client.get(
-                f"{settings.mt5_http_url}/api/v1/market/candles/latest?symbol_name={req.symbol}&timeframe={req.timeframe}&count=120",
+                f"{settings.mt5_http_url}/api/v1/market/candles/latest?symbol_name={req.symbol}&timeframe=H1&count=120",
                 timeout=3.0,
             )
             equity_res, candles_res = await asyncio.gather(equity_task, candles_task)
@@ -574,8 +591,9 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
 
     final_decision = decision
     if RANGING_VETO and qwen.get("regime") == "RANGING" and final_decision in ("BUY", "SELL"):
-        logger.warning("[%s] VETO RANGING ║ Régimen lateral detectado → HOLD", cycle_id)
-        final_decision = "HOLD"
+        if qwen.get("quality", 0) < QUALITY_THRESHOLD or qwen.get("effective_prob", 0) < 0.35:
+            logger.warning("[%s] VETO RANGING ║ Régimen lateral + calidad/prob baja → HOLD", cycle_id)
+            final_decision = "HOLD"
     elif qwen["quality"] < QUALITY_THRESHOLD and final_decision in ("BUY", "SELL"):
         logger.warning("[%s] VETO CALIDAD ║ Score %.1f < %.1f → HOLD", cycle_id, qwen["quality"], QUALITY_THRESHOLD)
         final_decision = "HOLD"
@@ -755,7 +773,7 @@ class TradeFilledRequest(BaseModel):
     direction: str   # "LONG", "SHORT", "BUY", "SELL"
     sl_hit: bool
     tp_hit: bool
-    exit_reason: str  # "sl", "tp", "manual", "news", "signal_end"
+    exit_reason: str  # "sl", "tp", "manual", "news", "signal_end", "ea"
     deal_ticket: int | str | None = None
     position_id: int | str | None = None
 

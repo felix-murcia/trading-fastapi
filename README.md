@@ -972,3 +972,78 @@ Ahora, si las Bandas de Bollinger son inválidas o el ratio es insuficiente, el 
 - `2026.09.14 12:58:19.085 [AI Terminal] Webhook HTTP res=200`
 - `2026.09.14 12:58:19.085 [AI Terminal] Cierre reportado exitosamente. Ticket=58063195488 PnL=-0.61`
 - `trade_outcomes` actualizada en tiempo real tras cada cierre.
+
+## Troubleshooting — Sesión 2026-09-24
+
+### O. Timeframe de inferencia vs. disparo del EA
+
+**Cambio aplicado:** El EA ahora consulta al backend cada **5 minutos** (`M5`) en vez de cada hora (`H1`) para detectar oportunidades antes. Sin embargo, el backend sigue solicitando velas **H1** al MT5 MCP para mantener la consistencia con el modelo PPO v3, que fue entrenado con velas H1.
+
+**Archivos editados:**
+- `mql5/AI_Quant_Terminal_v3.mq5` — `OnTick()` ahora usa `PERIOD_M5` como disparador de ciclo y envía `timeframe=M5` en el payload.
+- `fastapi/routers/ai.py` — el parámetro `timeframe` del request se usa para logging/telemetría, pero la consulta de velas al MT5 MCP se fuerza a `H1` para que las features del modelo sigan siendo consistentes.
+
+**Comportamiento resultante:**
+- EA revisa el mercado cada 5 minutos.
+- Backend recibe `timeframe=M5`, ignora ese valor para features y pide velas H1 al MT5 MCP.
+- Modelo PPO v3 sigue recibiendo features H1 sin necesidad de reentrenamiento.
+
+### P. Endpoint `/trade/filled` tolerante a payloads del EA
+
+**Cambios aplicados:**
+- `TradeFilledRequest` ahora acepta `entry_time`/`exit_time` como `float | str`, y tolera `entry_time=0` o timestamps iguales.
+- Se añadió mapeo de dirección `BUY→LONG`, `SELL→SHORT`, `LONG→LONG`, `SHORT→SHORT`.
+- `pnl`/`pnl_pct` se convierten a `float` si llegan como string.
+- La constraint de BD incluye ahora `'ea'` como `exit_reason`.
+
+**Archivos editados:**
+- `fastapi/routers/ai.py`
+- `fastapi/db/schema.sql`
+
+### Q. Estado del auto-retrain persistido en PostgreSQL
+
+**Problema:** El estado del auto-retrain (`filled_count`, `last_retrain_time`, `retrain_in_progress`) vivía en memoria. Reiniciar el contenedor lo perdía, dejando el contador en 1 y bloqueando el trigger de retrain.
+
+**Solución:** El estado ahora se carga y guarda en la tabla `retrain_state` de PostgreSQL. Al reiniciar, el contador se recupera desde `trade_outcomes` si viene vacío.
+
+**Archivos editados:**
+- `fastapi/services/auto_retrain.py`
+
+### R. Qwen no disponible no rompe `/predict`
+
+**Cambio aplicado:** Si Qwen no alcanza el timeout de 20s, `_query_qwen_unified()` y `_query_qwen_sltp_validator()` devuelven defaults seguros (`NEUTRAL`, `quality=5.0`, SL/TP sin modificar) y loguean el error. Esto evita HTTP 500 por caídas de red/Tailscale.
+
+**Archivos editados:**
+- `fastapi/routers/ai.py`
+- `fastapi/services/trade_journal.py`
+
+### S. Validación de volumen mínimo para cierres manuales del EA
+
+**Cambio aplicado:** El EA ahora bloquea ejecutar `CloseAllPositions()` cuando el backend devuelve `CLOSE` si el volumen total de sus posiciones es menor a `0.03` lotes. Solo se permiten cierres automáticos por SL/TP o cierres manuales del EA para posiciones con volumen suficiente.
+
+**Archivos editados:**
+- `mql5/AI_Quant_Terminal_v3.mq5`
+
+### T. Clasificación de cierres del EA
+
+**Cambio aplicado:** El EA distingue cierres por EA (`exit_reason="ea"`) de cierres manuales (`exit_reason="manual"`), usando `DEAL_REASON_EXPERT` o el comentario `AI-Predict`.
+
+**Archivos editados:**
+- `mql5/AI_Quant_Terminal_v3.mq5`
+- `fastapi/routers/ai.py`
+- `fastapi/db/schema.sql`
+
+### U. Backup a GCS no bloqueante
+
+**Cambio aplicado:** Si no hay credenciales de Google Cloud, `upload_model()` devuelve un dict de error estructurado en vez de propagar la excepción. El retrain ya no depende del éxito del backup para completarse.
+
+**Archivos editados:**
+- `fastapi/services/model_backup.py`
+- `fastapi/services/auto_retrain.py`
+
+### V. Trailing Stop respeta `SYMBOL_TRADE_STOPS_LEVEL`
+
+**Cambio aplicado:** `ManageTrailingStop()` ahora consulta el stops level del broker y valida la distancia mínima antes de llamar a `PositionModify()`, evitando errores `invalid stops` en MT5.
+
+**Archivos editados:**
+- `mql5/AI_Quant_Terminal_v3.mq5`

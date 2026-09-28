@@ -138,8 +138,8 @@ void OnTick()
    if(EnableTrailing)
       ManageTrailingStop();
 
-   // Ejecutar exclusivamente en la apertura de una nueva barra
-   datetime currentBar = iTime(Symbol(), PERIOD_H1, 0);
+   // Ejecutar exclusivamente en la apertura de una nueva barra M5
+   datetime currentBar = iTime(Symbol(), PERIOD_M5, 0);
    if(currentBar == lastCheckedBar) return;
    lastCheckedBar = currentBar;
 
@@ -170,16 +170,16 @@ void OnTick()
          currentTP  = PositionGetDouble(POSITION_TP);
          datetime pTime = (datetime)PositionGetInteger(POSITION_TIME);
          if(pTime > 0)
-            stepsInTrade = (int)((TimeCurrent() - pTime) / PeriodSeconds(PERIOD_H1));
+            stepsInTrade = (int)((TimeCurrent() - pTime) / PeriodSeconds(PERIOD_M5));
         }
      }
 
-    // Construcción del payload extendido
-    double mt5_now = (double)TimeCurrent();
-    string body = StringFormat(
-       "{\"symbol\":\"%s\",\"timeframe\":\"H1\",\"position\":%d,\"entry_price\":%.5f,\"sl_price\":%.5f,\"tp_price\":%.5f,\"steps_in_trade\":%d,\"mt5_time\":%.3f}",
-       Symbol(), currentPos, entryPrice, currentSL, currentTP, stepsInTrade, mt5_now
-    );
+     // Construcción del payload extendido
+     double mt5_now = (double)TimeCurrent();
+     string body = StringFormat(
+        "{\"symbol\":\"%s\",\"timeframe\":\"M5\",\"position\":%d,\"entry_price\":%.5f,\"sl_price\":%.5f,\"tp_price\":%.5f,\"steps_in_trade\":%d,\"mt5_time\":%.3f}",
+        Symbol(), currentPos, entryPrice, currentSL, currentTP, stepsInTrade, mt5_now
+     );
 
    // 2. LLAMADA AL CEREBRO
    char postData[], resultArr[];
@@ -217,14 +217,28 @@ void OnTick()
     // 3. EJECUCIÓN PURA DE LA ORDEN (Actuador)
     string decision = GetJsonValue(r, "decision");
 
-    // A. Si la decisión es cerrar
-    if(decision == "CLOSE")
-      {
-       Print("[AI Terminal] Orden de CIERRE ejecutada por el Cerebro.");
-       CloseAllPositions();
-       ReportEADecision(cycle_id, decision, "close", r);
-       return;
-      }
+     // A. Si la decisión es cerrar
+     if(decision == "CLOSE")
+       {
+        double totalEAVolume = 0.0;
+        for(int i = PositionsTotal() - 1; i >= 0; i--)
+          {
+           ulong t = PositionGetTicket(i);
+           if(t <= 0) continue;
+           if(PositionGetString(POSITION_SYMBOL) == Symbol() && PositionGetInteger(POSITION_MAGIC) == MagicNumber)
+              totalEAVolume += PositionGetDouble(POSITION_VOLUME);
+          }
+        if(totalEAVolume < 0.03)
+          {
+           PrintFormat("[AI Terminal] CLOSE bloqueado: volumen EA %.2f < minimo 0.03", totalEAVolume);
+           ReportEADecision(cycle_id, decision, "hold", r);
+           return;
+          }
+        Print("[AI Terminal] Orden de CIERRE ejecutada por el Cerebro.");
+        CloseAllPositions();
+        ReportEADecision(cycle_id, decision, "close", r);
+        return;
+       }
 
     // B. Si la decisión es mantener
     if(decision == "HOLD")
@@ -377,20 +391,9 @@ void ManageTrailingStop()
 
    if(ticket == 0 || posType < 0) return;
 
-   if(currentSL <= 0)
-     {
-      PrintFormat("[TRAILING] SL inicial no válido (%.5f). Se requiere SL colocado por el EA.", currentSL);
-      return;
-     }
-
-    if(posType == POSITION_TYPE_BUY && currentSL >= openPrice)
+    if(currentSL <= 0)
       {
-       PrintFormat("[TRAILING] SL inválido para BUY (sl=%.5f >= entry=%.5f).", currentSL, openPrice);
-       return;
-      }
-    if(posType == POSITION_TYPE_SELL && currentSL <= openPrice)
-      {
-       PrintFormat("[TRAILING] SL inválido para SELL (sl=%.5f <= entry=%.5f).", currentSL, openPrice);
+       PrintFormat("[TRAILING] SL inicial no válido (%.5f). Se requiere SL colocado por el EA.", currentSL);
        return;
       }
 
@@ -567,22 +570,26 @@ void CloseAllPositions()
     bool isBuy = (openingType == DEAL_TYPE_BUY);
     string direction = isBuy ? "LONG" : "SHORT";
 
-    // Clasificar razón de salida por propiedad DEAL_REASON nativa
-    long dealReason = HistoryDealGetInteger(dealTicket, DEAL_REASON);
-    string comment  = HistoryDealGetString(dealTicket, DEAL_COMMENT);
-    string exitReason = "manual";
-    bool slHit = false, tpHit = false;
+     // Clasificar razón de salida por propiedad DEAL_REASON nativa
+     long dealReason = HistoryDealGetInteger(dealTicket, DEAL_REASON);
+     string comment  = HistoryDealGetString(dealTicket, DEAL_COMMENT);
+     string exitReason = "manual";
+     bool slHit = false, tpHit = false;
 
-    if(dealReason == DEAL_REASON_SL || StringFind(comment, "sl") >= 0)
-      {
-       slHit = true;
-       exitReason = "sl";
-      }
-    else if(dealReason == DEAL_REASON_TP || StringFind(comment, "tp") >= 0)
-      {
-       tpHit = true;
-       exitReason = "tp";
-      }
+     if(dealReason == DEAL_REASON_SL || StringFind(comment, "sl") >= 0)
+       {
+        slHit = true;
+        exitReason = "sl";
+       }
+     else if(dealReason == DEAL_REASON_TP || StringFind(comment, "tp") >= 0)
+       {
+        tpHit = true;
+        exitReason = "tp";
+       }
+     else if(dealReason == DEAL_REASON_EXPERT || StringFind(comment, "AI-Predict") >= 0)
+       {
+        exitReason = "ea";
+       }
 
     // PnL porcentual exacto sobre variación del precio subyacente
     double pnlPct = 0.0;

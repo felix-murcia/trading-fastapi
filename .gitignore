@@ -23,3 +23,14 @@ mt5_templates/
 *.ex4
 .venv/
 doc/
+.pytest_cache/
+.kilo/
+AGENTS.md
+.harness-memory/
+.omo/
+.opencode/
+node_modules/
+package-lock.json
+package.json
+opencode.json
+*.zip

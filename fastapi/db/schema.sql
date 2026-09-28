@@ -71,7 +71,7 @@ CREATE TABLE IF NOT EXISTS trade_outcomes (
     exit_time    TIMESTAMPTZ NOT NULL,
     pnl          NUMERIC(12,4) NOT NULL,
     pnl_pct      NUMERIC(8,4) NOT NULL,
-    exit_reason  TEXT NOT NULL CHECK (exit_reason IN ('sl', 'tp', 'manual', 'news', 'signal_end')),
+    exit_reason  TEXT NOT NULL CHECK (exit_reason IN ('sl', 'tp', 'manual', 'news', 'signal_end', 'ea')),
     sl_hit      BOOLEAN NOT NULL DEFAULT FALSE,
     tp_hit      BOOLEAN NOT NULL DEFAULT FALSE,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
