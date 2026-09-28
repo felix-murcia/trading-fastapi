@@ -1,26 +1,201 @@
 {
-  "created_at": "2026-09-28T18:48:51.711887+00:00",
+  "created_at": "2026-09-28T22:46:05.098802+00:00",
   "extra": {
-    "baseline_metrics": {
-      "closed_trades": 0,
-      "losses": 0,
-      "openings": 1,
-      "reward": -19.519786062650383,
-      "win_rate": 0.0,
-      "wins": 0
+    "gate": {
+      "ok": true,
+      "reason": "walk_forward_improved"
     },
-    "candidate_metrics": {
-      "closed_trades": 0,
-      "losses": 0,
-      "openings": 1,
-      "reward": -12.939636895433068,
-      "win_rate": 0.0,
-      "wins": 0
+    "walk_forward": {
+      "baseline": {
+        "mean_sharpe": -9.44819327716078,
+        "mean_sortino": -9.034522049546968,
+        "n_steps": 72,
+        "sum_reward": -22.499836226925254,
+        "total_expectancy": -42.84072112972003,
+        "total_openings": 4,
+        "total_trades": 27,
+        "worst_max_dd": 0.21926928954906616
+      },
+      "candidate": {
+        "mean_sharpe": -4.835522486743504,
+        "mean_sortino": 3.2697683615485245,
+        "n_steps": 72,
+        "sum_reward": -3.2710926776053384,
+        "total_expectancy": -14.823727464929577,
+        "total_openings": 3,
+        "total_trades": 18,
+        "worst_max_dd": 0.10344697338736511
+      },
+      "embargo_bars": 20,
+      "fold_wins": 3,
+      "folds": [
+        {
+          "bars": 19,
+          "baseline": {
+            "expectancy": -21.250125000000423,
+            "final_equity": 957.4997499999992,
+            "losses": 1,
+            "max_dd": 0.10680989304150218,
+            "n_steps": 18,
+            "openings": 1,
+            "reward": -4.2530824119457975,
+            "sharpe": -8.432283059266517,
+            "sortino": -15.830000685991246,
+            "trades": 2,
+            "win_rate": 0.5,
+            "wins": 1
+          },
+          "candidate": {
+            "expectancy": 0.0,
+            "final_equity": 1033.4999499999974,
+            "losses": 0,
+            "max_dd": 0.060167913254101285,
+            "n_steps": 18,
+            "openings": 1,
+            "reward": 3.3489949529757723,
+            "sharpe": 8.29449609219637,
+            "sortino": 13.53092679452875,
+            "trades": 0,
+            "win_rate": 0.0,
+            "wins": 0
+          },
+          "fold": 0
+        },
+        {
+          "bars": 19,
+          "baseline": {
+            "expectancy": -24.15922907146382,
+            "final_equity": 831.3853964997566,
+            "losses": 7,
+            "max_dd": 0.18311456265597773,
+            "n_steps": 18,
+            "openings": 1,
+            "reward": -16.875378630124032,
+            "sharpe": -32.682367364602136,
+            "sortino": -39.60694990463752,
+            "trades": 7,
+            "win_rate": 0.0,
+            "wins": 0
+          },
+          "candidate": {
+            "expectancy": 12.715834439205196,
+            "final_equity": 1076.2950066352312,
+            "losses": 3,
+            "max_dd": 0.04774592793707096,
+            "n_steps": 18,
+            "openings": 1,
+            "reward": 7.6238818215206265,
+            "sharpe": 15.009372079780862,
+            "sortino": 39.182340323951905,
+            "trades": 6,
+            "win_rate": 0.5,
+            "wins": 3
+          },
+          "fold": 1
+        },
+        {
+          "bars": 19,
+          "baseline": {
+            "expectancy": -7.867987585780239,
+            "final_equity": 913.4521365564174,
+            "losses": 8,
+            "max_dd": 0.21926928954906616,
+            "n_steps": 18,
+            "openings": 1,
+            "reward": -8.670077270478942,
+            "sharpe": -8.495205419461138,
+            "sortino": -14.217583637610355,
+            "trades": 11,
+            "win_rate": 0.2727272727272727,
+            "wins": 3
+          },
+          "candidate": {
+            "expectancy": -7.090161967841839,
+            "final_equity": 959.8688662251027,
+            "losses": 5,
+            "max_dd": 0.08922405862694784,
+            "n_steps": 18,
+            "openings": 0,
+            "reward": -4.019405992992688,
+            "sharpe": -6.482761542108327,
+            "sortino": -7.76735889819727,
+            "trades": 7,
+            "win_rate": 0.2857142857142857,
+            "wins": 2
+          },
+          "fold": 2
+        },
+        {
+          "bars": 19,
+          "baseline": {
+            "expectancy": 10.436620527524449,
+            "final_equity": 1073.0563436926711,
+            "losses": 6,
+            "max_dd": 0.04084448769619401,
+            "n_steps": 18,
+            "openings": 1,
+            "reward": 7.298702085623518,
+            "sharpe": 11.817082734686673,
+            "sortino": 33.51644603005124,
+            "trades": 7,
+            "win_rate": 0.14285714285714285,
+            "wins": 1
+          },
+          "candidate": {
+            "expectancy": -20.449399936292934,
+            "final_equity": 897.7830003185353,
+            "losses": 5,
+            "max_dd": 0.10344697338736511,
+            "n_steps": 18,
+            "openings": 1,
+            "reward": -10.22456345910905,
+            "sharpe": -36.16319657684292,
+            "sortino": -31.866834774089288,
+            "trades": 5,
+            "win_rate": 0.0,
+            "wins": 0
+          },
+          "fold": 3
+        }
+      ],
+      "holdout": {
+        "bars": 49,
+        "baseline": {
+          "expectancy": -19.888369175192306,
+          "final_equity": 482.902401445,
+          "losses": 21,
+          "max_dd": 0.523999509984124,
+          "n_steps": 46,
+          "openings": 2,
+          "reward": -51.74989527836442,
+          "sharpe": -37.58166914589816,
+          "sortino": -43.76268642793521,
+          "trades": 26,
+          "win_rate": 0.19230769230769232,
+          "wins": 5
+        },
+        "candidate": {
+          "expectancy": -10.22674738746197,
+          "final_equity": 837.0520418006085,
+          "losses": 11,
+          "max_dd": 0.1849045168313928,
+          "n_steps": 48,
+          "openings": 3,
+          "reward": -16.307492781284964,
+          "sharpe": -17.608380912376937,
+          "sortino": -18.537130659645303,
+          "trades": 16,
+          "win_rate": 0.3125,
+          "wins": 5
+        }
+      },
+      "n_folds": 4,
+      "train_bars": 336
     }
   },
   "features": null,
   "model_file": "ppo_trading_bot_v3.zip",
-  "model_sha256": "2c84c90354573e105c4639d94db7f6ee642232f37b6408ffab29530523158c65",
+  "model_sha256": "fb314a379a03769832232045e9eaff075e52f03cd74ca13b943449eae86b2d8b",
   "obs_shape": [
     20,
     24
@@ -28,5 +203,5 @@
   "schema_version": 1,
   "source": "auto_retrain_normalized",
   "vec_norm_file": "ppo_trading_bot_v3_vec_norm.pkl",
-  "vec_norm_sha256": "1d73560efb6fe7773fe28fc89dffb14c8b92cfb1bbc1200262c3062fd0914f56"
+  "vec_norm_sha256": "56a8a41c98060783ec82ba7c02e33c4ab95db2b67a2a6151ec5cbf44e7f7ecac"
 }
