@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import numpy as np
 import pandas as pd
 from fastapi.testclient import TestClient
@@ -65,6 +66,13 @@ class FakeAsyncClient:
         return response
 
 
+class ConnectTimeoutAsyncClient(FakeAsyncClient):
+    """MT5 inaccesible: cualquier GET lanza ConnectTimeout."""
+
+    async def get(self, url, **kwargs):
+        raise httpx.ConnectTimeout("MT5 down (test)")
+
+
 def _build_candles():
     candles = []
     base = 1.1000
@@ -90,7 +98,7 @@ def _build_candles():
 def test_ai_predict_e2e_flow():
     model = MagicMock()
     model.predict.return_value = (np.array([0.80, 0.18, 0.15, 0.15], dtype=np.float32), None)
-    model.observation_space.shape = (10, 21)
+    model.observation_space.shape = (20, 24)
 
     dist = MagicMock()
     dist.distribution.mean.numpy.return_value = np.array([0.1, 0.1, 0.1, 0.1], dtype=np.float32)
@@ -125,8 +133,30 @@ def test_ai_predict_e2e_flow():
             assert payload["tp_pips"] == payload["sl_pips"] * 2.0
 
 
+def test_predict_mt5_down_returns_ok_hold_with_cycle_id():
+    """P0-2: con MT5 caído, /predict debe devolver 200 + HOLD + cycle_id (nunca 500)."""
+    with patch("main.init_pool", AsyncMock()), \
+         patch("main.close_pool", AsyncMock()), \
+         patch("routers.ai.get_pool", return_value=MagicMock(execute=AsyncMock())), \
+         patch("routers.ai.load_inference_artifacts"), \
+         patch("httpx.AsyncClient", ConnectTimeoutAsyncClient):
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/ai/predict",
+                json={"symbol": "EURUSD", "timeframe": "H1", "position": 0},
+                headers={"x-internal-token": "test-token", "x-cycle-id": "e2e-mt5-down"},
+            )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["decision"] == "HOLD"
+    assert payload["llm_bias"] == "ERROR"
+    assert payload["cycle_id"]
+
+
 def test_ea_backend_predict_contract_fields_are_aligned():
     payload = PredictResponse(
+        cycle_id="contract-test",
         ml_prob=0.5,
         llm_bias="NEUTRAL",
         decision="HOLD",
@@ -141,6 +171,7 @@ def test_ea_backend_predict_contract_fields_are_aligned():
         regime="TRENDING",
     )
 
+    assert payload.cycle_id == "contract-test"
     assert payload.volume is not None
     assert payload.sl_pips is not None
     assert payload.tp_pips is not None

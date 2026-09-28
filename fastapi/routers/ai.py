@@ -213,20 +213,20 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             equity_res, candles_res = await asyncio.gather(equity_task, candles_task)
     except (httpx.ConnectTimeout, httpx.TimeoutException, httpx.HTTPError) as exc:
         logger.warning("[%s] MT5 connection error in predict: %s", cycle_id, exc)
-        return PredictResponse(ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
+        return PredictResponse(cycle_id=cycle_id, ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
 
     if equity_res.status_code == 200:
         equity_val = equity_res.json().get("equity", 0.0)
 
     if candles_res.status_code != 200:
         logger.warning("[%s] candles HTTP %s from MT5", cycle_id, candles_res.status_code)
-        return PredictResponse(ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
+        return PredictResponse(cycle_id=cycle_id, ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
     data = candles_res.json()
     candles = data if isinstance(data, list) else data.get("candles", [])
 
     raw_df = pd.DataFrame(candles)
     if raw_df.empty or len(raw_df) < 30:
-        return PredictResponse(ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
+        return PredictResponse(cycle_id=cycle_id, ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
 
     df = engineer_market_features(raw_df)
     features_list = get_market_features(df)
@@ -236,7 +236,7 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         load_inference_artifacts()
     if _CACHED_MODEL is None:
         logger.error("[%s] No hay modelo PPO disponible.", cycle_id)
-        return PredictResponse(ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
+        return PredictResponse(cycle_id=cycle_id, ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
 
     current_price = float(df['close'].iloc[-1])
     current_atr = float(df['atr'].iloc[-1]) if 'atr' in df.columns else 0.0001

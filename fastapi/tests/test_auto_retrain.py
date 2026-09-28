@@ -71,7 +71,7 @@ class TestRetrainConfig:
         assert config.trades_before_retrain == 10
         assert config.min_trades_for_retrain == 5
         assert config.lookback_candles == 500
-        assert config.retrain_window_size == 10
+        assert config.retrain_window_size == 20
         assert config.initial_balance == 1000.0
         assert config.n_epochs == 3
 

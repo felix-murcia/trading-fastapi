@@ -1084,3 +1084,22 @@ Ahora, si las Bandas de Bollinger son inválidas o el ratio es insuficiente, el 
 
 **Archivos movidos:**
 - `fastapi/ml/train_ppo_v2.py` → `fastapi/ml/archive/train_ppo_v2.py`
+
+### X. Fix P0-2: `/predict` devolvía 500 con MT5 caído (2026-09-28)
+
+**Síntoma:** Con MT5 inaccesible, `/api/v1/ai/predict` respondía `HTTP 500 Internal Server Error` en lugar del `HOLD` defensivo. El modo degradado (HOLD + telemetría con `cycle_id`) nunca se ejecutaba y el ciclo no quedaba registrado.
+
+**Causa raíz:** `PredictResponse` exige `cycle_id` (sin default) y los 4 returns de error de MT5 lo construían sin ese campo → `pydantic.ValidationError` no capturada → 500. El test `test_ea_backend_predict_contract_fields_are_aligned` lo delataba (estaba entre los 2 failed pre-existentes).
+
+**Fix:**
+- `fastapi/routers/ai.py` — los 4 returns de error incluyen ahora `cycle_id=cycle_id` (reparan modo degradado + telemetría).
+- `tests/test_e2e_ai_predict.py` — contrato con `cycle_id` + aserción; **nuevo test conductual** `test_predict_mt5_down_returns_ok_hold_with_cycle_id` (MT5 simulado caído → 200 + HOLD + ERROR + cycle_id); mock de obs shape `(10,21)` → `(20,24)` (contrato real del artefacto activo, verificado cargando `ppo_trading_bot_v3.zip`).
+- `tests/test_auto_retrain.py` — `retrain_window_size` 10 → 20: el código cambió intencionadamente a 20 en `717c23a` (2026-09-15) y el test quedó desactualizado; 20 coincide con la ventana real del modelo.
+
+**Validación (2026-09-28):** `pytest fastapi/tests/ -q` → **76 passed** (baseline: 73 passed, 2 failed).
+
+**Archivos editados:**
+- `fastapi/routers/ai.py`
+- `fastapi/tests/test_e2e_ai_predict.py`
+- `fastapi/tests/test_auto_retrain.py`
+- `AGENTS.md` (contadores de tests 44 → 76)
