@@ -1,0 +1,184 @@
+"""
+P1-4: tests donde hay dinero — Position Sizing (SL/TP/volumen reales).
+
+Cubren las tres funciones de cálculo con valores numéricos verificados de forma
+independiente (fórmula documentada en el módulo) y las salvaguardas:
+- pip_value por símbolo (majors, base=USD, oro).
+- Suelo de SL (sl_min_pips / sl_min_spread_mult) cuando el ancla está muy cerca.
+- Techo de asequibilidad (sl_risk_usd a la mayor escala min_volume) cuando el
+  ancla está muy lejos → el riesgo NUNCA supera sl_risk_usd por sl amplio.
+- Volumen = riesgo / (sl_pips × pip_value), acotado a [min_volume, max_volume].
+- Dirección: buy → sl < entry < tp; sell → tp < entry < sl.
+- Símbolo no soportado → KeyError (fail-loud, sin fallback silencioso).
+"""
+import math
+
+import pytest
+
+from config import settings
+from services import position_sizing as ps
+
+
+@pytest.fixture(autouse=True)
+def pinned_sizing_settings(monkeypatch):
+    """Fija la config de sizing a los defaults canónicos.
+
+    El `.env` de producción tunea SL_MULT/RR_MIN/SL_MIN_PIPS (p. ej. 1.2/2.5/8.0),
+    lo que cambia el suelo de SL y el volumen: estos tests verifican la FÓRMULA
+    con valores numéricos conocidos, así que deben ser idénticos en host y
+    contenedor — la reacción a la config de despliegue se testea aparte.
+    """
+    for attr, value in {
+        "sl_risk_usd": 15.0,
+        "sl_risk_usd_xauusd": 15.0,
+        "sl_risk_usd_xaueur": 15.0,
+        "sl_mult": 1.5,
+        "sl_pct": 0.001,
+        "rr_min": 1.0,
+        "rr_min_xau": 1.2,
+        "sl_min_spread_mult": 3,
+        "sl_min_pips_default": 3.0,
+        "sl_min_pips_usdjpy": 5.0,
+        "sl_min_pips_xaueur": 10.0,
+        "sl_min_pips_xauusd": 10.0,
+        "min_volume": 0.01,
+        "max_volume": 0.50,
+    }.items():
+        monkeypatch.setattr(settings, attr, value)
+
+
+class TestPipValue:
+    def test_quote_usd_majors_are_flat(self):
+        assert ps.pip_value_per_lot("EURUSD", 1.10) == 10.0
+        assert ps.pip_value_per_lot("GBPUSD", 1.25) == 10.0
+        assert ps.pip_value_per_lot("XAUUSD", 2000.0) == 10.0
+
+    def test_usd_base_scales_with_price(self):
+        assert ps.pip_value_per_lot("USDJPY", 150.0) == pytest.approx(1000.0 / 150.0)
+        assert ps.pip_value_per_lot("USDCAD", 1.35) == pytest.approx(10.0 / 1.35)
+
+    def test_xaueur_applies_eur_cross(self):
+        assert ps.pip_value_per_lot("XAUEUR", 1900.0) == 10.90
+
+
+class TestSupportedSymbols:
+    def test_known_symbols_supported(self):
+        for symbol in ("EURUSD", "USDJPY", "XAUUSD", "XAUEUR"):
+            assert ps.is_supported(symbol) is True
+
+    def test_unknown_symbol_not_supported(self):
+        assert ps.is_supported("BTCUSD") is False
+
+    def test_derive_with_unknown_symbol_fails_loud(self):
+        with pytest.raises(KeyError):
+            ps.derive_order_from_bb("buy", "EURJPY", 160.0, 159.9, 160.2, 0.02)
+
+
+class TestDeriveOrderFromBollinger:
+    def test_buy_numeric_case(self):
+        # EURUSD entry=1.1000, anclas ±50 pips, spread 1.5 pips
+        entry, sl, tp, volume = ps.derive_order_from_bb(
+            "buy", "EURUSD", 1.1000, 1.0950, 1.1100, 0.00015,
+        )
+        pip = 0.0001
+        # base_dist=0.005 (50 pips) > floor max(3×pip, 3×spread)=0.00045 → sin suelo
+        sl_dist = round(0.005 * settings.sl_mult, 5)      # 1.5× → 0.0075
+        sl_pips = sl_dist / pip                            # 75
+        risk_usd = settings.sl_risk_usd                    # 15
+        expected_volume = max(
+            settings.min_volume,
+            min(settings.max_volume, round(risk_usd / (sl_pips * 10.0), 2)),
+        )
+        assert entry == 1.1000
+        assert sl == pytest.approx(1.1000 - sl_dist, abs=1e-9)
+        # TP sale DIRECTO del ancla de la banda superior (no de rr)
+        assert tp == pytest.approx(1.1100, abs=1e-9)
+        assert volume == expected_volume
+        # Invariantes direccionales y de riesgo
+        assert sl < entry < tp
+        assert settings.min_volume <= volume <= settings.max_volume
+        # Cota teórica del redondeo de volumen a 2 decimales (±0.005 lote)
+        assert volume * sl_pips * 10.0 <= settings.sl_risk_usd + 0.005 * sl_pips * 10.0 + 1e-9
+        assert volume * sl_pips * 10.0 >= settings.sl_risk_usd - 0.005 * sl_pips * 10.0 - 1e-9
+
+    def test_sell_inverts_sl_and_tp(self):
+        entry, sl, tp, volume = ps.derive_order_from_bb(
+            "sell", "EURUSD", 1.1000, 1.1050, 1.0900, 0.00015,
+        )
+        assert sl > entry > tp
+        sl_dist = round(0.005 * settings.sl_mult, 5)
+        assert sl == pytest.approx(1.1000 + sl_dist, abs=1e-9)
+        assert tp == pytest.approx(1.0900, abs=1e-9)   # ancla de la banda inferior
+        assert volume > 0
+
+    def test_sl_floor_applies_when_anchor_too_close(self):
+        # Ancla a 0.5 pips → el suelo (sl_min_pips / spread) la eleva
+        entry, sl, tp, volume = ps.derive_order_from_bb(
+            "buy", "EURUSD", 1.1000, 1.09995, 1.1050, 0.00015,
+        )
+        pip = 0.0001
+        sl_pips = abs(entry - sl) / pip
+        assert sl_pips >= settings.sl_min_pips_default
+        assert abs(entry - sl) >= settings.sl_min_spread_mult * 0.00015 - 1e-9
+        assert volume >= settings.min_volume
+
+    def test_affordability_cap_limits_risk(self):
+        # Ancla 2000 pips lejos: sin tope el riesgo sería ~300× sl_risk_usd
+        entry, sl, tp, volume = ps.derive_order_from_bb(
+            "buy", "EURUSD", 1.1000, 0.9000, 1.1100, 0.00015,
+        )
+        pip = 0.0001
+        ppv = ps.pip_value_per_lot("EURUSD", entry)
+        sl_pips = abs(entry - sl) / pip
+        max_affordable = settings.sl_risk_usd / (settings.min_volume * ppv)
+        assert sl_pips == pytest.approx(max_affordable)          # cap exacto
+        assert volume == settings.min_volume                     # volumen al mínimo
+        assert volume * sl_pips * ppv <= settings.sl_risk_usd + 1e-9  # riesgo ≤ tope
+
+    def test_longer_sl_reduces_volume_for_same_risk(self):
+        _, _, _, vol_near = ps.derive_order_from_bb(
+            "buy", "EURUSD", 1.1000, 1.0975, 1.1100, 0.00015)   # 25 pips
+        _, _, _, vol_far = ps.derive_order_from_bb(
+            "buy", "EURUSD", 1.1000, 1.0950, 1.1100, 0.00015)    # 50 pips
+        assert vol_far < vol_near
+
+
+class TestDeriveOrderFromCandleOpen:
+    def test_numeric_case_with_rr(self):
+        entry, sl, tp, volume = ps.derive_order_from_candle_open(
+            "buy", "EURUSD", 1.1000, 1.0995, 0.00015,
+        )
+        pip = 0.0001
+        sl_dist = round(0.0005 * settings.sl_mult, 5)     # 1.5× de 5 pips
+        sl_pips = sl_dist / pip                            # 7.5
+        expected_volume = max(
+            settings.min_volume,
+            min(settings.max_volume, round(settings.sl_risk_usd / (sl_pips * 10.0), 2)),
+        )
+        assert sl == pytest.approx(1.1000 - sl_dist, abs=1e-9)
+        assert volume == expected_volume
+        if settings.rr_min > 0:
+            assert tp == pytest.approx(1.1000 + round(sl_dist * settings.rr_min, 5), abs=1e-9)
+        assert sl < entry < tp
+        # Riesgo real ≤ presupuesto (tolerancia de redondeo a 2 decimales)
+        assert volume * sl_pips * 10.0 <= settings.sl_risk_usd + 0.005 * sl_pips * 10.0 + 1e-9
+
+
+class TestDeriveOrderSimple:
+    def test_numeric_case(self):
+        entry, sl, tp, volume = ps.derive_order("buy", "EURUSD", 1.10)
+        sl_dist = 1.10 * settings.sl_pct            # 0.1% → 0.0011
+        sl_pips = sl_dist / 0.0001                  # 11
+        expected_volume = max(
+            settings.min_volume,
+            round(settings.sl_risk_usd / (sl_pips * 10.0), 2),
+        )
+        assert entry == 1.10
+        assert sl == pytest.approx(1.10 - sl_dist, abs=1e-9)
+        assert tp == pytest.approx(1.10 + round(sl_dist * settings.rr_min, 5), abs=1e-9)
+        assert volume == expected_volume
+        assert volume >= settings.min_volume
+
+    def test_sell_direction(self):
+        _, sl, tp, _ = ps.derive_order("sell", "EURUSD", 1.10)
+        assert sl > 1.10 > tp

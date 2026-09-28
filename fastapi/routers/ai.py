@@ -12,7 +12,8 @@ import pandas as pd
 import torch
 import gymnasium as gym
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+from pydantic_core import PydanticCustomError
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
@@ -599,18 +600,49 @@ async def pipeline_health() -> HealthCheckResponse:
 # Llamado por el MT5 EA cuando una orden se cierra (filled).
 
 
+# Dominios de trade_outcomes: DEBEN igualar los CHECK de db/schema.sql para que
+# un payload inválido falle en el borde con 422, nunca con un 500 desde asyncpg.
+VALID_EXIT_REASONS = frozenset({"sl", "tp", "manual", "news", "signal_end", "ea"})
+DIRECTION_CANONICAL = {"LONG": "LONG", "SHORT": "SHORT", "BUY": "LONG", "SELL": "SHORT"}
+
+
 class TradeFilledRequest(BaseModel):
     symbol: str
     entry_time: float | str  # Unix timestamp (float) or numeric string
     exit_time: float | str   # Unix timestamp (float) or numeric string
     pnl: float | str
     pnl_pct: float | str
-    direction: str   # "LONG", "SHORT", "BUY", "SELL"
+    direction: str   # "LONG", "SHORT", "BUY", "SELL" (case-insensitive)
     sl_hit: bool
     tp_hit: bool
     exit_reason: str  # "sl", "tp", "manual", "news", "signal_end", "ea"
     deal_ticket: int | str | None = None
     position_id: int | str | None = None
+
+    @field_validator("direction")
+    @classmethod
+    def _canonical_direction(cls, v: str) -> str:
+        canonical = DIRECTION_CANONICAL.get(str(v).strip().upper())
+        if canonical is None:
+            # PydanticCustomError en vez de ValueError: pydantic mete el
+            # ValueError original en errors()['ctx'] y FastAPI no puede
+            # serializarlo a JSON → el 422 se rompería en un 500.
+            raise PydanticCustomError(
+                "value_error.direction",
+                f"direction must be one of {sorted(DIRECTION_CANONICAL)} (got {v!r})",
+            )
+        return canonical
+
+    @field_validator("exit_reason")
+    @classmethod
+    def _valid_exit_reason(cls, v: str) -> str:
+        reason = str(v).strip().lower()
+        if reason not in VALID_EXIT_REASONS:
+            raise PydanticCustomError(
+                "value_error.exit_reason",
+                f"exit_reason must be one of {sorted(VALID_EXIT_REASONS)} (got {v!r})",
+            )
+        return reason
 
 
 class EADecisionRequest(BaseModel):

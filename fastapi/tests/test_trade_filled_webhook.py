@@ -1,173 +1,212 @@
 """
-Integration tests for POST /trade/filled webhook end-to-end.
+Integration tests for POST /trade/filled webhook end-to-end (P1-4).
 
-These tests verify the complete flow:
-  TradeFilledRequest validation → record_trade_filled → _persist_trade_outcome → DB
+Flujo: TradeFilledRequest → normalización/validación → record_trade_filled →
+_persist_trade_outcome → pool.fetchval(INSERT) → contador de retrain.
 
-The MQL5 EA calls /trade/filled when an order closes, so this is a critical path
-that must work correctly for the auto-retrain pipeline to function.
+P1-4: TODAS las verificaciones sobre código Python son de COMPORTAMIENTO
+(llamadas reales con BD/red parcheadas). Ningún test lee el fuente Python;
+solo quedan como texto el DDL (schema.sql, sin Postgres en la suite) y el
+contrato del EA MQL5 (sin runtime MQL5), en ficheros dedicados.
 """
-import os
-import re
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from main import app
 
+BASE_PAYLOAD = {
+    "symbol": "EURUSD",
+    "entry_time": "1725450000",
+    "exit_time": "1725453600",
+    "pnl": 12.5,
+    "pnl_pct": 0.0125,
+    "direction": "LONG",
+    "sl_hit": False,
+    "tp_hit": True,
+    "exit_reason": "tp",
+}
+
+
+def _post_filled(**overrides):
+    """POST /trade/filled con record_trade_filled parcheado; devuelve (response, mock)."""
+    with patch("main.init_pool", AsyncMock()), \
+         patch("main.close_pool", AsyncMock()), \
+         patch("routers.ai.load_inference_artifacts"), \
+         patch("routers.ai.record_trade_filled", AsyncMock()) as record_mock:
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/ai/trade/filled",
+                json={**BASE_PAYLOAD, **overrides},
+                headers={"x-internal-token": "test-token", "x-cycle-id": "e2e-filled"},
+            )
+    return response, record_mock
+
 
 class TestTradeFilledDirectionNormalization:
-    """
-    Verify direction normalization by reading the actual source file.
-    This avoids importing routers.ai which requires torch/pandas.
-    """
+    """MQL5 envía 'long'/'short'/'buy'/'sell'; el registro exige LONG/SHORT."""
 
-    def test_trade_filled_webhook_normalizes_direction_to_uppercase(self):
-        """
-        MQL5 sends 'long'/'short' but DB constraint requires 'LONG'/'SHORT'.
-        The router MUST normalize direction to uppercase before calling record_trade_filled.
-        This was the root cause of HTTP 500 errors on /trade/filled (commit 38491e8).
-        """
-        routers_ai_path = os.path.join(
-            os.path.dirname(__file__), "..", "routers", "ai.py"
+    @pytest.mark.parametrize("incoming,expected", [
+        ("long", "LONG"),
+        ("buy", "LONG"),
+        ("short", "SHORT"),
+        ("sell", "SHORT"),
+        ("LONG", "LONG"),
+    ])
+    def test_normalizes_direction_to_db_contract(self, incoming, expected):
+        response, record_mock = _post_filled(direction=incoming)
+        assert response.status_code == 200, response.text
+        assert record_mock.await_args.kwargs["direction"] == expected
+
+
+class TestTradeFilledTimestampValidation:
+    def test_rejects_exit_before_entry(self):
+        response, record_mock = _post_filled(entry_time="1725453600", exit_time="1725450000")
+        assert response.status_code == 422
+        assert "greater than" in response.json()["detail"]
+        record_mock.assert_not_awaited()
+
+    def test_rejects_timestamps_before_year_2000(self):
+        response, record_mock = _post_filled(
+            entry_time="946684799", exit_time="946684800"
         )
-        with open(routers_ai_path, "r") as f:
-            source = f.read()
+        assert response.status_code == 422
+        assert "2000-01-01" in response.json()["detail"]
+        record_mock.assert_not_awaited()
 
-        # Find the trade_filled_webhook function body
-        match = re.search(
-            r'async def trade_filled_webhook\(.*?\):.*?(?=\n@router|\nasync def |\nclass |\Z)',
-            source,
-            re.DOTALL,
+    def test_equal_timestamps_normalized_to_one_second(self):
+        response, record_mock = _post_filled(
+            entry_time="1725450000", exit_time="1725450000"
         )
-        assert match, "trade_filled_webhook function not found in routers/ai.py"
-        func_source = match.group(0)
+        assert response.status_code == 200, response.text
+        kwargs = record_mock.await_args.kwargs
+        assert kwargs["entry_time"] == "1725450000"
+        assert kwargs["exit_time"] == "1725450001"
 
-        # The function must contain direction.upper() normalization
-        assert "direction.upper()" in func_source, (
-            "trade_filled_webhook must normalize direction to uppercase with "
-            "direction.upper() to prevent DB constraint violation. "
-            "MQL5 sends 'long'/'short', DB requires 'LONG'/'SHORT'."
-        )
 
-    def test_trade_filled_webhook_rejects_invalid_or_unordered_timestamps(self):
-        routers_ai_path = os.path.join(
-            os.path.dirname(__file__), "..", "routers", "ai.py"
-        )
-        with open(routers_ai_path, "r") as f:
-            source = f.read()
+class TestTradeFilledPayloadValidation:
+    """P1-4: dominios validados ANTES de tocar BD → 422, nunca 500 de asyncpg."""
 
-        match = re.search(
-            r'async def trade_filled_webhook\(.*?\):.*?(?=\n@router|\nasync def |\nclass |\Z)',
-            source,
-            re.DOTALL,
-        )
-        assert match, "trade_filled_webhook function not found in routers/ai.py"
-        func_source = match.group(0)
+    def test_invalid_direction_rejected_at_edge(self):
+        response, record_mock = _post_filled(direction="FLAT")
+        assert response.status_code == 422
+        assert "direction" in str(response.json()["detail"])
+        record_mock.assert_not_awaited()
 
-        assert "entry_ts < minimum_timestamp" in func_source
-        assert "exit_ts <= entry_ts" in func_source
+    def test_invalid_exit_reason_rejected_at_edge(self):
+        response, record_mock = _post_filled(exit_reason="stop_loss")
+        assert response.status_code == 422
+        assert "exit_reason" in str(response.json()["detail"])
+        record_mock.assert_not_awaited()
 
 
 class TestTradeFilledPersistence:
-    """Verify trade_filled persists correctly to DB via auto_retrain service."""
+    @pytest.mark.asyncio
+    async def test_persist_inserts_row_with_dedup_and_returns_id(self, monkeypatch):
+        from services.auto_retrain import _persist_trade_outcome
 
-    def test_persist_trade_outcome_inserts_into_database(self):
-        """
-        _persist_trade_outcome must INSERT a row into trade_outcomes.
-        Verify the SQL query uses INSERT and includes all required columns.
-        """
-        auto_retrain_path = os.path.join(
-            os.path.dirname(__file__), "..", "services", "auto_retrain.py"
+        pool = MagicMock()
+        pool.fetchval = AsyncMock(return_value=77)
+        monkeypatch.setattr("db.connection.get_pool", lambda: pool)
+
+        trade_id = await _persist_trade_outcome(
+            "EURUSD", 1725450000.0, 1725453600.0, 12.5, 0.0125,
+            "LONG", False, True, "tp", 123456, 789012,
         )
-        with open(auto_retrain_path, "r") as f:
-            source = f.read()
 
-        # Find _persist_trade_outcome
-        match = re.search(
-            r'async def _persist_trade_outcome\(.*?\):.*?(?=\nasync def |\ndef |\Z)',
-            source,
-            re.DOTALL,
+        assert trade_id == 77
+        pool.fetchval.assert_awaited_once()
+        sql, *params = pool.fetchval.await_args.args
+        assert "INSERT INTO trade_outcomes" in sql
+        assert "ON CONFLICT (deal_ticket)" in sql      # dedup a nivel DB
+        assert "RETURNING id" in sql
+        assert params[0] == "EURUSD"
+        assert params[1] == "LONG"
+        assert params[-2] == 123456                    # deal_ticket
+        assert params[-1] == 789012                    # position_id
+
+    @pytest.mark.asyncio
+    async def test_persist_returns_none_on_duplicate_deal(self, monkeypatch):
+        from services.auto_retrain import _persist_trade_outcome
+
+        pool = MagicMock()
+        pool.fetchval = AsyncMock(return_value=None)   # ON CONFLICT DO NOTHING
+        monkeypatch.setattr("db.connection.get_pool", lambda: pool)
+
+        trade_id = await _persist_trade_outcome(
+            "EURUSD", 1725450000.0, 1725453600.0, 12.5, 0.0125,
+            "LONG", False, True, "tp", 123456, 789012,
         )
-        assert match, "_persist_trade_outcome not found in services/auto_retrain.py"
-        func_source = match.group(0)
-
-        # Must contain INSERT INTO trade_outcomes
-        assert "INSERT INTO trade_outcomes" in func_source, \
-            "_persist_trade_outcome must INSERT into trade_outcomes table"
-
-        # Must include direction column
-        assert "direction" in func_source, \
-            "INSERT must include direction column"
-
-    def test_persist_trade_outcome_uses_fetchval(self):
-        """
-        _persist_trade_outcome uses pool.fetchval() to get the inserted row ID.
-        This is the correct asyncpg pattern for INSERT + returning id.
-        """
-        auto_retrain_path = os.path.join(
-            os.path.dirname(__file__), "..", "services", "auto_retrain.py"
-        )
-        with open(auto_retrain_path, "r") as f:
-            source = f.read()
-
-        match = re.search(
-            r'async def _persist_trade_outcome\(.*?\):.*?(?=\nasync def |\ndef |\Z)',
-            source,
-            re.DOTALL,
-        )
-        assert match, "_persist_trade_outcome not found"
-        func_source = match.group(0)
-
-        assert "fetchval" in func_source, \
-            "_persist_trade_outcome must use fetchval to get inserted ID"
+        assert trade_id is None
 
 
 class TestRetrainTriggerLogic:
-    """Verify retrain triggers after N trades."""
+    def test_retrain_threshold_is_10(self):
+        from services.auto_retrain import RetrainConfig
 
-    def test_retrain_trades_threshold_is_10(self):
-        """
-        RetrainConfig.trades_before_retrain should be 10.
-        Verify this is correctly set so the system can learn reasonably fast.
-        """
-        auto_retrain_path = os.path.join(
-            os.path.dirname(__file__), "..", "services", "auto_retrain.py"
+        assert RetrainConfig().trades_before_retrain == 10
+
+    @pytest.mark.asyncio
+    async def test_record_trade_filled_increments_counter(self, monkeypatch):
+        from services import auto_retrain as ar
+
+        pool = MagicMock()
+        pool.fetchval = AsyncMock(return_value=1)
+        monkeypatch.setattr("db.connection.get_pool", lambda: pool)
+
+        state = ar.RetrainState(filled_count=3, last_retrain_time=1.0)
+        monkeypatch.setattr(ar, "_ensure_retrain_state", AsyncMock(return_value=state))
+        monkeypatch.setattr(ar, "_save_retrain_state", AsyncMock())
+        monkeypatch.setattr("services.trade_journal.record_trade_closed", AsyncMock())
+
+        await ar.record_trade_filled(
+            symbol="EURUSD",
+            entry_time="1725450000",
+            exit_time="1725453600",
+            pnl=12.5,
+            pnl_pct=0.0125,
+            direction="LONG",
+            sl_hit=False,
+            tp_hit=True,
+            exit_reason="tp",
+            deal_ticket=555001,
+            position_id=666001,
         )
-        with open(auto_retrain_path, "r") as f:
-            source = f.read()
 
-        match = re.search(r"trades_before_retrain:\s*int\s*=\s*(\d+)", source)
-        assert match, "trades_before_retrain not found in RetrainConfig"
-        threshold = int(match.group(1))
-        assert threshold == 10, \
-            f"trades_before_retrain should be 10, got {threshold}"
+        assert state.filled_count == 4        # 3 → 4 (y 4 < min_trades: sin trigger)
+        assert len(state.outcomes) == 1
+        assert state.outcomes[0].pnl == 12.5
 
-    def test_record_trade_filled_increments_filled_count(self):
-        """
-        record_trade_filled must increment filled_count.
-        After 10 calls, retrain should trigger.
-        """
-        auto_retrain_path = os.path.join(
-            os.path.dirname(__file__), "..", "services", "auto_retrain.py"
+    @pytest.mark.asyncio
+    async def test_duplicate_deal_does_not_increment_counter(self, monkeypatch):
+        from services import auto_retrain as ar
+
+        pool = MagicMock()
+        pool.fetchval = AsyncMock(return_value=None)   # deal_ticket ya registrado
+        monkeypatch.setattr("db.connection.get_pool", lambda: pool)
+
+        state = ar.RetrainState(filled_count=3, last_retrain_time=1.0)
+        monkeypatch.setattr(ar, "_ensure_retrain_state", AsyncMock(return_value=state))
+        monkeypatch.setattr(ar, "_save_retrain_state", AsyncMock())
+        monkeypatch.setattr("services.trade_journal.record_trade_closed", AsyncMock())
+
+        await ar.record_trade_filled(
+            symbol="EURUSD",
+            entry_time="1725450000",
+            exit_time="1725453600",
+            pnl=-5.0,
+            pnl_pct=-0.005,
+            direction="SHORT",
+            sl_hit=True,
+            tp_hit=False,
+            exit_reason="sl",
+            deal_ticket=555001,
+            position_id=666001,
         )
-        with open(auto_retrain_path, "r") as f:
-            source = f.read()
 
-        match = re.search(
-            r'async def record_trade_filled\(.*?\):.*?(?=\nasync def |\ndef |\Z)',
-            source,
-            re.DOTALL,
-        )
-        assert match, "record_trade_filled not found"
-        func_source = match.group(0)
-
-        # Must increment filled_count
-        assert "filled_count" in func_source, \
-            "record_trade_filled must track filled_count"
-        assert "state.filled_count" in func_source or "filled_count +" in func_source, \
-            "filled_count must be incremented on each trade"
+        assert state.filled_count == 3        # sin doble conteo
+        assert state.outcomes == []
 
 
 class TestDealTicketPersistence:
@@ -175,28 +214,7 @@ class TestDealTicketPersistence:
 
     def test_webhook_threads_deal_ticket_and_position_id(self):
         """El webhook debe pasar deal_ticket/position_id a record_trade_filled (no ignorarlos)."""
-        with patch("main.init_pool", AsyncMock()), \
-             patch("main.close_pool", AsyncMock()), \
-             patch("routers.ai.load_inference_artifacts"), \
-             patch("routers.ai.record_trade_filled", AsyncMock()) as record_mock:
-            with TestClient(app) as client:
-                response = client.post(
-                    "/api/v1/ai/trade/filled",
-                    json={
-                        "symbol": "EURUSD",
-                        "entry_time": "1725450000",
-                        "exit_time": "1725453600",
-                        "pnl": 12.5,
-                        "pnl_pct": 0.0125,
-                        "direction": "LONG",
-                        "sl_hit": False,
-                        "tp_hit": True,
-                        "exit_reason": "tp",
-                        "deal_ticket": 123456,
-                        "position_id": 789012,
-                    },
-                    headers={"x-internal-token": "test-token", "x-cycle-id": "e2e-filled"},
-                )
+        response, record_mock = _post_filled(deal_ticket=123456, position_id=789012)
 
         assert response.status_code == 200, response.text
         kwargs = record_mock.await_args.kwargs
@@ -204,15 +222,29 @@ class TestDealTicketPersistence:
         assert kwargs["position_id"] == 789012
         assert kwargs["direction"] == "LONG"
 
-    def test_duplicate_deal_ticket_skips_journal_and_counter(self):
+    def test_string_numeric_fields_are_coerced(self):
+        """El EA a veces manda números como strings → se convierten antes de persistir."""
+        response, record_mock = _post_filled(
+            deal_ticket="123456", position_id="789012",
+            pnl="12.5", pnl_pct="0.0125",
+        )
+
+        assert response.status_code == 200, response.text
+        kwargs = record_mock.await_args.kwargs
+        assert kwargs["deal_ticket"] == 123456
+        assert kwargs["position_id"] == 789012
+        assert isinstance(kwargs["pnl"], float) and kwargs["pnl"] == 12.5
+
+    @pytest.mark.asyncio
+    async def test_duplicate_deal_ticket_skips_journal_and_counter(self):
         """ON CONFLICT DO NOTHING → trade_id None → no journal, no contador, sin excepción."""
         from services.auto_retrain import record_trade_filled
 
         pool = MagicMock()
-        pool.fetchval = AsyncMock(return_value=None)  # conflicto: deal_ticket ya existía
+        pool.fetchval = AsyncMock(return_value=None)   # conflicto: ya existía
         with patch("db.connection.get_pool", return_value=pool), \
              patch("services.trade_journal.record_trade_closed", AsyncMock()) as journal_mock:
-            asyncio.run(record_trade_filled(
+            await record_trade_filled(
                 symbol="EURUSD",
                 entry_time="1725450000",
                 exit_time="1725453600",
@@ -224,12 +256,17 @@ class TestDealTicketPersistence:
                 exit_reason="sl",
                 deal_ticket=999999,
                 position_id=111111,
-            ))
+            )
 
         journal_mock.assert_not_called()
 
     def test_schema_declares_unique_deal_ticket(self):
-        """schema.sql debe declarar deal_ticket + índice único parcial (dedup a nivel DB)."""
+        """schema.sql declara deal_ticket + índice único parcial (dedup a nivel DB).
+
+        Aserción de DDL (sin Postgres en la suite unitaria): la migración viva
+        se aplicó por separado; el comportamiento dedup está cubierto arriba.
+        """
+        import os
         schema_path = os.path.join(os.path.dirname(__file__), "..", "db", "schema.sql")
         with open(schema_path, "r") as f:
             schema = f.read()

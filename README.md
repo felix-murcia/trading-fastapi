@@ -165,9 +165,12 @@ El script de entrenamiento permite hasta 120 segundos para descargar las
 50.000 candles históricas desde MT5, porque esa consulta puede superar el
 timeout de 30 segundos aunque consultas más pequeñas respondan correctamente.
 
-El modelo v3 compatible con este contrato fue reentrenado el 2026-09-09 con
-200.000 pasos. La validación confirmó 17 features, observación `(10, 21)` y
-acción continua `(4,)` en `ppo_trading_bot_v3.zip`.
+El modelo v3 original fue reentrenado el 2026-09-09 con 200.000 pasos. El
+contrato vigente de observación es `(20, 24)`: ventana de 20 velas × (17
+features de mercado + 7 state channels), con acción continua `(4,)`. El bundle
+activo en `model_registry` se entrenó y validó con walk-forward bajo este
+contrato (2026-09-28); un modelo con el contrato anterior `(10, 21)` no pasa
+la validación de `load_inference_artifacts` y no se sirve.
 
 El feedback de operaciones reales se carga desde `trade_outcomes` durante el
 auto-retrain, por lo que sobrevive a reinicios del contenedor. Se excluyen
@@ -1271,3 +1274,19 @@ Ahora, si las Bandas de Bollinger son inválidas o el ratio es insuficiente, el 
 **Validación (2026-09-28):** `pytest fastapi/tests/ -q` → **169 passed** (160 → 169; +9 en `test_model_hot_reload.py`: CTE+parámetros, fallo de DB propaga, swap atómico ante pkl corrupto, reload devuelve estado, endpoint ruta + 422/401 + `in_sync` ×2, índice único del schema). Integración `_do_retrain`: promoción exige `record_promotion` y `reload` llamados; rechazo exige que **no** se llamen. **En vivo:** `GET /api/v1/ai/model/status` → `in_sync: true` (sha `2c84c903…` = memoria = disco, `source=auto_retrain_normalized`); migración aplicada a la DB viva (`\d model_registry`); contenedor: **169 passed**.
 
 **Archivos:** `fastapi/db/schema.sql`, `fastapi/services/model_registry.py`, `fastapi/routers/ai.py`, `fastapi/services/auto_retrain.py`, `fastapi/tests/test_model_hot_reload.py` (nuevo), `fastapi/tests/test_auto_retrain.py`.
+
+### AG. Fix P1-4: tests donde hay dinero + validación en el borde (2026-09-28)
+
+**Problemas (auditoría):** las piezas que mueven dinero real — `risk_guardian`, `position_sizing` y el `step()` del entorno PPO — no tenían **ningún** test; los tests de `/trade/filled` leían el fuente Python por regex en lugar de ejercitar el comportamiento; `test_models.py` probaba un **stub** divergente del modelo real (sus tests de invalidación pasaban por campos faltantes — `sl_hit`/`tp_hit` omitidos — no por la regla de negocio: cobertura falsa); y el modelo real aceptaba `direction="FLAT"`/`exit_reason="stop_loss"` → el router lo traducía a `None` → CHECK de `trade_outcomes` → **500** desde asyncpg en vez de **422** en el borde.
+
+**Cambios:**
+- **`tests/test_risk_guardian.py` (+12):** pérdida diaria inclusiva (`≤ -5%` bloquea, `> -5%` pasa), precedencia sobre max-posiciones, bloqueo `MAX_POSITIONS`, drawdown ≥10% alerta pero **no** bloquea, cooldown de alertas (1h, segunda del mismo tipo suprimida), racha de pérdidas (se acumula; `pnl ≥ 0` la limpia), `daily_start=0` sin división por cero, wrapper global `check_risk` con estado determinista.
+- **`tests/test_position_sizing.py` (+14):** `pip_value_per_lot` por símbolo (majors planos, `USDJPY=1000/px`, `USDCAD=10/px`, oro), `derive_order_from_bb/candle_open/simple` con valores **numéricos verificados de forma independiente**: SL = ancla × `sl_mult`, TP **directo del ancla** de la banda, volumen = `riesgo/(sl_pips × pip_value)` acotado, suelo de SL (`sl_min_pips`/`3×spread`), **techo de asequibilidad** (ancla lejana → `sl_pips` cap en `risk_usd/(min_volume×ppv)` → riesgo real ≤ tope), dirección buy/sell, símbolo no soportado → `KeyError` (fail-loud), monotonía (SL más largo → volumen menor).
+- **`tests/test_trading_env_step.py` (+10):** dinero exacto con `initial=1000` — apertura cobra spread (entry = close ± half) + comisión (1000 → 998.6); **SL intra-vela con prioridad sobre TP** si ambos se tocan en la vela (gap) → salida al precio del SL (977.2); TP (1397.2, reward diferencial 39.86); cierre discrecional paga round-trip de spread (−3 −1.4 = 994.2); terminación a equity ≤50% (493.0, `drawdown > 0.5`); truncado por fin de datos; penalty de estancamiento (−0.001); `info` con las claves de dinero del gate; obs `(5, 24)`.
+- **`test_trade_filled_webhook.py` reescrito (9 → 19):** regex → comportamiento — normalización `long/buy/short/sell → LONG/SHORT` vía endpoint real, validación de timestamps (422 `exit<entry` / `<2000-01-01`, `entry==exit` → +1s), INSERT+dedup con pool real parcheado, `filled_count` 3→4 y **duplicado NO incrementa**, umbral `trades_before_retrain == 10` por config directa, y 422 de `direction`/`exit_reason` en el borde (endpoint no alcanzado). Ningún test lee ya fuente Python (solo DDL y `.mq5`, sin runtime disponible).
+- **`test_models.py` reescrito (7 → 20):** stub eliminado → modelo **real** de `routers.ai`; invalidaciones con todos los demás campos válidos (`pytest.raises(match=...)` exige el error del campo correcto); normalización canónica `buy→LONG`, `SL→sl`; test de que el dominio `exit_reason` del modelo **iguala el CHECK** de `schema.sql`.
+- **`routers/ai.py`: validadores en el borde** (`field_validator` + `PydanticCustomError`): `direction ∈ {long,short,buy,sell}` → canónico `LONG/SHORT`; `exit_reason ∈ {sl,tp,manual,news,signal_end,ea}` (== CHECK) → lower. Payload inválido → **422**, nunca `CheckViolation` 500. `PydanticCustomError` en vez de `ValueError`: pydantic 2.10 mete el `ValueError` original en `errors()['ctx']` y FastAPI 0.115.5 no lo serializa a JSON → el propio 422 se rompía en 500 (detectado por el test).
+
+**Validación (2026-09-28):** `pytest fastapi/tests/ -q` → **228 passed** (169 → 228; +59: guardian 12 + sizing 14 + env 10 + webhook +10 + models +13). Contrato de observación corregido en `AGENTS.md`/`README` `(10, 21)` → `(20, 24)` (window 20 × (17 + 7 state channels)) — el contrato anterior estaba en desfase con el código desde la ventana 20.
+
+**Archivos:** `fastapi/tests/test_risk_guardian.py` (nuevo), `fastapi/tests/test_position_sizing.py` (nuevo), `fastapi/tests/test_trading_env_step.py` (nuevo), `fastapi/tests/test_trade_filled_webhook.py` (reescrito), `fastapi/tests/test_models.py` (reescrito), `fastapi/routers/ai.py` (validadores), `AGENTS.md`, `README.md`.
