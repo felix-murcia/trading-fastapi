@@ -1,0 +1,281 @@
+"""
+Qwen LLM client — extracted from routers/ai.py.
+
+Provides unified Qwen queries for trade analysis and SL/TP validation.
+All functions return safe defaults on connection failure.
+"""
+import json
+import logging
+import os
+from typing import Optional
+
+import httpx
+import numpy as np
+
+logger = logging.getLogger(__name__)
+
+QWEN_URL = os.getenv("QWEN_URL", "http://100.90.16.33:8080/v1/chat/completions")
+
+SL_MIN_NORM = 0.05
+SL_MAX_NORM = 0.30
+TP_MIN_NORM = 0.05
+TP_MAX_NORM = 0.50
+
+
+def _classify_session(hour: int) -> str:
+    """Classify trading session from hour."""
+    if 7 <= hour < 12:
+        return "London"
+    elif 12 <= hour < 17:
+        return "NY"
+    elif 17 <= hour < 23:
+        return "Asia"
+    return "Weekend/Closed"
+
+
+def _classify_regime(bb_pos: float, atr_pct: float, macd_hist: float) -> str:
+    """Classify market regime from indicators."""
+    if abs(bb_pos) > 0.8:
+        return "TRENDING"
+    elif atr_pct > 0.015:
+        return "VOLATILE"
+    elif abs(macd_hist) < 0.0002:
+        return "RANGING"
+    return "BREAKOUT"
+
+
+def _parse_json_response(content: str) -> dict:
+    """Extract and parse JSON from LLM response content."""
+    if "{" not in content:
+        raise RuntimeError(f"sin JSON: {content[:80]}")
+    json_str = content[content.index("{"):]
+    parsed, _ = json.JSONDecoder().raw_decode(json_str)
+    return parsed
+
+
+def _clamp(value: float, min_val: float, max_val: float) -> float:
+    """Clamp value to [min_val, max_val]."""
+    return max(min_val, min(max_val, value))
+
+
+async def query_qwen_unified(
+    symbol: str,
+    decision: str,
+    ml_prob: float,
+    rsi: float,
+    atr: float,
+    atr_pct: float,
+    macd_hist: float,
+    bb_pos: float,
+    range_pct: float,
+    last_ret: float,
+    hour: int,
+    news: str,
+    candle_context: str,
+    sl_proposed: float,
+    tp_proposed: float,
+    cycle_id: str,
+    logger: logging.Logger,
+    recent_insights: Optional[list[dict]] = None,
+) -> dict:
+    """
+    Unified Qwen query — single call per candle.
+
+    Returns:
+        - quality_score: 0-10
+        - quality_reason: str
+        - llm_bias: BULLISH/BEARISH/NEUTRAL
+        - confidence_modifier: 0.5-1.5
+        - sl_adjusted / tp_adjusted: norm values
+        - regime: TRENDING/RANGING/VOLATILE/BREAKOUT
+    """
+    session = _classify_session(hour)
+    regime = _classify_regime(bb_pos, atr_pct, macd_hist)
+
+    sl_pips = sl_proposed * 100.0
+    tp_pips = tp_proposed * 200.0
+    news_context = " ".join(str(news).split())[:600] or "Unavailable"
+
+    prompt = f"""Analyze this {symbol} H1 setup. Use the candle sequence as context.
+
+Context:
+- RSI(14): {rsi:.1f}
+- ATR: {atr:.5f} ({atr_pct:.2%} of price)
+- MACD histogram: {macd_hist:.6f}
+- Bollinger position: {bb_pos:.2f}
+- Range: {range_pct:.2%} of price
+- Last return: {last_ret:.3%}
+- Session: {session}
+- Regime: {regime}
+- Candles: {candle_context}
+
+News:
+{news_context}
+
+ML Signal: {decision} with ML confidence {ml_prob:.3f}
+
+Return EXACTLY JSON, no extra text:
+{{"quality": 7.5, "reason": "brief reason", "bias": "NEUTRAL", "confidence_modifier": 1.0,
+  "sl_ok": true, "tp_ok": true, "sl_adjusted": {sl_proposed:.4f}, "tp_adjusted": {tp_proposed:.4f},
+  "regime": "{regime}"}}
+
+Fields: quality 0-10; reason max 12 words; bias BULLISH/BEARISH/NEUTRAL;
+confidence_modifier 0.5-1.5; sl_ok/tp_ok booleans; adjusted SL 0.15-0.30,
+TP 0.125-0.30 with TP:SL >=1.5; regime TRENDING/RANGING/VOLATILE/BREAKOUT."""
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            res = await client.post(QWEN_URL, json={
+                "messages": [
+                    {"role": "system", "content": "You are a quantitative trading analyst. Always respond in valid JSON."},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.2,
+                "max_tokens": 160,
+                "response_format": {"type": "json_object"},
+            })
+    except (httpx.ConnectTimeout, httpx.TimeoutException, httpx.HTTPError) as exc:
+        logger.warning("[%s] QWEN-UNIFIED connection failed: %s", cycle_id, repr(exc))
+        return {
+            "quality": 0.0,
+            "reason": "Qwen unavailable",
+            "bias": "NEUTRAL",
+            "confidence_modifier": 1.0,
+            "effective_prob": float(ml_prob),
+            "sl_adjusted": float(sl_proposed),
+            "tp_adjusted": float(tp_proposed),
+            "regime": regime,
+        }
+
+    if res.status_code == 200:
+        content = res.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        try:
+            parsed = _parse_json_response(content)
+        except RuntimeError as exc:
+            raise RuntimeError(f"[{cycle_id}] QWEN-UNIFIED {exc}") from exc
+
+        q = float(parsed.get("quality", 5.0))
+        reason = str(parsed.get("reason", ""))[:120]
+        bias_raw = str(parsed.get("bias", "NEUTRAL")).upper()
+        bias = "NEUTRAL"
+        if "BULL" in bias_raw:
+            bias = "BULLISH"
+        elif "BEAR" in bias_raw:
+            bias = "BEARISH"
+
+        conf_mod = _clamp(float(parsed.get("confidence_modifier", 1.0)), 0.5, 1.5)
+
+        sl_adj = _clamp(float(parsed.get("sl_adjusted", sl_proposed)), SL_MIN_NORM, SL_MAX_NORM)
+        tp_adj = _clamp(float(parsed.get("tp_adjusted", tp_proposed)), TP_MIN_NORM, TP_MAX_NORM)
+        tp_adj = _clamp(sl_adj * 2.0, TP_MIN_NORM, TP_MAX_NORM)
+
+        effective_prob = float(np.exp(np.log(max(ml_prob, 1e-6)) + np.log(conf_mod)))
+        effective_prob = _clamp(effective_prob, 0.0, 1.0)
+
+        logger.info(
+            "[%s] QWEN-UNIFIED ║ q=%.1f bias=%s conf_mod=%.2f eff_prob=%.4f | "
+            "sl=%.3f→%.3f tp=%.3f→%.3f regime=%s | %s",
+            cycle_id, q, bias, conf_mod, effective_prob,
+            sl_proposed, sl_adj, tp_proposed, tp_adj,
+            parsed.get("regime", regime), reason[:60]
+        )
+        return {
+            "quality": q,
+            "reason": reason,
+            "bias": bias,
+            "confidence_modifier": conf_mod,
+            "effective_prob": effective_prob,
+            "sl_adjusted": sl_adj,
+            "tp_adjusted": tp_adj,
+            "regime": parsed.get("regime", regime),
+        }
+
+    res.raise_for_status()
+    raise RuntimeError(f"[{cycle_id}] QWEN-UNIFIED HTTP {res.status_code}: {res.text[:120]}")
+
+
+async def query_qwen_sltp_validator(
+    symbol: str,
+    decision: str,
+    atr: float,
+    atr_pct: float,
+    rsi: float,
+    bb_pos: float,
+    macd_hist: float,
+    range_pct: float,
+    hour: int,
+    sl_proposed: float,
+    tp_proposed: float,
+    cycle_id: str,
+    logger: logging.Logger,
+) -> tuple[float, float, str]:
+    """
+    SL/TP Validator — Qwen analyzes if proposed SL/TP are reasonable.
+
+    Returns: (sl_norm_final, tp_norm_final, reason)
+    """
+    regime = _classify_regime(bb_pos, atr_pct, macd_hist)
+    session = _classify_session(hour)
+
+    sl_pips = sl_proposed * 100.0
+    tp_pips = tp_proposed * 200.0
+
+    prompt = f"""Validate the proposed stop-loss and take-profit for {symbol} {decision}.
+
+Current Market Regime:
+- ATR: {atr:.5f} ({atr_pct:.2%} of price → regime is {'HIGH VOLATILITY' if atr_pct > 0.015 else 'NORMAL'})
+- RSI: {rsi:.1f}
+- MACD histogram: {macd_hist:.6f} ({'bullish' if macd_hist > 0 else 'bearish'})
+- Bollinger position: {bb_pos:.2f} ({regime})
+- Range size: {range_pct:.2%} of price
+- Session: {session}
+
+Proposed Trade:
+- Direction: {decision}
+- Stop-Loss: {sl_pips:.1f} pips (norm={sl_proposed:.4f})
+- Take-Profit: {tp_pips:.1f} pips (norm={tp_proposed:.4f})
+- Current ATR: {atr:.5f} pips
+
+Is the SL reasonable for this regime? Is the TP at least 1.5x the SL distance?
+Reply EXACTLY JSON (no extra text):
+{{"sl_ok": true/false, "tp_ok": true/false, "sl_adjusted": 0.20, "tp_adjusted": 0.28, "reason": "brief"}}
+If both are OK, return the same values. If adjustment needed, propose sensible ones."""
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            res = await client.post(QWEN_URL, json={
+                "messages": [
+                    {"role": "system", "content": "You are a quantitative risk analyst. Always respond in valid JSON."},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.15,
+                "max_tokens": 150,
+                "response_format": {"type": "json_object"},
+            })
+    except (httpx.ConnectTimeout, httpx.TimeoutException, httpx.HTTPError) as exc:
+        logger.warning("[%s] SLTP-VALIDATOR connection failed: %s", cycle_id, exc)
+        return float(sl_proposed), float(tp_proposed), "Qwen unavailable"
+
+    if res.status_code == 200:
+        content = res.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        try:
+            parsed = _parse_json_response(content)
+        except RuntimeError as exc:
+            raise RuntimeError(f"[{cycle_id}] SLTP-VALIDATOR {exc}") from exc
+
+        sl_ok = bool(parsed.get("sl_ok", True))
+        tp_ok = bool(parsed.get("tp_ok", True))
+        sl_adj = _clamp(float(parsed.get("sl_adjusted", sl_proposed)), SL_MIN_NORM, SL_MAX_NORM)
+        tp_adj = _clamp(float(parsed.get("tp_adjusted", tp_proposed)), TP_MIN_NORM, TP_MAX_NORM)
+        tp_adj = sl_adj * 2.0
+
+        if not sl_ok or not tp_ok:
+            logger.warning(
+                "[%s] SLTP-REJECTED ║ sl_ok=%s tp_ok=%s → adjusted sl=%.4f tp=%.4f | reason=%s",
+                cycle_id, sl_ok, tp_ok, sl_adj, tp_adj,
+                parsed.get("reason", "")[:80]
+            )
+        return sl_adj, tp_adj, parsed.get("reason", "")[:100]
+
+    res.raise_for_status()
+    raise RuntimeError(f"[{cycle_id}] SLTP-VALIDATOR HTTP {res.status_code}: {res.text[:120]}")

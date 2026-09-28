@@ -91,15 +91,19 @@ async def mark_order_placed(order_id: int, mt5_order_id: str = "") -> None:
 async def mark_order_failed(order_id: int, error: str) -> None:
     pool = await get_pool()
     async with pool.acquire() as conn:
-        await conn.execute(
+        row = await conn.fetchrow(
             """
             UPDATE deferred_orders
             SET status = $1, retry_count = retry_count + 1, last_error = $2, updated_at = NOW()
             WHERE id = $3
+            RETURNING retry_count
             """,
             OrderQueueStatus.FAILED.value, error[:500], order_id,
         )
-    logger.warning("[ORDER-QUEUE] Orden %d fallida: %s", order_id, error[:200])
+    retry_count = row["retry_count"] if row else "?"
+    logger.warning("[ORDER-QUEUE] Orden %d fallida (retry=%d): %s", order_id, retry_count, error[:200])
+    if retry_count >= 5:
+        logger.error("[ORDER-QUEUE] Orden %d entró en LIMBO (retry_count=%d) — invisible para get_pending_orders()", order_id, retry_count)
 
 
 async def purge_old_orders(hours: int = 168) -> int:

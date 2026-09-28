@@ -113,6 +113,13 @@ async def _analyze_trade_async(
             tp_hit=tp_hit,
         )
 
+        if confidence < 0.5:
+            logger.info(
+                "[JOURNAL] Insight descartado (conf=%.2f < 0.5) trade=%d: %s",
+                confidence, trade_id, insight[:80]
+            )
+            return
+
         pool = get_pool()
         await pool.execute(
             """

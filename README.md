@@ -1047,3 +1047,40 @@ Ahora, si las Bandas de Bollinger son inválidas o el ratio es insuficiente, el 
 
 **Archivos editados:**
 - `mql5/AI_Quant_Terminal_v3.mq5`
+
+### W. Refactor basado en CodeGraph (2026-09-28)
+
+**Análisis:** Se analizó el grafo de código (`.codegraph/codegraph.db`) identificando puntos débiles de acoplample y complejidad.
+
+**Cambios aplicados:**
+
+1. **Extracción de Qwen client** — Las funciones `_query_qwen_unified` y `_query_qwen_sltp_validator` se extrajeron de `routers/ai.py` a `services/qwen_client.py`. Reduce el acoplamiento de `ai.py` (59→~30 nodos) y centraliza la lógica de llamadas a Qwen.
+
+2. **Fallback en structured_logging** — `log_to_audit` ahora captura el `RuntimeError` de `get_pool()` y loguea un warning en vez de propagar la excepción. Evita crashes cuando el pool no está inicializado.
+
+3. **Desacoplamiento de order_manager.prepare** — Las validaciones se extrajeron a `services/order_validator.py` con funciones específicas (`validate_price_range`, `validate_geometry`, `validate_sl_pips`, `validate_volume`, `check_duplicate`). `prepare` se reduce de 36 llamadas salientes a ~15.
+
+4. **Modularización del frontend** — `frontend/js/app.js` se separó en `api.js` (llamadas fetch), `ui.js` (renderizado DOM/Chart.js) y `app.js` (orquestación). Cada módulo <100 líneas.
+
+5. **Limpieza de código legacy** — `train_ppo_v2.py` se movió a `ml/archive/` al no estar referenciado en scripts de automatización.
+
+**Validación:** `pytest fastapi/tests/ -q` → 73 passed, 2 failed (pre-existentes, no relacionados con estos cambios).
+
+**Archivos creados:**
+- `fastapi/services/qwen_client.py`
+- `fastapi/services/order_validator.py`
+- `frontend/js/api.js`
+- `frontend/js/ui.js`
+- `fastapi/tests/test_qwen_client.py`
+- `fastapi/tests/test_order_validator.py`
+- `fastapi/tests/test_structured_logging_fallback.py`
+
+**Archivos modificados:**
+- `fastapi/routers/ai.py`
+- `fastapi/services/structured_logging.py`
+- `fastapi/services/order_manager.py`
+- `frontend/js/app.js`
+- `frontend/index.html`
+
+**Archivos movidos:**
+- `fastapi/ml/train_ppo_v2.py` → `fastapi/ml/archive/train_ppo_v2.py`

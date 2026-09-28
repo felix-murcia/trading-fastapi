@@ -126,12 +126,10 @@ async def log_to_audit(audit_event: str, data: dict, pool=None, cycle_id: str | 
     """
     Helper para guardar un evento con trace_id en audit_log.
     Incluye el trace_id automáticamente si está disponible.
+    Si el pool no está disponible, loguea un warning y continúa.
     """
     from db.connection import get_pool as _get_pool
     import time
-
-    if pool is None:
-        pool = _get_pool()
 
     trace = get_trace_id() or "no-trace"
     mt5_ts = data.get("mt5_time")
@@ -143,6 +141,9 @@ async def log_to_audit(audit_event: str, data: dict, pool=None, cycle_id: str | 
     }
 
     try:
+        if pool is None:
+            pool = _get_pool()
+
         if mt5_ts is not None:
             await pool.execute(
                 "INSERT INTO audit_log(cycle_id, event, data, created_at) VALUES($1, $2, $3, to_timestamp($4::double precision))",

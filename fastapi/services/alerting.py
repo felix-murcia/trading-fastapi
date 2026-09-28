@@ -71,5 +71,5 @@ def _send_to_telegram(level: AlertLevel, message: str, context: dict | None) -> 
             json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
             timeout=5.0,
         )
-    except Exception:
-        pass  # No fallar la alerta por un fallo en el canal de notificación
+    except Exception as e:
+        logger.warning("[ALERTING] Telegram falló: %s", e)

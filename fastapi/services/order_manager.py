@@ -18,6 +18,14 @@ import json
 from models.orders import OrderPrepareRequest, OrderPrepareResponse, AuditLogRequest, AuditLogResponse
 from db.connection import get_pool
 from config import settings
+from services.order_validator import (
+    validate_price_range,
+    validate_geometry,
+    validate_sl_pips,
+    validate_volume,
+    check_duplicate,
+    OrderValidationError,
+)
 
 
 async def _audit(cycle_id: str, event: str, data: dict) -> None:
@@ -29,50 +37,6 @@ async def _audit(cycle_id: str, event: str, data: dict) -> None:
         )
     except Exception as exc:
         logger.warning("[ORDER-MANAGER] audit_log failed: %s", exc)
-
-
-VALID_RANGES = {
-    "EURUSD": (1.05, 1.20),
-    "GBPUSD": (1.20, 1.45),
-    "AUDUSD": (0.55, 0.90),
-    "NZDUSD": (0.50, 0.80),
-    "USDJPY": (130.0, 175.0),
-    "USDCHF": (0.75, 1.05),
-    "USDCAD": (1.20, 1.55),
-    "USDCNH": (6.50, 8.50),
-    "USDSEK": (8.00, 12.00),
-    "XAUUSD": (2000.0, 8000.0),
-    "XAUEUR": (2000.0, 8000.0),
-}
-
-PIP_SIZE = {
-    "EURUSD": 0.0001,
-    "GBPUSD": 0.0001,
-    "AUDUSD": 0.0001,
-    "NZDUSD": 0.0001,
-    "USDJPY": 0.01,
-    "USDCHF": 0.0001,
-    "USDCAD": 0.0001,
-    "USDCNH": 0.0001,
-    "USDSEK": 0.0001,
-    "XAUUSD": 0.10,
-    "XAUEUR": 0.10,
-}
-
-SL_LIMITS: dict[str, tuple[float, float]] = {
-    "USDJPY": (5.0,  300.0),
-    "XAUUSD": (10.0, 2000.0),
-    "XAUEUR": (10.0, 2000.0),
-}
-_SL_DEFAULT = (3.0, 300.0)
-
-
-def _pip(symbol: str) -> float:
-    return PIP_SIZE.get(symbol, 0.0001)
-
-
-def _pips(symbol: str, a: float, b: float) -> float:
-    return abs(a - b) / _pip(symbol)
 
 
 def _reject(reason: str) -> OrderPrepareResponse:
@@ -103,59 +67,20 @@ async def prepare(req: OrderPrepareRequest) -> OrderPrepareResponse:
             await _audit(req.cycle_id, "order_rejected", {"reason": f"risk_guardian_blocked:{reason}", "symbol": req.symbol})
             return _reject(f"risk_guardian_blocked: {reason}")
     except Exception as rg_err:
-        logger.warning("[ORDER-MANAGER] RiskGuardian check falló: %s — continuando", rg_err)
+        logger.error("[ORDER-MANAGER] RiskGuardian check falló: %s — bloqueando orden", rg_err)
+        await _audit(req.cycle_id, "order_rejected", {"reason": f"risk_guardian_error:{rg_err}", "symbol": req.symbol})
+        return _reject(f"risk_guardian_error: {rg_err}")
 
-    # 2. Rango de precio
-    lo, hi = VALID_RANGES.get(req.symbol, (0, 99999))
-    if not (lo <= req.entry <= hi):
-        await _audit(req.cycle_id, "order_rejected", {"reason": f"entry_out_of_range:{req.entry}", "symbol": req.symbol, "entry": req.entry})
-        return _reject(f"entry_out_of_range:{req.entry}")
-
-    # 3. Geometría (tp=0 = sin take profit, permitido)
-    if req.type == "BUY":
-        if not (req.sl < req.entry):
-            await _audit(req.cycle_id, "order_rejected", {"reason": "invalid_geometry_buy", "symbol": req.symbol})
-            return _reject("invalid_geometry_buy")
-        if req.tp != 0 and req.tp <= req.entry:
-            await _audit(req.cycle_id, "order_rejected", {"reason": "invalid_geometry_buy", "symbol": req.symbol})
-            return _reject("invalid_geometry_buy")
-    elif req.type == "SELL":
-        if not (req.entry < req.sl):
-            await _audit(req.cycle_id, "order_rejected", {"reason": "invalid_geometry_sell", "symbol": req.symbol})
-            return _reject("invalid_geometry_sell")
-        if req.tp != 0 and req.tp >= req.entry:
-            await _audit(req.cycle_id, "order_rejected", {"reason": "invalid_geometry_sell", "symbol": req.symbol})
-            return _reject("invalid_geometry_sell")
-    else:
-        await _audit(req.cycle_id, "order_rejected", {"reason": f"unknown_order_type:{req.type}", "symbol": req.symbol})
-        return _reject(f"unknown_order_type:{req.type}")
-
-    # 4. SL en pips
-    sl_pips = _pips(req.symbol, req.entry, req.sl)
-    min_pips, max_pips = SL_LIMITS.get(req.symbol, _SL_DEFAULT)
-    if sl_pips < min_pips:
-        await _audit(req.cycle_id, "order_rejected", {"reason": f"sl_too_tight:{round(sl_pips,1)}pips", "symbol": req.symbol, "sl_pips": round(sl_pips,1)})
-        return _reject(f"sl_too_tight:{round(sl_pips,1)}pips")
-    if sl_pips > max_pips:
-        await _audit(req.cycle_id, "order_rejected", {"reason": f"sl_too_wide:{round(sl_pips,1)}pips", "symbol": req.symbol, "sl_pips": round(sl_pips,1)})
-        return _reject(f"sl_too_wide:{round(sl_pips,1)}pips")
-
-    # 5. Volumen
-    if not (settings.min_volume <= req.volume <= settings.max_volume):
-        await _audit(req.cycle_id, "order_rejected", {"reason": f"volume_out_of_range:{req.volume}", "symbol": req.symbol, "volume": req.volume})
-        return _reject(f"volume_out_of_range:{req.volume}")
-
-    # 6. Duplicado: mismo símbolo + entry ± 1 pip (solo órdenes recientes)
-    tolerance = _pip(req.symbol)
-    dup = await pool.fetchrow(
-        "SELECT id FROM orders WHERE symbol=$1 AND status IN ('pending','placed') "
-        "AND created_at >= NOW() - INTERVAL '" + str(settings.order_max_age_hours) + " hours' "
-        "AND ABS(entry - $2) <= $3",
-        req.symbol, req.entry, tolerance,
-    )
-    if dup:
-        await _audit(req.cycle_id, "order_rejected", {"reason": f"duplicate_order:{req.symbol}@{req.entry}", "symbol": req.symbol})
-        return _reject(f"duplicate_order:{req.symbol}@{req.entry}")
+    # 2-6. Validaciones (extraídas a order_validator)
+    try:
+        validate_price_range(req.symbol, req.entry)
+        validate_geometry(req)
+        validate_sl_pips(req.symbol, req.entry, req.sl)
+        validate_volume(req.volume)
+        await check_duplicate(pool, req.symbol, req.entry)
+    except OrderValidationError as exc:
+        await _audit(req.cycle_id, "order_rejected", {"reason": exc.reason, "symbol": req.symbol})
+        return _reject(exc.reason)
 
     # 7. Registrar en DB como pending
     order_id = await pool.fetchval(

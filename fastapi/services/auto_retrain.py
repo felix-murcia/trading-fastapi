@@ -254,13 +254,16 @@ async def record_trade_filled(
         RetrainConfig.trades_before_retrain,
     )
 
-    # Trigger retrain si corresponde
+    # Trigger retrain si corresponde (requiere aprobación humana)
     if state.filled_count >= RetrainConfig.min_trades_for_retrain:
         logger.warning(
-            "[RETRAIN] Trigger automático: filled_count=%d >= min_trades=%d — disparando _trigger_retrain()",
+            "[RETRAIN] Trigger automático: filled_count=%d >= min_trades=%d — requiere aprobación humana",
             state.filled_count,
             RetrainConfig.min_trades_for_retrain,
         )
+        if not getattr(settings, "retrain_auto_approve", False):
+            logger.warning("[RETRAIN] Auto-retrain bloqueado: retrain_auto_approve=false. Usar endpoint /admin/retrain/approve para aprobar.")
+            return
         asyncio.create_task(_trigger_retrain())
 
 

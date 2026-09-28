@@ -185,8 +185,8 @@ async def fetch_orderbook(symbol: str, levels: int = 10) -> Optional[dict]:
             )
             if res.status_code == 200:
                 return res.json()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("[MICROSTRUCTURE] Orderbook fetch falló: %s", e)
     return None
 
 
