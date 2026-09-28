@@ -1192,3 +1192,30 @@ Ahora, si las Bandas de Bollinger son inválidas o el ratio es insuficiente, el 
 **Archivos:**
 - `mql5/AI_Quant_Terminal_v3.mq5` (v13.1)
 - `fastapi/tests/test_ea_close_outbox.py` (nuevo)
+
+### AC. Fix P0-1/P1-1/P1-3: motor de retrain honesto (2026-09-28)
+
+**Problemas (auditoría):**
+1. `filled_count` **nunca se reseteaba** tras un retrain promovido → con `retrain_auto_approve` activo, cada trade dispararía otro retrain de 100k steps (retrain storm). Además `_load_retrain_state` recomputaba el contador desde TODAS las `trade_outcomes` en cada reinicio con contador=0 → umbral superado de inmediato.
+2. **Evaluación inválida**: candidato y baseline se evaluaban con `random_reset=True` → cada uno en un segmento distinto → la comparación de recompensa no era significativa.
+3. **Gate con `>=`**: empates promovían → churn de bundles certificados sin mejora.
+4. **Sin VecNormalize en retrain**: `_do_retrain` entrenaba y promovía bundles crudos incoherentes con el pipeline normalizado (mismatch train/serve).
+5. **P0-1**: `retrain_auto_approve` no declarado en `config.py` (se congelaba por `getattr` implícito).
+
+**Cambios:**
+- `_do_retrain` entrena **siempre con VecNormalize**: continúa las stats del bundle activo si su manifest las declara; si el bundle es crudo (caso actual D6) o no hay manifest, stats nuevas. La promoción guarda **zip + pkl + manifest** (`source=auto_retrain_normalized`); un fallo a mitad deja el bundle incoherente y `validate_bundle` falla en el próximo arranque (fail-fast).
+- `_evaluate_model(..., obs_rms=None)`: episodio **determinista** (`random_reset=False`) y cada política se evalúa en su **espacio de entrada nativo** (obs_rms del candidato = stats de entrenamiento; obs_rms del baseline = las de su manifest declarada, `None` si es crudo). API VecEnv.
+- `_gate_decision` (extraído y testeado): candidato válido + **mejora estricta** sobre baseline (`>`); los empates **no** promueven.
+- **Reset de ciclo**: tras promoción, `filled_count=0`, `outcomes=[]`, `last_retrain_time=now`. `_load_retrain_state` solo hace bootstrap (recomputo desde la BD) si `filled_count==0 AND last_retrain_time==0` → tras reinicio, contador=0 significa "nuevo ciclo", no "sin datos".
+- `config.py`: **`retrain_auto_approve: bool = False`** declarado (P0-1). La promoción sigue bajo aprobación humana (`/admin/retrain/approve`); cambiar a `true` en `.env` es una decisión explícita.
+
+**Efecto en servicio:** el primer retrain aprobado sustituirá el bundle crudo D6 (`auto_retrain_raw_2026-09-28`) por un bundle normalizado y certificado de extremo a extremo.
+
+**Validación (2026-09-28):** `pytest fastapi/tests/ -q` → **128 passed** (host + contenedor). Tests nuevos (+18 en `test_auto_retrain.py`): gate estricto (6), determinismo de evaluación (3), bootstrap de estado (2), config P0-1 (1), helpers de bundle `_load_obs_rms`/`_make_train_env` (5), integración `_do_retrain` end-to-end con mocks de red/BD — promueve bundle completo y resetea contador (1).
+
+**Limitación conocida:** la validación sigue siendo un episodio determinista (walk-forward multi-ventana para el gate queda como P2) y el test de integración parchea `learn()` — valida la mecánica de promoción, no la calidad del entrenamiento.
+
+**Archivos:**
+- `fastapi/services/auto_retrain.py`
+- `fastapi/config.py`
+- `fastapi/tests/test_auto_retrain.py` (+18)

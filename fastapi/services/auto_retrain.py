@@ -5,7 +5,7 @@ Funciona así:
 1. Cada vez que una orden cambia a 'filled', incrementamos un contador en memoria
 2. Cuando el contador alcanza TRADES_BEFORE_RETRAIN, disparamos retrain
 3. El retrain usa los últimos datos de velas + feedback de rendimiento
-4. Reemplaza el modelo en disco y notifica
+4. Promueve el BUNDLE (zip + VecNormalize + manifest) y reinicia el contador de ciclo
 """
 import asyncio
 import logging
@@ -81,7 +81,10 @@ async def _load_retrain_state() -> RetrainState:
         outcomes=[],
         retrain_in_progress=False,
     )
-    if state.filled_count == 0:
+    if state.filled_count == 0 and state.last_retrain_time == 0.0:
+        # Bootstrap solo si NUNCA hubo retrain: filled_count = cierres desde el inicio.
+        # Si last_retrain_time > 0, filled_count=0 significa "contador reiniciado tras
+        # un retrain promovido" (nuevo ciclo) y NO debe recomputarse desde la BD.
         state.outcomes = await _load_persisted_outcomes()
         state.filled_count = len(state.outcomes)
     return state
@@ -280,7 +283,7 @@ async def record_trade_filled(
             state.filled_count,
             RetrainConfig.min_trades_for_retrain,
         )
-        if not getattr(settings, "retrain_auto_approve", False):
+        if not settings.retrain_auto_approve:
             logger.warning("[RETRAIN] Auto-retrain bloqueado: retrain_auto_approve=false. Usar endpoint /admin/retrain/approve para aprobar.")
             return
         asyncio.create_task(_trigger_retrain())
@@ -303,34 +306,121 @@ async def _trigger_retrain() -> None:
             await _save_retrain_state(state)
 
 
-def _evaluate_model(model, df: pd.DataFrame, env_cfg: dict) -> dict:
-    """Evalúa una política sin feedback real y devuelve métricas comparables."""
+def _load_obs_rms(model_path: str, env_cfg: dict):
+    """obs_rms congeladas del bundle certificado en su manifest (None = bundle crudo)."""
+    from services.model_registry import load_manifest
+
+    try:
+        manifest = load_manifest(model_path)
+    except RuntimeError as exc:
+        logger.warning("[RETRAIN] Manifest no disponible (%s) — baseline evaluado en crudo", exc)
+        return None
+    vec_norm_file = manifest.get("vec_norm_file")
+    if not vec_norm_file:
+        return None
+
+    from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+    from ml.trading_env_v2 import ForexTradingEnvV2
+
+    pkl_path = os.path.join(os.path.dirname(model_path), vec_norm_file)
+    cfg = dict(env_cfg)
+    cfg["real_outcomes"] = []
+    venv = VecNormalize.load(pkl_path, DummyVecEnv([lambda: ForexTradingEnvV2(**cfg)]))
+    venv.training = False
+    venv.norm_reward = False
+    logger.info("[RETRAIN] Baseline se evaluará con stats del bundle: %s", pkl_path)
+    return venv.obs_rms
+
+
+def _make_train_env(env_cfg: dict, model_path: str):
+    """Entorno de entrenamiento SIEMPRE con VecNormalize (P1-3):
+
+    - bundle activo declarando vec_norm_file → continúa con ESAS stats
+      (train/serve coherente entre ciclos);
+    - bundle crudo o sin manifest → stats nuevas desde cero.
+    """
+    from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+    from ml.trading_env_v2 import ForexTradingEnvV2
+    from services.model_registry import load_manifest
+
+    vec_norm_file = None
+    try:
+        vec_norm_file = load_manifest(model_path).get("vec_norm_file")
+    except RuntimeError as exc:
+        logger.warning("[RETRAIN] Manifest no disponible (%s) — VecNormalize nuevo desde cero", exc)
+
+    if vec_norm_file:
+        pkl_path = os.path.join(os.path.dirname(model_path), vec_norm_file)
+        train_env = VecNormalize.load(pkl_path, DummyVecEnv([lambda: ForexTradingEnvV2(**env_cfg)]))
+        train_env.training = True
+        train_env.norm_reward = True
+        logger.warning("[RETRAIN] Continuando con stats de normalización del bundle activo: %s", vec_norm_file)
+        return train_env
+
+    logger.warning("[RETRAIN] Bundle activo sin normalización — VecNormalize nuevo (stats desde cero)")
+    return VecNormalize(
+        DummyVecEnv([lambda: ForexTradingEnvV2(**env_cfg)]),
+        norm_obs=True, norm_reward=True, clip_obs=10.0,
+    )
+
+
+def _gate_decision(candidate: dict, baseline: dict | None, min_openings: int) -> tuple[bool, str]:
+    """Gate de promoción: candidato válido + mejora ESTRICTA sobre el baseline.
+
+    Los empates NO promueven: si el entrenamiento no mejora la recompensa, el
+    modelo activo se conserva (sin churn de bundles certificados).
+    """
+    if not (candidate["openings"] >= min_openings and np.isfinite(candidate["reward"])):
+        return False, "invalid_openings_or_reward"
+    if baseline is not None and not (candidate["reward"] > baseline["reward"]):
+        return False, "no_strict_improvement"
+    return True, "promoted"
+
+
+def _evaluate_model(model, df: pd.DataFrame, env_cfg: dict, obs_rms=None) -> dict:
+    """Evalúa una política sin feedback real y devuelve métricas comparables.
+
+    - Episodio DETERMINISTA (random_reset=False): candidato y baseline recorren
+      el MISMO segmento → la comparación es válida.
+    - `obs_rms`: estadísticas congeladas de VecNormalize (None = bundle crudo):
+      cada política se evalúa en el espacio de entrada con el que fue entrenada.
+    """
+    from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
     from ml.trading_env_v2 import ForexTradingEnvV2
 
     eval_cfg = dict(env_cfg)
     eval_cfg["df"] = df
     eval_cfg["real_outcomes"] = []
-    env = ForexTradingEnvV2(**eval_cfg)
-    observation, _ = env.reset()
+    eval_cfg["random_reset"] = False  # episodio fijo: baseline y candidato idénticos
+    dummy = DummyVecEnv([lambda: ForexTradingEnvV2(**eval_cfg)])
+    if obs_rms is not None:
+        env = VecNormalize(dummy, training=False, norm_reward=False, clip_obs=10.0)
+        env.obs_rms = obs_rms
+    else:
+        env = dummy
+
+    observation = env.reset()
     total_reward = 0.0
     openings = 0
     previous_position = 0
-    terminated = False
-    truncated = False
+    info = {}
+    done = False
 
-    while not terminated and not truncated:
+    while not done:
         action, _ = model.predict(observation, deterministic=True)
-        action = np.asarray(action, dtype=np.float32).reshape(-1)
-        if action.size >= 1:
-            target_position = 1 if action[0] > 0.33 else (-1 if action[0] < -0.33 else 0)
+        flat = np.asarray(action, dtype=np.float32).reshape(-1)
+        if flat.size >= 1:
+            target_position = 1 if flat[0] > 0.33 else (-1 if flat[0] < -0.33 else 0)
         else:
             target_position = 0
         if target_position != 0 and previous_position == 0:
             openings += 1
 
-        observation, reward, terminated, truncated, info = env.step(action)
-        total_reward += float(reward)
+        observation, reward, done_arr, infos = env.step(flat.reshape(1, -1))
+        total_reward += float(reward[0])
+        info = infos[0]
         previous_position = int(info.get("position", 0))
+        done = bool(done_arr[0])
 
     closed_trades = int(info.get("wins", 0)) + int(info.get("losses", 0))
     wins = int(info.get("wins", 0))
@@ -354,7 +444,6 @@ async def _do_retrain() -> None:
     5. Loguea resultado
     """
     from services.model_backup import backup_model as upload_model
-    from ml.trading_env_v2 import ForexTradingEnvV2  # ← V2 con spread real
 
     cfg = RetrainConfig
     logger.warning("[RETRAIN] ===== INICIANDO RETRAIN =====")
@@ -398,25 +487,20 @@ async def _do_retrain() -> None:
     )
 
     from stable_baselines3 import PPO
-    from stable_baselines3.common.vec_env import DummyVecEnv
+
+    train_env = _make_train_env(env_cfg, MODEL_PATH)
 
     if os.path.exists(MODEL_PATH):
-        env = DummyVecEnv([lambda: ForexTradingEnvV2(**env_cfg)])
-        model = PPO.load(MODEL_PATH, env=env)
-        logger.info("[RETRAIN] Modelo existente cargado — continuando entrenamiento")
+        model = PPO.load(MODEL_PATH, env=train_env)
+        logger.info("[RETRAIN] Modelo existente cargado — continuando entrenamiento (con VecNormalize)")
     else:
         logger.warning("[RETRAIN] No hay modelo previo — creando nuevo")
-        env = DummyVecEnv([lambda: ForexTradingEnvV2(**env_cfg)])
         model = PPO(
             "MlpPolicy",
-            env,
+            train_env,
             learning_rate=cfg.learning_rate,
             verbose=cfg.verbose,
         )
-
-    if "env" not in dir() or env is None:
-        env = DummyVecEnv([lambda: ForexTradingEnvV2(**env_cfg)])
-    model.set_env(env)
 
     logger.info("[RETRAIN] Entrenando %d timesteps...", cfg.total_timesteps)
     model.learn(
@@ -424,11 +508,13 @@ async def _do_retrain() -> None:
         progress_bar=False,
     )
 
-    candidate_metrics = _evaluate_model(model, eval_df, env_cfg)
+    candidate_metrics = _evaluate_model(model, eval_df, env_cfg, obs_rms=train_env.obs_rms)
     baseline_metrics = None
     if os.path.exists(MODEL_PATH):
-        from stable_baselines3 import PPO
-        baseline_metrics = _evaluate_model(PPO.load(MODEL_PATH), eval_df, env_cfg)
+        baseline_metrics = _evaluate_model(
+            PPO.load(MODEL_PATH), eval_df, env_cfg,
+            obs_rms=_load_obs_rms(MODEL_PATH, env_cfg),
+        )
 
     logger.warning(
         "[RETRAIN-EVAL] candidate openings=%d win_rate=%.3f reward=%.3f trades=%d | baseline=%s",
@@ -437,21 +523,21 @@ async def _do_retrain() -> None:
         baseline_metrics,
     )
 
-    candidate_is_valid = (
-        candidate_metrics["openings"] >= cfg.min_validation_openings
-        and np.isfinite(candidate_metrics["reward"])
-    )
-    improves_baseline = (
-        baseline_metrics is None
-        or candidate_metrics["reward"] >= baseline_metrics["reward"]
-    )
-    if not candidate_is_valid or not improves_baseline:
+    gate_ok, gate_reason = _gate_decision(candidate_metrics, baseline_metrics, cfg.min_validation_openings)
+    if not gate_ok:
         logger.warning(
-            "[RETRAIN] Candidato rechazado: valid=%s improves_baseline=%s; modelo activo conservado",
-            candidate_is_valid, improves_baseline,
+            "[RETRAIN] Candidato rechazado (%s): modelo activo conservado | candidate=%s baseline=%s",
+            gate_reason, candidate_metrics, baseline_metrics,
         )
         await _save_retrain_metrics(df, cfg)
         return
+
+    # Promoción del BUNDLE completo: stats + zip + manifest certifican el conjunto.
+    # Si el proceso muere entre archivos, validate_bundle falla en el próximo arranque.
+    norm_path = os.path.splitext(MODEL_PATH)[0] + "_vec_norm.pkl"
+    norm_tmp = norm_path + ".tmp"
+    train_env.save(norm_tmp)
+    os.replace(norm_tmp, norm_path)
 
     candidate_path = MODEL_PATH.removesuffix(".zip") + ".candidate.zip"
     model.save(candidate_path)
@@ -463,12 +549,15 @@ async def _do_retrain() -> None:
     write_manifest(MODEL_PATH, build_manifest(
         MODEL_PATH,
         obs_shape=getattr(model.observation_space, "shape", ()),
-        vec_norm_file=None,  # _do_retrain entrena sin VecNormalize: el bundle es crudo
-        source="auto_retrain_raw",
-        extra={"candidate_metrics": candidate_metrics},
+        vec_norm_file=os.path.basename(norm_path),
+        source="auto_retrain_normalized",
+        extra={"candidate_metrics": candidate_metrics, "baseline_metrics": baseline_metrics},
     ))
+
     state = await _ensure_retrain_state()
     state.last_retrain_time = time.time()
+    state.filled_count = 0          # nuevo ciclo: los próximos N cierres cuentan
+    state.outcomes = []
     await _save_retrain_state(state)
 
     # 6. Backup a GCS
