@@ -7,6 +7,7 @@ import httpx
 import numpy as np
 import pandas as pd
 from fastapi.testclient import TestClient
+from gymnasium.spaces import Box
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "ml"))
 
@@ -98,7 +99,11 @@ def _build_candles():
 def test_ai_predict_e2e_flow():
     model = MagicMock()
     model.predict.return_value = (np.array([0.80, 0.18, 0.15, 0.15], dtype=np.float32), None)
-    model.observation_space.shape = (20, 24)
+    # Espacios Box REALES: si el bundle certificado declara vec_norm, el startup
+    # construye DummyVecEnv(_DummyEnv(obs_space, action_space)) y SB3 valida los
+    # spaces (un MagicMock falla con 'Unsupported structured space').
+    model.observation_space = Box(-np.inf, np.inf, shape=(20, 24), dtype=np.float32)
+    model.action_space = Box(-1.0, 1.0, shape=(4,), dtype=np.float32)
 
     dist = MagicMock()
     dist.distribution.mean.numpy.return_value = np.array([0.1, 0.1, 0.1, 0.1], dtype=np.float32)

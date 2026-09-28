@@ -1240,3 +1240,18 @@ Ahora, si las Bandas de Bollinger son inválidas o el ratio es insuficiente, el 
 - `fastapi/routers/ai.py`
 - `fastapi/config.py`
 - `fastapi/tests/test_retrain_approval.py` (nuevo)
+
+### AE. Fix P1-1: harness walk-forward + gate multi-métrico (2026-09-28)
+
+**Problema (auditoría):** la promoción dependía de **1 episodio** determinista sobre un segmento con solape de contexto con el train (leakage), **1 métrica** (reward), y rechazo y promoción escribían el mismo evento `retrain_completed` **sin métricas ni hash**. Sin validez estadística.
+
+**Cambios:**
+- **`services/walk_forward.py` (nuevo):** split `train(70%) + embargo(window=20) + 4 folds OOS disjuntos + holdout congelado(10%)`. El scoring **particiona el eje temporal completo sin solape** en todas las fronteras (fold 1 se contextúa con las barras de embargo: ni entrenadas ni puntuadas; los folds siguientes con la cola del fold anterior, no puntuada en ellos). Si los datos no bastan (`lookback_candles` insuficiente) **falla ruidosamente** con `RuntimeError` accionable.
+- **Métricas por pliego:** Sharpe/Sortino (retornos de la curva de equity, anualización H1 = 24×252), `max_dd` peak-to-trough, `expectancy` = (balance final − inicial)/trades, `trades`, `openings`, `win_rate`.
+- **`gate_walk_forward` — multi-métrico, todas las reglas estrictas (empate = fallo):** `total_openings ≥ mínimo`, métricas finitas, y si hay baseline: `sum_reward >`, **mayoría de folds ganados (≥3 de 4)** y `mean_sharpe >` baseline. El **holdout se evalúa y persiste pero NUNCA decide**.
+- **`_do_retrain`:** el split se construye ANTES de entrenar (`train_df` = región walk-forward exacta → cero leakage candidato↔folds); evaluación **emparejada** (candidato y baseline recorren los mismos pliegues, cada uno con su `obs_rms` declarado); eventos de auditoría **`retrain_promoted` / `retrain_rejected`** con el informe completo (métricas por pliego + agregados + checks del gate); el informe también queda en `extra` del manifest del bundle.
+- **`_evaluate_model`:** devuelve `equity_curve` y `step_rewards` (para las métricas) y corrige el bug de `wins`/`losses` (el env expone `trades` + `win_rate`, no claves `wins`/`losses` → antes siempre 0). Eliminados `_gate_decision` (gate de 1 episodio) y `_save_retrain_metrics` (evento ambiguo).
+
+**Validación (2026-09-28):** `pytest fastapi/tests/ -q` → **160 passed** (140 → 160). Tests nuevos `test_walk_forward.py` (25): partición sin solape ×5 + contexto/embargo ×3, fallos ruidosos del split ×3... desglose: split 8, métricas 6, gate 7, patrón de llamadas y agregados 4. Integración `_do_retrain` ampliada: promoción verifica informe walk-forward en manifest/evento (+1 **rechazo por empate** con el bundle real copiado → bundle intacto, sin reset). −6 tests del gate antiguo (cubiertos por los del nuevo gate). **E2E actualizado:** el mock del modelo usa `Box` reales porque el bundle certificado ahora declara `vec_norm_file` → el startup ejecuta la rama VecNormalize (SB3 rechaza spaces MagicMock).
+
+**Archivos:** `fastapi/services/walk_forward.py` (nuevo), `fastapi/services/auto_retrain.py`, `fastapi/tests/test_walk_forward.py` (nuevo), `fastapi/tests/test_auto_retrain.py`, `fastapi/tests/test_e2e_ai_predict.py`.

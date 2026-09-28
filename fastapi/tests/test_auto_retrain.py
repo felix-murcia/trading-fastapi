@@ -210,45 +210,6 @@ class _ZerosModel:
         return np.zeros(4, dtype=np.float32), None
 
 
-class TestGateDecision:
-    """_gate_decision: solo promueve mejora ESTRICTA (empates no promueven)."""
-
-    @staticmethod
-    def _m(openings=3, reward=10.0):
-        return {"openings": openings, "closed_trades": 2, "wins": 1, "losses": 1,
-                "win_rate": 0.5, "reward": reward}
-
-    def test_strict_improvement_promotes(self):
-        from services.auto_retrain import _gate_decision
-        ok, reason = _gate_decision(self._m(reward=10.1), self._m(reward=10.0), 1)
-        assert ok is True and reason == "promoted"
-
-    def test_tie_does_not_promote(self):
-        from services.auto_retrain import _gate_decision
-        ok, reason = _gate_decision(self._m(reward=10.0), self._m(reward=10.0), 1)
-        assert ok is False and reason == "no_strict_improvement"
-
-    def test_worse_does_not_promote(self):
-        from services.auto_retrain import _gate_decision
-        ok, reason = _gate_decision(self._m(reward=9.9), self._m(reward=10.0), 1)
-        assert ok is False and reason == "no_strict_improvement"
-
-    def test_first_model_without_baseline_promotes(self):
-        from services.auto_retrain import _gate_decision
-        ok, reason = _gate_decision(self._m(), None, 1)
-        assert ok is True and reason == "promoted"
-
-    def test_insufficient_openings_rejected(self):
-        from services.auto_retrain import _gate_decision
-        ok, reason = _gate_decision(self._m(openings=0), None, 1)
-        assert ok is False and reason == "invalid_openings_or_reward"
-
-    def test_non_finite_reward_rejected(self):
-        from services.auto_retrain import _gate_decision
-        ok, reason = _gate_decision(self._m(reward=float("nan")), None, 1)
-        assert ok is False and reason == "invalid_openings_or_reward"
-
-
 class TestEvaluateModelDeterminism:
     """Evaluación determinista: mismo modelo + mismo segmento = mismas métricas.
 
@@ -271,8 +232,9 @@ class TestEvaluateModelDeterminism:
     def test_raw_run_returns_metrics(self, df):
         from services.auto_retrain import _evaluate_model
         metrics = _evaluate_model(_ZerosModel(), df, _env_cfg(df))
-        assert set(metrics) == {"openings", "closed_trades", "wins", "losses",
-                                "win_rate", "reward"}
+        assert set(metrics) == {"openings", "trades", "wins", "losses",
+                                "win_rate", "reward", "balance",
+                                "equity_curve", "step_rewards"}
         assert metrics["openings"] == 0  # política de ceros nunca abre
 
     def test_normalized_run_uses_obs_rms(self, df):
@@ -404,19 +366,19 @@ class TestBundleNormHelpers:
 
 
 class TestDoRetrainPromotion:
-    """_do_retrain end-to-end (red/BD parcheadas): bundle normalizado + reset de ciclo."""
+    """_do_retrain end-to-end (red/BD parcheadas): walk-forward gate + bundle."""
 
-    @pytest.mark.asyncio
-    async def test_promotes_normalized_bundle_and_resets_counter(self, tmp_path, monkeypatch):
+    @staticmethod
+    def _patch_common(monkeypatch, tmp_path, *, candles=500, model_path=None):
         import stable_baselines3 as sb3
         from services import auto_retrain as ar
-        from services.model_registry import validate_bundle
 
-        monkeypatch.setattr(ar, "MODEL_PATH", str(tmp_path / "ppo_trading_bot_v3.zip"))
+        path = model_path or str(tmp_path / "ppo_trading_bot_v3.zip")
+        monkeypatch.setattr(ar, "MODEL_PATH", path)
         monkeypatch.setattr(ar, "_fetch_historical_candles",
-                            AsyncMock(return_value=_candles(150)))
+                            AsyncMock(return_value=_candles(candles)))
         monkeypatch.setattr(ar, "_load_persisted_outcomes", AsyncMock(return_value=[]))
-        monkeypatch.setattr(ar, "_save_retrain_metrics", AsyncMock())
+        monkeypatch.setattr(ar, "_log_retrain_event", AsyncMock())
         monkeypatch.setattr("services.model_backup.backup_model",
                             AsyncMock(return_value=None))
 
@@ -424,19 +386,31 @@ class TestDoRetrainPromotion:
         monkeypatch.setattr(ar, "_ensure_retrain_state", AsyncMock(return_value=state))
         monkeypatch.setattr(ar, "_save_retrain_state", AsyncMock())
 
-        # Eval parcheado: candidato válido y sin baseline (primer modelo → gate OK).
-        monkeypatch.setattr(ar, "_evaluate_model", lambda *a, **k: {
-            "openings": 3, "closed_trades": 2, "wins": 1, "losses": 1,
-            "win_rate": 0.5, "reward": 1.5,
-        })
-
-        # learn() sin-op: 100k steps no cabe en el suite. Se valida la mecánica
-        # de promoción (zip + pkl + manifest + reset), no el entrenamiento.
+        # learn() sin-op: 100k steps no cabe en la suite. Se valida la mecánica
+        # de promoción/rechazo (bundle + gate + eventos), no el entrenamiento.
         monkeypatch.setattr(sb3.PPO, "learn", lambda self, *a, **k: self)
+        return ar, state, path
+
+    @staticmethod
+    def _fake_metrics(*a, **k):
+        """Métricas deterministas con curvas (Sharpe finito, reward > 0)."""
+        return {
+            "openings": 3, "trades": 2, "wins": 1, "losses": 1,
+            "win_rate": 0.5, "reward": 1.5, "balance": 1002.0,
+            "equity_curve": [1000.0, 1005.0, 998.0, 1010.0],
+            "step_rewards": [1.0, -0.5, 1.0],
+        }
+
+    @pytest.mark.asyncio
+    async def test_promotes_normalized_bundle_and_resets_counter(self, tmp_path, monkeypatch):
+        from services.model_registry import validate_bundle
+
+        ar, state, model_path = self._patch_common(monkeypatch, tmp_path)
+        # Sin baseline (primer modelo): gate exige solo validez (P1-1).
+        monkeypatch.setattr(ar, "_evaluate_model", self._fake_metrics)
 
         await ar._do_retrain()
 
-        model_path = str(tmp_path / "ppo_trading_bot_v3.zip")
         norm_path = str(tmp_path / "ppo_trading_bot_v3_vec_norm.pkl")
         assert os.path.exists(model_path)
         assert os.path.exists(norm_path)
@@ -444,9 +418,51 @@ class TestDoRetrainPromotion:
         manifest = validate_bundle(model_path)
         assert manifest["vec_norm_file"] == "ppo_trading_bot_v3_vec_norm.pkl"
         assert manifest["source"] == "auto_retrain_normalized"
+        # Informe walk-forward persistido en el bundle (P1-1).
+        assert manifest["extra"]["walk_forward"]["n_folds"] == 4
+        assert manifest["extra"]["gate"]["ok"] is True
+
+        # Evento de auditoría con métricas por pliego (antes: retrain_completed
+        # idéntico para promoción y rechazo, sin métricas).
+        ar._log_retrain_event.assert_awaited_once()
+        assert ar._log_retrain_event.await_args.args[0] == "retrain_promoted"
+        report = ar._log_retrain_event.await_args.args[1]["report"]
+        assert len(report["folds"]) == 4
+        assert report["holdout"]["candidate"]["reward"] > 0   # congelado reportado
+        assert report["fold_wins"] is None                    # sin baseline
 
         # Contador de ciclo reiniciado: los próximos N cierres cuentan para el
         # siguiente retrain (antes: filled_count nunca se reseteaba → storm).
         assert state.filled_count == 0
         assert state.last_retrain_time > 1.0
         assert state.outcomes == []
+
+    @pytest.mark.asyncio
+    async def test_rejects_tie_with_baseline_and_keeps_bundle(self, tmp_path, monkeypatch):
+        """Empate con el baseline = rechazo estricto: bundle intacto, sin reset."""
+        import shutil
+
+        real_zip = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "ml", "ppo_trading_bot_v3.zip")
+        )
+        assert os.path.exists(real_zip)
+        tmp_model = tmp_path / "ppo_trading_bot_v3.zip"
+        shutil.copy(real_zip, tmp_model)
+
+        ar, state, model_path = self._patch_common(
+            monkeypatch, tmp_path, model_path=str(tmp_model)
+        )
+        # Mismas métricas para candidato y baseline → empate → gate falla.
+        monkeypatch.setattr(ar, "_evaluate_model", self._fake_metrics)
+
+        await ar._do_retrain()
+
+        # Bundle activo intacto: ni manifest nuevo ni reset de ciclo.
+        assert not os.path.exists(str(tmp_path / "ppo_trading_bot_v3.manifest.json"))
+        assert state.filled_count == 7
+        assert state.last_retrain_time == 1.0
+
+        ar._log_retrain_event.assert_awaited_once()
+        assert ar._log_retrain_event.await_args.args[0] == "retrain_rejected"
+        reason = ar._log_retrain_event.await_args.args[1]["reason"]
+        assert reason.startswith("failed:")

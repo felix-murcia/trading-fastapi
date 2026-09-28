@@ -21,6 +21,11 @@ import pandas as pd
 
 from config import settings
 from services.alerting import AlertLevel, send_alert
+from services.walk_forward import (
+    build_walk_forward_split,
+    evaluate_walk_forward,
+    gate_walk_forward,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +47,10 @@ class RetrainConfig:
     verbose: int = 0
     real_outcome_weight: float = 0.3      # Peso del feedback real vs sintético (0=ignorar, 1=dominante)
     min_validation_openings: int = 1      # Un candidato HOLD permanente no reemplaza al activo
+    walk_forward_folds: int = 4           # P1-1: ≥4 pliegues OOS (exigencia de auditoría)
+    walk_forward_train_frac: float = 0.70
+    walk_forward_holdout_frac: float = 0.10  # holdout congelado: reporta, nunca decide
+    walk_forward_min_fold_bars: int = 10  # pliegue más corto evaluable (si no, aborta)
 
 
 @dataclass
@@ -405,19 +414,6 @@ def _make_train_env(env_cfg: dict, model_path: str):
     )
 
 
-def _gate_decision(candidate: dict, baseline: dict | None, min_openings: int) -> tuple[bool, str]:
-    """Gate de promoción: candidato válido + mejora ESTRICTA sobre el baseline.
-
-    Los empates NO promueven: si el entrenamiento no mejora la recompensa, el
-    modelo activo se conserva (sin churn de bundles certificados).
-    """
-    if not (candidate["openings"] >= min_openings and np.isfinite(candidate["reward"])):
-        return False, "invalid_openings_or_reward"
-    if baseline is not None and not (candidate["reward"] > baseline["reward"]):
-        return False, "no_strict_improvement"
-    return True, "promoted"
-
-
 def _evaluate_model(model, df: pd.DataFrame, env_cfg: dict, obs_rms=None) -> dict:
     """Evalúa una política sin feedback real y devuelve métricas comparables.
 
@@ -425,6 +421,10 @@ def _evaluate_model(model, df: pd.DataFrame, env_cfg: dict, obs_rms=None) -> dic
       el MISMO segmento → la comparación es válida.
     - `obs_rms`: estadísticas congeladas de VecNormalize (None = bundle crudo):
       cada política se evalúa en el espacio de entrada con el que fue entrenada.
+    - Devuelve además curvas (equity, rewards por paso) para que el harness
+      walk-forward calcule Sharpe/Sortino/DD.
+    - wins/losses derivan de info['trades'] e info['win_rate'] (el env NO
+      expone claves "wins"/"losses": antes siempre daban 0 — bug P1-4).
     """
     from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
     from ml.trading_env_v2 import ForexTradingEnvV2
@@ -440,12 +440,15 @@ def _evaluate_model(model, df: pd.DataFrame, env_cfg: dict, obs_rms=None) -> dic
     else:
         env = dummy
 
+    initial_balance = float(eval_cfg.get("initial_balance", 0.0))
     observation = env.reset()
     total_reward = 0.0
     openings = 0
     previous_position = 0
     info = {}
     done = False
+    equity_curve: list = []
+    step_rewards: list = []
 
     while not done:
         action, _ = model.predict(observation, deterministic=True)
@@ -460,18 +463,24 @@ def _evaluate_model(model, df: pd.DataFrame, env_cfg: dict, obs_rms=None) -> dic
         observation, reward, done_arr, infos = env.step(flat.reshape(1, -1))
         total_reward += float(reward[0])
         info = infos[0]
+        equity_curve.append(float(info.get("equity", initial_balance)))
+        step_rewards.append(float(reward[0]))
         previous_position = int(info.get("position", 0))
         done = bool(done_arr[0])
 
-    closed_trades = int(info.get("wins", 0)) + int(info.get("losses", 0))
-    wins = int(info.get("wins", 0))
+    trades = int(info.get("trades", 0))
+    win_rate = float(info.get("win_rate", 0.0))
+    wins = int(round(win_rate * trades))
     return {
         "openings": openings,
-        "closed_trades": closed_trades,
+        "trades": trades,
         "wins": wins,
-        "losses": int(info.get("losses", 0)),
-        "win_rate": wins / closed_trades if closed_trades else 0.0,
+        "losses": trades - wins,
+        "win_rate": win_rate,
         "reward": total_reward,
+        "balance": float(info.get("balance", initial_balance)),
+        "equity_curve": equity_curve,
+        "step_rewards": step_rewards,
     }
 
 
@@ -494,9 +503,22 @@ async def _do_retrain() -> None:
         raise RuntimeError(f"[RETRAIN] No hay suficientes velas: {len(candles)}")
     df = _build_training_dataframe(candles)
 
-    split_idx = max(cfg.retrain_window_size + 1, int(len(df) * 0.8))
-    train_df = df.iloc[:split_idx].reset_index(drop=True)
-    eval_df = df.iloc[split_idx - cfg.retrain_window_size:].reset_index(drop=True)
+    split = build_walk_forward_split(
+        len(df),
+        window_size=cfg.retrain_window_size,
+        n_folds=cfg.walk_forward_folds,
+        train_frac=cfg.walk_forward_train_frac,
+        holdout_frac=cfg.walk_forward_holdout_frac,
+        min_fold_bars=cfg.walk_forward_min_fold_bars,
+    )
+    train_df = df.iloc[:split.train_end].reset_index(drop=True)
+    logger.warning(
+        "[RETRAIN-WF] split: train=%d | embargo=%d | folds=4×~%d barras | holdout@%d (congelado)",
+        split.train_end,
+        split.embargo,
+        split.folds[0].bars,
+        split.holdout.start,
+    )
 
     real_outcomes = await _load_persisted_outcomes()
     n_real = len(real_outcomes)
@@ -549,28 +571,54 @@ async def _do_retrain() -> None:
         progress_bar=False,
     )
 
-    candidate_metrics = _evaluate_model(model, eval_df, env_cfg, obs_rms=train_env.obs_rms)
-    baseline_metrics = None
+    # Evaluación walk-forward OOS (P1-1): 4 folds disjuntos con embargo +
+    # holdout congelado. Mismo evaluate_fn para ambas políticas → comparación
+    # emparejada; el holdout NO participa en el gate.
+    baseline_model = None
+    baseline_rms = None
     if os.path.exists(MODEL_PATH):
-        baseline_metrics = _evaluate_model(
-            PPO.load(MODEL_PATH), eval_df, env_cfg,
-            obs_rms=_load_obs_rms(MODEL_PATH, env_cfg),
-        )
+        baseline_model = PPO.load(MODEL_PATH)
+        baseline_rms = _load_obs_rms(MODEL_PATH, env_cfg)
 
+    def _eval_segment(policy, segment_df, rms):
+        return _evaluate_model(policy, segment_df, env_cfg, obs_rms=rms)
+
+    report = evaluate_walk_forward(
+        df,
+        split,
+        candidate=model,
+        candidate_obs_rms=train_env.obs_rms,
+        baseline=baseline_model,
+        baseline_obs_rms=baseline_rms,
+        evaluate_fn=_eval_segment,
+        initial_balance=cfg.initial_balance,
+    )
+    decision = gate_walk_forward(report, min_openings=cfg.min_validation_openings)
+
+    base_summary = (
+        f"{report.baseline['sum_reward']:.3f}/{report.baseline['mean_sharpe']:.2f}"
+        if report.baseline is not None else "none"
+    )
     logger.warning(
-        "[RETRAIN-EVAL] candidate openings=%d win_rate=%.3f reward=%.3f trades=%d | baseline=%s",
-        candidate_metrics["openings"], candidate_metrics["win_rate"],
-        candidate_metrics["reward"], candidate_metrics["closed_trades"],
-        baseline_metrics,
+        "[RETRAIN-WF] cand(sum_reward=%.3f sharpe=%.2f opens=%d) | base=%s | "
+        "fold_wins=%s/%d holdout_cand=%.3f → %s (%s)",
+        report.candidate["sum_reward"], report.candidate["mean_sharpe"],
+        report.candidate["total_openings"],
+        base_summary, report.fold_wins, report.n_folds,
+        report.holdout["candidate"]["reward"],
+        "APROBADO" if decision.ok else "RECHAZADO", decision.reason,
     )
 
-    gate_ok, gate_reason = _gate_decision(candidate_metrics, baseline_metrics, cfg.min_validation_openings)
-    if not gate_ok:
+    if not decision.ok:
         logger.warning(
-            "[RETRAIN] Candidato rechazado (%s): modelo activo conservado | candidate=%s baseline=%s",
-            gate_reason, candidate_metrics, baseline_metrics,
+            "[RETRAIN] Candidato rechazado (%s): modelo activo conservado",
+            decision.reason,
         )
-        await _save_retrain_metrics(df, cfg)
+        await _log_retrain_event("retrain_rejected", {
+            "reason": decision.reason,
+            "gate": decision.details,
+            "report": report.to_dict(),
+        })
         return
 
     # Promoción del BUNDLE completo: stats + zip + manifest certifican el conjunto.
@@ -592,7 +640,10 @@ async def _do_retrain() -> None:
         obs_shape=getattr(model.observation_space, "shape", ()),
         vec_norm_file=os.path.basename(norm_path),
         source="auto_retrain_normalized",
-        extra={"candidate_metrics": candidate_metrics, "baseline_metrics": baseline_metrics},
+        extra={
+            "walk_forward": report.to_dict(),
+            "gate": {"ok": decision.ok, "reason": decision.reason},
+        },
     ))
 
     state = await _ensure_retrain_state()
@@ -604,13 +655,24 @@ async def _do_retrain() -> None:
     # 6. Backup a GCS
     backup_url = await upload_model(MODEL_PATH)
     logger.warning(
-        "[RETRAIN] ===== RETRAIN COMPLETADO ===== model=%s backup=%s candidates=%s",
+        "[RETRAIN] ===== RETRAIN COMPLETADO ===== model=%s backup=%s sum_reward=%.3f gate=%s",
         MODEL_PATH,
         backup_url,
-        candidate_metrics,
+        report.candidate["sum_reward"],
+        decision.reason,
     )
 
-    await _save_retrain_metrics(df, cfg)
+    await _log_retrain_event("retrain_promoted", {
+        "reason": decision.reason,
+        "gate": decision.details,
+        "report": report.to_dict(),
+        "bundle": {
+            "model": os.path.basename(MODEL_PATH),
+            "vec_norm_file": os.path.basename(norm_path),
+            "source": "auto_retrain_normalized",
+        },
+        "backup_url": backup_url,
+    })
 
 
 async def _fetch_historical_candles(symbol: str, count: int) -> list:
@@ -634,36 +696,37 @@ def _build_training_dataframe(candles: list) -> pd.DataFrame:
     return engineer_market_features(df)
 
 
-async def _save_retrain_metrics(df: pd.DataFrame, cfg: RetrainConfig) -> None:
-    """Guarda métricas de retrain en audit_log."""
+async def _log_retrain_event(event: str, data: dict) -> None:
+    """Persiste un evento de ciclo de retrain en audit_log (P1-1).
+
+    - `retrain_promoted` / `retrain_rejected`: decisión de gate con el informe
+      walk-forward completo (métricas por pliego + agregados) — antes ambos
+      caminos escribían el mismo `retrain_completed` sin métricas ni hash.
+    """
     from db.connection import get_pool
 
     pool = get_pool()
     state = await _ensure_retrain_state()
-    metrics = {
-        "event": "retrain_completed",
-        "lookback_candles": len(df),
-        "trades_since_last_retrain": state.filled_count,
+    payload = dict(data)
+    payload.setdefault("state", {
+        "filled_count": state.filled_count,
         "last_retrain_time": state.last_retrain_time,
-        "outcomes_summary": {
-            "total": len(state.outcomes),
-            "avg_pnl": np.mean([o.pnl for o in state.outcomes[-cfg.trades_before_retrain:]]) if state.outcomes else 0,
-            "win_rate": np.mean([o.pnl > 0 for o in state.outcomes[-cfg.trades_before_retrain:]]) if state.outcomes else 0,
-        },
-        "config": {
-            "trades_before_retrain": cfg.trades_before_retrain,
-            "n_epochs": cfg.n_epochs,
-            "total_timesteps": cfg.total_timesteps,
-            "learning_rate": cfg.learning_rate,
-            "real_outcome_feedback": bool(state.outcomes),
-        },
-    }
+        "outcomes": len(state.outcomes),
+        "avg_pnl": float(np.mean([o.pnl for o in state.outcomes])) if state.outcomes else 0.0,
+        "outcomes_win_rate": float(np.mean([o.pnl > 0 for o in state.outcomes])) if state.outcomes else 0.0,
+    })
+    payload.setdefault("config", {
+        "walk_forward_folds": RetrainConfig.walk_forward_folds,
+        "total_timesteps": RetrainConfig.total_timesteps,
+        "learning_rate": RetrainConfig.learning_rate,
+        "real_outcome_feedback": bool(state.outcomes),
+    })
 
     await pool.execute(
         "INSERT INTO audit_log(cycle_id, event, data) VALUES($1, $2, $3)",
-        f"retrain_{int(state.last_retrain_time)}",
-        "retrain_completed",
-        json.dumps(metrics),
+        f"retrain_{int(time.time())}",
+        event,
+        json.dumps(payload, default=float, ensure_ascii=False),
     )
 
 
