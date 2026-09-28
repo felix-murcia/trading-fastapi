@@ -10,6 +10,10 @@ ForexTradingEnv v3 — Arquitectura Óptima para RL (PPO)
   salen de `production_stops()` — MISMA fórmula que `/api/v1/ai/predict` — y el
   trailing del EA está modelado (`_apply_trailing`). El MDP entrenado es el MDP
   ejecutado: lo que el modelo aprende es exactamente lo que el sistema ejecuta.
+- P2-2: el sizing está delegado en `services.position_sizing.size_ppo_position`
+  (MISMA función que `/predict`): la cabeza `volume` modula el riesgo entre 0 y
+  `risk_pct` del balance; volumen 0 → sin entrada (paridad con el HOLD por
+  sizing inviable de `/predict`).
 """
 
 from datetime import datetime
@@ -18,6 +22,9 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 import pandas as pd
+
+# P2-2: el sizing del PPO vive en position_sizing (misma función que /predict)
+from services.position_sizing import size_ppo_position
 
 
 MARKET_FEATURES = (
@@ -203,6 +210,7 @@ class ForexTradingEnvV2(gym.Env):
         initial_balance: float = 10000.0,
         lot_size: float = 100000.0,
         max_lot: float = 0.5,
+        risk_pct: float = 0.03,       # P2-2: espejo de settings.ppo_risk_pct (tope de riesgo/trade)
         pip_size: float = 0.0001,
         spread_pips: float = 1.5,
         commission_per_lot: float = 7.0,
@@ -224,6 +232,7 @@ class ForexTradingEnvV2(gym.Env):
         self.initial_balance = initial_balance
         self.lot_size = lot_size
         self.max_lot = max_lot
+        self.risk_pct = risk_pct
         self.pip_size = pip_size
         self.spread = spread_pips * pip_size
         self.commission_per_lot = commission_per_lot
@@ -447,33 +456,47 @@ class ForexTradingEnvV2(gym.Env):
         # -------------------------------------------------------------
         risk_penalty = 0.0
         if self.position == 0 and target_pos != 0:
-            self.position = target_pos
-            self.volume = max(0.01, float(vol_norm) * self.max_lot)
             # P2-1: mismos stops que /predict (production_stops) — el modelo ya
             # no elige SL/TP (D3): el MDP entrenado usa los stops ejecutados.
-            self.sl_pips, self.tp_pips = production_stops(
+            sl_pips_c, tp_pips_c = production_stops(
                 float(candle["atr"]), self.pip_size
             )
-            self.steps_in_trade = 0
+            # P2-2: sizing delegado en position_sizing.size_ppo_position (misma
+            # función que /predict): la cabeza `volume` modula el riesgo
+            # (0…risk_pct del balance) y el pip_value es pip_size × lot_size
+            # (la convención de dinero de este env).
+            new_volume = size_ppo_position(
+                volume_norm=vol_norm,
+                sl_pips=sl_pips_c,
+                equity=self.balance,
+                pip_value=self.pip_size * self.lot_size,
+                risk_pct=self.risk_pct,
+                max_lot=self.max_lot,
+            )
+            if new_volume > 0.0:
+                self.position = target_pos
+                self.volume = new_volume
+                self.sl_pips, self.tp_pips = sl_pips_c, tp_pips_c
+                self.steps_in_trade = 0
 
-            # Aplicar spread al precio de entrada
-            if self.position == 1:
-                self.entry_price = close_price + (self.spread / 2.0)
-                self.sl_price = self.entry_price - (self.sl_pips * self.pip_size)
-                self.tp_price = self.entry_price + (self.tp_pips * self.pip_size)
-            else:
-                self.entry_price = close_price - (self.spread / 2.0)
-                self.sl_price = self.entry_price + (self.sl_pips * self.pip_size)
-                self.tp_price = self.entry_price - (self.tp_pips * self.pip_size)
+                # Aplicar spread al precio de entrada
+                if self.position == 1:
+                    self.entry_price = close_price + (self.spread / 2.0)
+                    self.sl_price = self.entry_price - (self.sl_pips * self.pip_size)
+                    self.tp_price = self.entry_price + (self.tp_pips * self.pip_size)
+                else:
+                    self.entry_price = close_price - (self.spread / 2.0)
+                    self.sl_price = self.entry_price + (self.sl_pips * self.pip_size)
+                    self.tp_price = self.entry_price - (self.tp_pips * self.pip_size)
 
-            # Coste de transacción inmediato en equidad
-            opening_commission = self.volume * self.commission_per_lot
-            self.balance -= opening_commission
-            self.equity = self.balance
+                # Coste de transacción inmediato en equidad
+                opening_commission = self.volume * self.commission_per_lot
+                self.balance -= opening_commission
+                self.equity = self.balance
 
-            # Penalización suave por capital en riesgo inicial (fracción del balance arriesgada)
-            capital_at_risk = self.volume * self.lot_size * (self.sl_pips * self.pip_size)
-            risk_penalty = (capital_at_risk / self.balance) * 0.02
+                # Penalización suave por capital en riesgo inicial (fracción del balance arriesgada)
+                capital_at_risk = self.volume * self.lot_size * (self.sl_pips * self.pip_size)
+                risk_penalty = (capital_at_risk / self.balance) * 0.02
 
         elif self.position != 0:
             self.steps_in_trade += 1

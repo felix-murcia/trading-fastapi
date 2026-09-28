@@ -34,6 +34,12 @@ from services.auto_retrain import (
     record_trade_filled,
 )
 from services.performance_metrics import record_cycle_metrics
+from services.position_sizing import (
+    PIP_SIZE,
+    is_supported,
+    pip_value_per_lot,
+    size_ppo_position,
+)
 from services.qwen_client import query_qwen_unified, query_qwen_sltp_validator
 from services.structured_logging import log_to_audit
 from .deps import verify_token
@@ -241,6 +247,15 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
 
     env_position = 1 if req.position == 1 else (-1 if req.position == 2 else 0)
 
+    # P2-2: pip centralizado en position_sizing.PIP_SIZE (fuente única; antes un
+    # heurístico de dígitos daba 0.01 en oro frente al 0.10 del resto del
+    # sistema). Símbolo sin pip declarado → HOLD visible, nunca heurística.
+    sym = req.symbol.upper()
+    if not is_supported(sym):
+        logger.error("[%s] símbolo sin pip centralizado: %r → HOLD", cycle_id, req.symbol)
+        return PredictResponse(cycle_id=cycle_id, ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
+    pip_size = PIP_SIZE[sym]
+
     equity_val = 0.0
     candles = []
     try:
@@ -258,8 +273,23 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         logger.warning("[%s] MT5 connection error in predict: %s", cycle_id, exc)
         return PredictResponse(cycle_id=cycle_id, ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
 
-    if equity_res.status_code == 200:
-        equity_val = equity_res.json().get("equity", 0.0)
+    try:
+        equity_val = (
+            float(equity_res.json().get("equity", 0.0))
+            if equity_res.status_code == 200 else 0.0
+        )
+    except (ValueError, TypeError, KeyError):
+        logger.error("[%s] payload de equity no numérico (HTTP %s)", cycle_id, equity_res.status_code)
+        equity_val = 0.0
+
+    # P2-2: sin equity fiable no hay sizing posible — se corta aquí en vez de
+    # emitir órdenes de volumen 0 (auditoría: "equity=0 → volumen 0").
+    if equity_val <= 0.0:
+        logger.error(
+            "[%s] equity no disponible (HTTP %s, equity=%s) → HOLD",
+            cycle_id, equity_res.status_code, equity_val,
+        )
+        return PredictResponse(cycle_id=cycle_id, ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
 
     if candles_res.status_code != 200:
         logger.warning("[%s] candles HTTP %s from MT5", cycle_id, candles_res.status_code)
@@ -284,9 +314,6 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     current_price = float(df['close'].iloc[-1])
     current_atr = float(df['atr'].iloc[-1]) if 'atr' in df.columns else 0.0001
     entry_p = req.entry_price if env_position != 0 and req.entry_price > 0 else current_price
-
-    digits = 5 if not req.symbol.upper().endswith("JPY") and len(str(current_price).split(".")[1]) >= 4 else 2
-    pip_size = 0.0001 if digits == 5 else 0.01
 
     # P2-1: mismos stops que el env de entrenamiento (production_stops) —
     # única fuente de verdad del contrato train/serve.
@@ -333,21 +360,21 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     target_pos, decision = decode_v3_direction(float(direction), env_position)
     ml_prob = float(np.clip(abs(direction), 0.1, 0.99))
 
-    max_lot_allowed = 0.5
-    vol_calculated = float(volume_norm) * max_lot_allowed
-    max_risk_usd = equity_val * 0.03
-    max_lot_by_risk = max_risk_usd / (sl_distance_price * 100000.0 + 1e-8)
-
-    # Calcular el lote mínimo necesario para ganar ~3€ netos en el TP,
-    # teniendo en cuenta el spread y comisiones implícitas.
-    min_profit_target = 3.0
-    spread_price = 3.0 * pip_size  # margen conservador por spread/comisiones
-    net_tp_pips = max(1.0, tp_pips - 2.0)  # restar ~2 pips de spread/comisión
-    min_lot_for_profit = min_profit_target / (net_tp_pips * 0.1 + 1e-8)
-
-    candidate_lots = max(min_lot_for_profit, vol_calculated)
-    final_lots = float(np.clip(candidate_lots, 0.01, min(max_lot_allowed, max_lot_by_risk)))
-    final_lots = round(round(final_lots / 0.01) * 0.01, 2)
+    # P2-2: sizing delegado en position_sizing.size_ppo_position — la cabeza
+    # `volume` modula el riesgo (0…settings.ppo_risk_pct del equity) con el
+    # pip_value centralizado por símbolo. Reemplaza: tope degenerado
+    # min(0.5, 3%·equity/dist) SIEMPRE activo (cabeza `volume` muerta) y la
+    # heurística "mín. 3€" con 0.1 €/pip/lot (error ×100 enmascarado por el
+    # clip). El mismo cálculo lo aplica el env de entrenamiento (paridad).
+    final_lots = size_ppo_position(
+        volume_norm=volume_norm,
+        sl_pips=sl_pips,
+        equity=equity_val,
+        pip_value=pip_value_per_lot(sym, current_price),
+        risk_pct=settings.ppo_risk_pct,
+        max_lot=settings.max_volume,
+        min_lot=settings.min_volume,
+    )
 
     sl_pips_final = sl_pips
     tp_pips_final = tp_pips
@@ -397,6 +424,15 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         final_decision = "HOLD"
     elif final_decision == "SELL" and qwen["bias"] == "BULLISH" and qwen.get("confidence", 1.0) >= 0.7:
         logger.warning("[%s] VETO BIAS ║ SELL revertido por LLM BULLISH (conf=%.2f)", cycle_id, qwen.get("confidence", 1.0))
+        final_decision = "HOLD"
+
+    # P2-2: sizing no operable (ni el lote mínimo cabe en el tope de riesgo)
+    # → no existe orden válida que enviar: degrada a HOLD, visible en log.
+    if final_lots <= 0.0 and final_decision in ("BUY", "SELL"):
+        logger.error(
+            "[%s] sizing inviable (equity=%s, sl=%s pips, vol_norm=%s) → HOLD",
+            cycle_id, equity_val, sl_pips_final, volume_norm,
+        )
         final_decision = "HOLD"
 
     record_cycle_metrics(

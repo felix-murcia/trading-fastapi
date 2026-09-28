@@ -575,7 +575,10 @@ async def _do_retrain() -> None:
         window_size=cfg.retrain_window_size,
         initial_balance=cfg.initial_balance,
         lot_size=100000.0,
-        max_lot=0.5,
+        # P2-2: sizing PPO delegado en position_sizing.size_ppo_position —
+        # mismos topes que /predict (settings: max_volume, ppo_risk_pct).
+        max_lot=settings.max_volume,
+        risk_pct=settings.ppo_risk_pct,
         pip_size=0.0001,
         spread_pips=1.5,
         commission_per_lot=cfg.commission,

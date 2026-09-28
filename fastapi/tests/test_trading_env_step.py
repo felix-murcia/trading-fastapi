@@ -20,7 +20,10 @@ Cubertura:
 - Reward diferencial (Moody & Saffell): reward = Δequity/inicial × scale −
   penalties; primer paso sin movimiento ⇒ reward 0.
 - Penalty por estancamiento (steps_in_trade > max_holding_steps).
-- Terminación por quiebra (equity ≤ 50% del inicial) y truncado por fin de datos.
+- P2-2 (sizing por riesgo): el volumen sale de size_ppo_position —
+  lots = equity × 3% × vol_norm / (SL × ppv) — por lo que la pérdida de un SL
+  queda ACOTADA al tope de riesgo (la quiebra en una operación es imposible);
+  la rama de terminación (equity ≤ 50%) se cubre aparte forzando el balance.
 - info expone las claves de dinero (trades, win_rate, balance, equity, drawdown)
   de las que depende el gate walk-forward.
 """
@@ -33,13 +36,14 @@ from ml.trading_env_v2 import ForexTradingEnvV2, engineer_market_features
 INITIAL = 1000.0
 LOT = 100000.0
 COMM = 7.0
-VOL_OPEN = 0.2          # vol_norm 0.4 × max_lot 0.5
+# P2-2: sizing por riesgo — 1000 equity × 3% × vol_norm 0.4 / (SL 15 × ppv 10)
+VOL_OPEN = 0.08
 SL_PIPS = 15.0          # production_stops: ATR 10 pips × 1.5 (P2-1, no acción)
 TP_PIPS = 30.0          # TP = 2 × SL
 HALF_SPREAD = 1.5 * 0.0001 / 2   # 7.5e-5
 
-OPEN = np.array([0.5, 0.4], dtype=np.float32)    # long, vol_norm=0.4 → 0.2 lots
-OPEN_BIG = np.array([0.5, 1.0], dtype=np.float32)  # vol_norm=1.0 → 0.5 lots
+OPEN = np.array([0.5, 0.4], dtype=np.float32)    # long, vol_norm=0.4 → 0.08 lots
+OPEN_BIG = np.array([0.5, 1.0], dtype=np.float32)  # vol_norm=1.0 → 0.20 lots
 FLAT = np.array([0.0, 0.0], dtype=np.float32)
 
 
@@ -96,8 +100,8 @@ class TestOpenAppliesSpreadAndCommission:
 
         assert env.position == 1
         assert env.entry_price == pytest.approx(close5 + HALF_SPREAD)
-        assert env.volume == pytest.approx(VOL_OPEN, abs=1e-6)   # float32: 0.4×0.5
-        expected_balance = INITIAL - VOL_OPEN * COMM          # 1000 − 1.4 = 998.6
+        assert env.volume == pytest.approx(VOL_OPEN, abs=1e-6)   # P2-2: 0.08 por riesgo
+        expected_balance = INITIAL - VOL_OPEN * COMM          # 1000 − 0.56 = 999.44
         assert info["balance"] == pytest.approx(expected_balance)
         assert info["equity"] == pytest.approx(expected_balance)
         assert terminated is False and truncated is False
@@ -128,13 +132,13 @@ class TestIntraCandleExits:
         tp = entry + TP_PIPS * 0.0001          # entry + 0.0030
         # Vela que toca AMBOS: gap adverso (low ≤ sl) y favorable (high ≥ tp)
         env.df.loc[6, ["high", "low", "close"]] = [entry + 0.021, entry - 0.0016, entry]
-        balance_before = env.balance                                # 998.6
+        balance_before = env.balance                                # 999.44
 
         _, reward, terminated, _, info = env.step(FLAT)
 
         assert env.position == 0
-        realized = VOL_OPEN * LOT * (sl - entry) - VOL_OPEN * COMM  # −30 −1.4
-        expected_balance = balance_before + realized                # 967.2
+        realized = VOL_OPEN * LOT * (sl - entry) - VOL_OPEN * COMM  # −12 −0.56
+        expected_balance = balance_before + realized                # 986.88
         assert info["balance"] == pytest.approx(expected_balance)
         assert info["trades"] == 1
         assert info["win_rate"] == 0.0                              # pérdida
@@ -155,8 +159,8 @@ class TestIntraCandleExits:
 
         _, reward, terminated, _, info = env.step(FLAT)
 
-        realized = VOL_OPEN * LOT * (tp - entry) - VOL_OPEN * COMM  # 60 −1.4 = 58.6
-        expected_balance = balance_before + realized                # 1057.2
+        realized = VOL_OPEN * LOT * (tp - entry) - VOL_OPEN * COMM  # 24 −0.56 = 23.44
+        expected_balance = balance_before + realized                # 1022.88
         assert env.position == 0
         assert info["balance"] == pytest.approx(expected_balance)
         assert info["trades"] == 1
@@ -175,25 +179,45 @@ class TestIntraCandleExits:
         env.step(FLAT)
 
         # exit = close − half = c5 − 7.5e-5; entry = c5 + 7.5e-5 → diff = −0.00015
-        realized = VOL_OPEN * LOT * (-2 * HALF_SPREAD) - VOL_OPEN * COMM  # −3 −1.4
-        assert env.balance == pytest.approx(balance_before + realized)    # 994.2
+        realized = VOL_OPEN * LOT * (-2 * HALF_SPREAD) - VOL_OPEN * COMM  # −1.2 −0.56
+        assert env.balance == pytest.approx(balance_before + realized)    # 997.68
         assert env.position == 0
         assert env.trade_count == 1
 
-    def test_big_sl_terminates_on_50_percent_drawdown(self):
-        # initial=100: el SL de 15 pips con 0.5 lots (−75) supera el 50% → quiebra
+    def test_sl_loss_is_capped_by_risk_pct_no_ruin_in_one_trade(self):
+        # P2-2: sizing por riesgo → el SL de una operación NO puede llevar a
+        # la quiebra. initial=100, vol_norm=1.0:
+        #   lots = 100 × 3% × 1.0 / (15 pips × 10) = 0.02 (no 0.5)
+        #   pérdida = 0.02 × 100000 × 0.0015 = 3.0 € (no 75 €)
         env, entry = _make_opened_env(action=OPEN_BIG, initial_balance=100.0)
+        assert env.volume == pytest.approx(0.02, abs=1e-9)
         sl = entry - SL_PIPS * 0.0001                            # entry − 0.0015
         env.df.loc[6, ["high", "low", "close"]] = [entry, entry - 0.011, entry - 0.005]
 
         _, _, terminated, _, info = env.step(FLAT)
 
-        # 100 − 3.5 (apertura) − 75 (SL) − 3.5 (cierre) = 18 ≤ 50 → quiebra
-        expected = 100.0 - 0.5 * COMM - 0.5 * LOT * (SL_PIPS * 0.0001) - 0.5 * COMM
-        assert info["balance"] == pytest.approx(expected)       # 18.0
+        expected = 100.0 - 0.02 * COMM - 0.02 * LOT * (SL_PIPS * 0.0001) - 0.02 * COMM
+        assert info["balance"] == pytest.approx(expected)       # 96.72
+        assert terminated is False
+        assert info["drawdown"] <= 0.5
+        # Pérdida total de la operación ≤ tope de riesgo (3%) + comisiones
+        loss = 100.0 - info["balance"]
+        assert loss <= 100.0 * 0.03 + 2 * 0.02 * COMM + 1e-9
+        assert info["win_rate"] == 0.0
+
+    def test_terminates_on_50_percent_drawdown(self):
+        # Rama de terminación (equity ≤ 50% del inicial): con sizing por
+        # riesgo la quiebra por una sola operación es imposible (test anterior),
+        # así que se fuerza el balance (white-box) para cubrir el gate.
+        env = _env(engineer_market_features(_raw_df()))
+        env.reset()
+        env.balance = INITIAL * 0.49
+        env.equity = env.balance
+
+        _, _, terminated, _, info = env.step(FLAT)
+
         assert terminated is True
         assert info["drawdown"] > 0.5
-        assert info["win_rate"] == 0.0
 
 
 class TestStagnationPenalty:

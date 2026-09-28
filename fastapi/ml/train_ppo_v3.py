@@ -19,6 +19,9 @@ import pandas as pd
 
 # Añadir el path para poder importar trading_env_v2 / v3
 sys.path.insert(0, '/app/ml')
+# P2-2: trading_env_v2 importa services.position_sizing → necesita la raíz
+# del backend en el path (host y contenedor).
+sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parents[1]))
 from trading_env_v2 import (
     MARKET_FEATURES,
     ForexTradingEnvV2,
@@ -143,6 +146,9 @@ def main():
         'initial_balance': 10000.0,
         'lot_size': 100000.0,
         'max_lot': 0.5,
+        # P2-2: espejo de settings.ppo_risk_pct / max_volume (el script no
+        # importa config para seguir siendo ejecutable standalone).
+        'risk_pct': 0.03,
         'pip_size': 0.0001,
         'spread_pips': 1.5,
         'commission_per_lot': 7.0,

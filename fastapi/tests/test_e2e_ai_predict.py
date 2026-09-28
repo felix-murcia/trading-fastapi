@@ -158,6 +158,53 @@ def test_predict_mt5_down_returns_ok_hold_with_cycle_id():
     assert payload["cycle_id"]
 
 
+def test_predict_holds_when_equity_unavailable():
+    """P2-2: equity=0 → HOLD visible (antes: volumen 0 / orden inválida)."""
+    class ZeroEquityClient(FakeAsyncClient):
+        async def get(self, url, **kwargs):
+            if "/api/v1/account/info" in url:
+                return self._response({"equity": 0.0, "balance": 0.0})
+            return await super().get(url, **kwargs)
+
+    with patch("main.init_pool", AsyncMock()), \
+         patch("main.close_pool", AsyncMock()), \
+         patch("routers.ai.get_pool", return_value=MagicMock(execute=AsyncMock())), \
+         patch("httpx.AsyncClient", ZeroEquityClient):
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/ai/predict",
+                json={"symbol": "EURUSD", "timeframe": "H1", "position": 0},
+                headers={"x-internal-token": "test-token", "x-cycle-id": "e2e-no-equity"},
+            )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["decision"] == "HOLD"
+    assert payload["llm_bias"] == "ERROR"
+    assert payload["volume"] is None
+
+
+def test_predict_holds_for_symbol_without_central_pip():
+    """P2-2: pip centralizado en position_sizing.PIP_SIZE — símbolo sin pip
+    declarado → HOLD (antes: heurística de dígitos que inventaba 0.0001)."""
+    with patch("main.init_pool", AsyncMock()), \
+         patch("main.close_pool", AsyncMock()), \
+         patch("routers.ai.get_pool", return_value=MagicMock(execute=AsyncMock())), \
+         patch("httpx.AsyncClient", FakeAsyncClient):
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/ai/predict",
+                json={"symbol": "BTCUSD", "timeframe": "H1", "position": 0},
+                headers={"x-internal-token": "test-token", "x-cycle-id": "e2e-bad-symbol"},
+            )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["decision"] == "HOLD"
+    assert payload["llm_bias"] == "ERROR"
+    assert payload["volume"] is None
+
+
 def test_ea_backend_predict_contract_fields_are_aligned():
     payload = PredictResponse(
         cycle_id="contract-test",

@@ -29,10 +29,14 @@ PIP_SIZE = {
     # Materias primas
     "XAUUSD": 0.10,
     "XAUEUR": 0.10,
+    # P2-2: estos dos vivían solo en order_validator.PIP_SIZE; al unificar la
+    # fuente, order_validator importa este dict (pip centralizado, una sola copia).
+    "USDCNH": 0.0001,
+    "USDSEK": 0.0001,
 }
 
 # Pares donde base=USD → pip_value = 10 / price
-_USD_BASE = {"USDJPY", "USDCHF", "USDCAD"}
+_USD_BASE = {"USDJPY", "USDCHF", "USDCAD", "USDCNH", "USDSEK"}
 
 
 def is_supported(symbol: str) -> bool:
@@ -49,6 +53,48 @@ def pip_value_per_lot(symbol: str, price: float) -> float:
     return 10.0                 # quote=USD (EURUSD, GBPUSD, AUDUSD, NZDUSD, XAUUSD)
 
 
+def size_ppo_position(
+    volume_norm: float,
+    sl_pips: float,
+    equity: float,
+    pip_value: float,
+    *,
+    risk_pct: float,
+    max_lot: float,
+    min_lot: float = 0.01,
+) -> float:
+    """P2-2: sizing del PPO — riesgo fraccional por equity, delegado.
+
+    La cabeza `volume` de la política (Box(2,)_[1], rango [0,1]) modula el
+    riesgo entre 0 y ``risk_pct`` del equity::
+
+        lots = equity × risk_pct × clip(volume_norm, 0, 1) / (sl_pips × pip_value)
+
+    Los lotes se redondean HACIA ABAJO al paso ``min_lot`` (nunca se supera el
+    tope de riesgo) y se devuelven 0.0 —sin entrada— cuando ni el lote mínimo
+    cabe en el presupuesto de riesgo.
+
+    Contrato train/serve (auditoría P2-2): lo usan `/api/v1/ai/predict` (con
+    ``pip_value_per_lot(symbol, price)`` centralizado) y el entorno de
+    entrenamiento (con ``pip_size × lot_size``, la convención de dinero del
+    env). Antes: tope degenerado ``min(0.5, 3%·equity/dist)`` siempre activo y
+    una heurística "mín. 3€" con 0.1 €/pip/lot (error ×100 enmascarado por el
+    clip) — la cabeza `volume` estaba muerta.
+    """
+    if equity <= 0.0 or sl_pips <= 0.0 or pip_value <= 0.0 or risk_pct <= 0.0:
+        return 0.0
+    scale = min(1.0, max(0.0, float(volume_norm)))
+    risk_usd = float(equity) * float(risk_pct) * scale
+    if risk_usd <= 0.0:
+        return 0.0
+    lots_raw = risk_usd / (float(sl_pips) * float(pip_value))
+    # +1e-9: inmuniza el floor contra error de punto flotante en múltiplos
+    # exactos (un 0.08 calculado como 0.07999… no debe bajar a 0.07).
+    lots = math.floor(lots_raw / min_lot + 1e-9) * min_lot
+    lots = round(lots, 2)
+    if lots < min_lot:
+        return 0.0
+    return float(min(lots, max_lot))
 
 
 def derive_order_from_bb(

@@ -7,6 +7,8 @@ from unittest.mock import patch, AsyncMock, MagicMock
 import numpy as np
 import pandas as pd
 
+from config import settings
+
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -186,7 +188,9 @@ def _env_cfg(df: pd.DataFrame, **over) -> dict:
         window_size=20,
         initial_balance=1000.0,
         lot_size=100000.0,
-        max_lot=0.5,
+        # P2-2: mismas fuentes que _do_retrain (settings: max_volume, ppo_risk_pct)
+        max_lot=settings.max_volume,
+        risk_pct=settings.ppo_risk_pct,
         pip_size=0.0001,
         spread_pips=1.5,
         commission_per_lot=0.0001,

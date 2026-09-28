@@ -8,6 +8,9 @@ from typing import Optional
 
 from config import settings
 from models.orders import OrderPrepareRequest
+# P2-2: pip por símbolo centralizado — fuente única en position_sizing
+# (antes había una copia divergente; el resto de validadores importan aquí).
+from services.position_sizing import PIP_SIZE
 
 logger = logging.getLogger(__name__)
 
@@ -23,20 +26,6 @@ VALID_RANGES = {
     "USDSEK": (8.00, 12.00),
     "XAUUSD": (2000.0, 8000.0),
     "XAUEUR": (2000.0, 8000.0),
-}
-
-PIP_SIZE = {
-    "EURUSD": 0.0001,
-    "GBPUSD": 0.0001,
-    "AUDUSD": 0.0001,
-    "NZDUSD": 0.0001,
-    "USDJPY": 0.01,
-    "USDCHF": 0.0001,
-    "USDCAD": 0.0001,
-    "USDCNH": 0.0001,
-    "USDSEK": 0.0001,
-    "XAUUSD": 0.10,
-    "XAUEUR": 0.10,
 }
 
 SL_LIMITS: dict[str, tuple[float, float]] = {

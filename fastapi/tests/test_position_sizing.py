@@ -10,6 +10,12 @@ independiente (fórmula documentada en el módulo) y las salvaguardas:
 - Volumen = riesgo / (sl_pips × pip_value), acotado a [min_volume, max_volume].
 - Dirección: buy → sl < entry < tp; sell → tp < entry < sl.
 - Símbolo no soportado → KeyError (fail-loud, sin fallback silencioso).
+
+P2-2 (sizing del PPO delegado):
+- `size_ppo_position`: riesgo fraccional por equity modulado por la cabeza
+  `volume`, floor al paso de lote (nunca excede el tope) y 0.0 sin entrada
+  cuando ni el lote mínimo cabe en el riesgo.
+- PIP centralizado: order_validator importa EL MISMO dict (fuente única).
 """
 import math
 
@@ -43,6 +49,7 @@ def pinned_sizing_settings(monkeypatch):
         "sl_min_pips_xauusd": 10.0,
         "min_volume": 0.01,
         "max_volume": 0.50,
+        "ppo_risk_pct": 0.03,
     }.items():
         monkeypatch.setattr(settings, attr, value)
 
@@ -182,3 +189,94 @@ class TestDeriveOrderSimple:
     def test_sell_direction(self):
         _, sl, tp, _ = ps.derive_order("sell", "EURUSD", 1.10)
         assert sl > 1.10 > tp
+
+
+class TestSizePPOPosition:
+    """P2-2: sizing del PPO — riesgo fraccional por equity (fórmula verificada).
+
+    lots = equity × risk_pct × clip(volume_norm, 0, 1) / (sl_pips × pip_value),
+    floor al paso de lote; 0.0 = sin entrada.
+    """
+
+    @staticmethod
+    def _size(v=1.0, eq=1000.0, sl=15.0, ppv=10.0, risk=0.03, mx=0.5, mn=0.01):
+        return ps.size_ppo_position(
+            volume_norm=v, sl_pips=sl, equity=eq, pip_value=ppv,
+            risk_pct=risk, max_lot=mx, min_lot=mn,
+        )
+
+    def test_formula_full_risk(self):
+        # 1000 × 3% × 1.0 / (15 × 10) = 0.20 lots
+        assert self._size() == pytest.approx(0.20)
+
+    def test_volume_head_modulates_risk_linearly(self):
+        # 1000 × 3% × 0.4 / (15 × 10) = 0.08 lots (la cabeza VIVE)
+        assert self._size(v=0.4) == pytest.approx(0.08)
+        assert self._size(v=0.25) == pytest.approx(0.05)
+        assert self._size(v=0.0) == 0.0            # abstención explícita
+
+    def test_volume_norm_clipped_to_unit_range(self):
+        assert self._size(v=-0.5) == 0.0           # nunca negativo
+        assert self._size(v=1.7) == self._size(v=1.0)   # saturación en 1.0
+
+    def test_risk_pct_is_linear(self):
+        # Valores que caen EXACTOS en el paso de 0.01 (sin pérdida por floor):
+        # 1000 × 1.5% / 150 = 0.10 y 1000 × 3% / 150 = 0.20 → doble riesgo = doble lote
+        assert self._size(risk=0.015) == pytest.approx(0.10)
+        assert self._size(risk=0.03) == pytest.approx(0.20)
+        # y entre pasos el floor limita por debajo (crudo 0.0667 → 0.06)
+        assert self._size(risk=0.01) == pytest.approx(0.06)
+
+    def test_floor_never_exceeds_risk_budget(self):
+        # eq=1004 → riesgo 30.12 → crudo 0.2008 → floor 0.20 (no 0.21)
+        lots = self._size(eq=1004.0)
+        assert lots == pytest.approx(0.20)
+        assert lots * 15.0 * 10.0 <= 1004.0 * 0.03 + 1e-9   # riesgo real ≤ presupuesto
+
+    def test_float_boundary_rounds_up_to_exact_step(self):
+        # 24/160 = 0.15; sin epsilon, 0.15/0.01 = 14.999… → 0.14 (pierde un paso)
+        assert self._size(eq=800.0, sl=16.0) == pytest.approx(0.15)
+
+    def test_below_min_lot_returns_zero_no_entry(self):
+        # eq=5 → 0.15 € de riesgo → 0.001 lots → ni el lote mínimo cabe
+        assert self._size(eq=5.0) == 0.0
+
+    def test_max_lot_cap(self):
+        assert self._size(eq=1e7) == pytest.approx(0.5)
+
+    def test_custom_min_lot_step(self):
+        # paso 0.10: 0.08 → floor → 0.00 (debajo del mínimo) → sin entrada
+        assert self._size(v=0.4, mn=0.10) == 0.0
+        assert self._size(v=1.0, mn=0.10) == pytest.approx(0.2)
+
+    def test_usd_base_pip_value(self):
+        # USDJPY@150 → ppv = 1000/150; 1000 × 3% / (30 × 6.667) = 0.15
+        ppv = ps.pip_value_per_lot("USDJPY", 150.0)
+        assert self._size(sl=30.0, ppv=ppv) == pytest.approx(0.15)
+
+    def test_guards_return_zero(self):
+        assert self._size(eq=0.0) == 0.0
+        assert self._size(eq=-500.0) == 0.0
+        assert self._size(sl=0.0) == 0.0
+        assert self._size(ppv=0.0) == 0.0
+        assert self._size(risk=0.0) == 0.0
+
+
+class TestPipSingleSource:
+    """P2-2: pip por símbolo centralizado — una sola copia en el sistema."""
+
+    def test_order_validator_imports_the_same_dict_object(self):
+        from services import order_validator
+        assert order_validator.PIP_SIZE is ps.PIP_SIZE
+
+    def test_gold_pip_is_consistent(self):
+        # La auditoría detectó 0.01 (heurística de dígitos de /predict) vs 0.10
+        assert ps.PIP_SIZE["XAUUSD"] == 0.10
+        assert ps.PIP_SIZE["XAUEUR"] == 0.10
+
+    def test_symbols_merged_from_order_validator(self):
+        assert ps.PIP_SIZE["USDCNH"] == 0.0001
+        assert ps.PIP_SIZE["USDSEK"] == 0.0001
+        # y su pip_value usa la regla base=USD (antes no existían aquí)
+        assert ps.pip_value_per_lot("USDCNH", 7.80) == pytest.approx(10.0 / 7.80)
+        assert ps.pip_value_per_lot("USDSEK", 10.50) == pytest.approx(10.0 / 10.50)

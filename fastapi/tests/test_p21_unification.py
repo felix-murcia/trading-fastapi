@@ -106,7 +106,8 @@ class TestActionContract:
         env.reset()
         env.step(np.array([0.5, 0.4, 0.99, 0.99], dtype=np.float32))
         assert env.position == 1
-        assert env.volume == pytest.approx(0.2, abs=1e-6)
+        # P2-2: sizing por riesgo — 1000 × 3% × 0.4 / (15 pips × 10) = 0.08
+        assert env.volume == pytest.approx(0.08, abs=1e-6)
         # D3: las cabezas sl/tp NO deciden los stops
         assert env.sl_pips == pytest.approx(15.0)
         assert env.tp_pips == pytest.approx(30.0)
@@ -185,10 +186,11 @@ class TestTrailingMirrorsEA:
             entry + 0.0026, entry + 0.0021, entry + 0.0023,
         ]
         balance_before = env.balance
+        v = env.volume  # P2-2: sizing por riesgo — capturar ANTES (close pone volume=0)
         env.step(np.array([0.0, 0.0], dtype=np.float32))
 
         assert env.position == 0
-        realized = 0.2 * 100000 * (trailed_sl - entry) - 0.2 * 7.0
+        realized = v * 100000 * (trailed_sl - entry) - v * 7.0
         assert env.balance == pytest.approx(balance_before + realized, rel=1e-9)
         assert env.trade_count == 1
 
