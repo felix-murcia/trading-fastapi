@@ -1174,3 +1174,21 @@ Ahora, si las Bandas de Bollinger son inválidas o el ratio es insuficiente, el 
 - `fastapi/routers/orders.py`
 - `fastapi/tests/test_orders_prepare.py` (nuevo)
 - `mql5/AI_Quant_Terminal_v3.mq5` (v13.0)
+
+### AB. Fix P0-4 EA: outbox de cierres con reintento persistente (EA v13.1) (2026-09-28)
+
+**Problema:** si el POST `/trade/filled` fallaba (FastAPI reiniciándose mientras una posición cerraba), el cierre se perdía: sin `trade_outcomes`, sin journal, con hueco en el dataset de retrain. El dedup server-side por `deal_ticket` (sección Y) hacía seguro el reintento, pero nadie reintentaba.
+
+**Cambios (solo MQL5):**
+- `SaveToOutbox(body)` — la rama de fallo del webhook persiste el cuerpo JSON en `MQL5\Files\trade_filled_outbox.jsonl` (una línea por cierre).
+- `FlushTradeOutbox()` — al inicio de cada ciclo M5 (tras el circuit breaker, antes del predict): reenvía hasta `OUTBOX_MAX_PER_FLUSH = 10` cierres pendientes; los fallidos quedan en el archivo; si todos van bien se elimina.
+- Reintento ciego seguro gracias al dedup server-side (sección Y).
+- **v13.0 → v13.1.**
+
+**Limitación conocida:** un cierre producido mientras MT5/EA está caído (no solo el servidor) sigue sin reportarse; la recuperación desde el historial MT5 queda como P2.
+
+**Validación (2026-09-28):** `pytest fastapi/tests/ -q` → **110 passed**. Compilación MQL5 pendiente en MetaEditor (falta del entorno Linux).
+
+**Archivos:**
+- `mql5/AI_Quant_Terminal_v3.mq5` (v13.1)
+- `fastapi/tests/test_ea_close_outbox.py` (nuevo)

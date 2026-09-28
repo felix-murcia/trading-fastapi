@@ -6,10 +6,10 @@ Terminal de Ejecución y Telemetría para Cerebro Autónomo (FastAPI + PPO v3).
 - Rol del Servidor: Decisión direccional, dimensionamiento de lotes, SL, TP y gestión de riesgo.
 */
 #property copyright "AI Quant Terminal v3"
-#property version   "13.0"
+#property version   "13.1"
 #property strict
 
-#define EA_VERSION "13.0"
+#define EA_VERSION "13.1"
 
 #include <Trade\Trade.mqh>
 
@@ -17,6 +17,8 @@ Terminal de Ejecución y Telemetría para Cerebro Autónomo (FastAPI + PPO v3).
 #define BASE_RETRY_DELAY_MS     1000
 #define MAX_CIRCUIT_BREAKERS    5
 #define CIRCUIT_BREAK_COOLDOWN  300
+#define OUTBOX_FILE            "trade_filled_outbox.jsonl"
+#define OUTBOX_MAX_PER_FLUSH   10
 
 input group "=== Configuración del Cerebro ==="
 input string FastAPI_URL    = "http://127.0.0.1:8090"; // URL del servidor FastAPI
@@ -174,6 +176,96 @@ bool RequestOrderPermission(const string cycle_id, const string order_type,
    return false;
   }
 
+//+------------------------------------------------------------------+
+//| Outbox de cierres (P0-4 EA-side): si /trade/filled falla, el     |
+//| cuerpo queda persistido en disco y se reintenta en cada ciclo.    |
+//| El servidor deduplica por deal_ticket → reintento seguro.         |
+//+------------------------------------------------------------------+
+void SaveToOutbox(const string body)
+  {
+   int h = FileOpen(OUTBOX_FILE, FILE_WRITE|FILE_TXT, '\n');
+   if(h == INVALID_HANDLE)
+     {
+      PrintFormat("[AI Terminal] OUTBOX: no se pudo abrir %s (err=%d) — cierre NO reportado", OUTBOX_FILE, GetLastError());
+      return;
+     }
+   FileSeek(h, 0, SEEK_END);
+   FileWrite(h, body);
+   FileClose(h);
+   PrintFormat("[AI Terminal] OUTBOX: cierre encolado para reintento: %s", body);
+  }
+
+void FlushTradeOutbox()
+  {
+   if(!FileIsExist(OUTBOX_FILE)) return;
+
+   int h = FileOpen(OUTBOX_FILE, FILE_READ|FILE_TXT);
+   if(h == INVALID_HANDLE) return;
+
+   string lines[];
+   int count = 0;
+   while(!FileIsEnding(h))
+     {
+      string line = FileReadString(h);
+      if(StringLen(line) == 0) continue;
+      ArrayResize(lines, count + 1);
+      lines[count] = line;
+      count++;
+     }
+   FileClose(h);
+   if(count == 0)
+     {
+      FileDelete(OUTBOX_FILE);
+      return;
+     }
+
+   string remaining[];
+   int rem = 0, sent = 0;
+   for(int i = 0; i < count; i++)
+     {
+      bool keep = true;
+      if(sent < OUTBOX_MAX_PER_FLUSH)
+        {
+         char postData[], resultArr[];
+         string headers = "Content-Type: application/json\r\n"
+                          "X-Internal-Token: " + InternalToken + "\r\n";
+         StringToCharArray(lines[i], postData, 0, StringLen(lines[i]));
+         ArrayResize(postData, StringLen(lines[i]));
+         string responseHeaders;
+         int res = WebRequest("POST", FastAPI_URL + "/api/v1/ai/trade/filled", headers, 10000, postData, resultArr, responseHeaders);
+         if(res == 200)
+           {
+            keep = false;
+            sent++;
+            PrintFormat("[AI Terminal] OUTBOX: cierre reenviado OK (%d/%d)", sent, count);
+           }
+         else
+            PrintFormat("[AI Terminal] OUTBOX: reintento falló HTTP %d — queda pendiente", res);
+        }
+      if(keep)
+        {
+         ArrayResize(remaining, rem + 1);
+         remaining[rem] = lines[i];
+         rem++;
+        }
+     }
+
+   FileDelete(OUTBOX_FILE);
+   if(rem > 0)
+     {
+      int hw = FileOpen(OUTBOX_FILE, FILE_WRITE|FILE_TXT, '\n');
+      if(hw == INVALID_HANDLE)
+         PrintFormat("[AI Terminal] OUTBOX: no se pudo reescribir %s (err=%d) — %d cierres en riesgo (recuperables vía historial MT5)", OUTBOX_FILE, GetLastError(), rem);
+      else
+        {
+         for(int k = 0; k < rem; k++)
+            FileWrite(hw, remaining[k]);
+         FileClose(hw);
+         PrintFormat("[AI Terminal] OUTBOX: %d cierres pendientes tras reintento", rem);
+        }
+     }
+  }
+
 void OnTick()
   {
    // 0. TRAILING STOP — se ejecuta cada tick (o cada N segundos) de forma independiente
@@ -193,6 +285,9 @@ void OnTick()
       PrintFormat("[AI Terminal] Circuit Breaker activo. Enfriamiento hasta: %s", TimeToString(g_circuitBreakerReset));
       return;
      }
+
+   // Reintento de cierres pendientes (outbox) — el servidor deduplica por deal_ticket
+   FlushTradeOutbox();
 
    // 1. RECOLECCIÓN DE TELEMETRÍA (Sensor)
    int currentPos = 0;       // 0=Flat, 1=Long, 2=Short
@@ -696,6 +791,7 @@ void CloseAllPositions()
     else
       {
        PrintFormat("[AI Terminal] Error reportando trade cerrado HTTP %d (Err %d)", res, GetLastError());
+       SaveToOutbox(body);
       }
    }
 //+------------------------------------------------------------------+
