@@ -594,6 +594,8 @@ async def trade_filled_webhook(req: TradeFilledRequest, _: None = Depends(verify
     direction = direction_map.get(req.direction.upper()) if req.direction else req.direction
     pnl = float(req.pnl) if isinstance(req.pnl, str) else req.pnl
     pnl_pct = float(req.pnl_pct) if isinstance(req.pnl_pct, str) else req.pnl_pct
+    deal_ticket = int(req.deal_ticket) if req.deal_ticket not in (None, "") else None
+    position_id = int(req.position_id) if req.position_id not in (None, "") else None
     await record_trade_filled(
         symbol=req.symbol,
         entry_time=entry_time_out,
@@ -604,5 +606,7 @@ async def trade_filled_webhook(req: TradeFilledRequest, _: None = Depends(verify
         sl_hit=req.sl_hit,
         tp_hit=req.tp_hit,
         exit_reason=req.exit_reason,
+        deal_ticket=deal_ticket,
+        position_id=position_id,
     )
     return {"status": "recorded"}

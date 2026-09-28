@@ -74,8 +74,15 @@ CREATE TABLE IF NOT EXISTS trade_outcomes (
     exit_reason  TEXT NOT NULL CHECK (exit_reason IN ('sl', 'tp', 'manual', 'news', 'signal_end', 'ea')),
     sl_hit      BOOLEAN NOT NULL DEFAULT FALSE,
     tp_hit      BOOLEAN NOT NULL DEFAULT FALSE,
+    deal_ticket  BIGINT,
+    position_id  BIGINT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Dedup: un mismo deal de MT5 solo puede registrarse una vez (webhooks reintentados / backfill EA)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_outcomes_deal_ticket
+    ON trade_outcomes(deal_ticket)
+    WHERE deal_ticket IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_trade_outcomes_symbol ON trade_outcomes(symbol);
 CREATE INDEX IF NOT EXISTS idx_trade_outcomes_exit_time ON trade_outcomes(exit_time);

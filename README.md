@@ -1103,3 +1103,24 @@ Ahora, si las Bandas de Bollinger son inválidas o el ratio es insuficiente, el 
 - `fastapi/tests/test_e2e_ai_predict.py`
 - `fastapi/tests/test_auto_retrain.py`
 - `AGENTS.md` (contadores de tests 44 → 76)
+
+### Y. Fix P0-4: Integridad de cierres — deal_ticket persistente + dedup (2026-09-28)
+
+**Síntoma/riesgo:** `trade_outcomes` no guardaba `deal_ticket`/`position_id` aunque el EA los envía. Un webhook reenviado duplicaba el contador de retrain y el journal, y no había forma de reconciliar cierres contra MT5 ni detectar duplicados.
+
+**Cambios:**
+- `db/schema.sql` — columnas `deal_ticket BIGINT`, `position_id BIGINT` + índice único parcial `idx_trade_outcomes_deal_ticket ... WHERE deal_ticket IS NOT NULL`.
+- BD viva migrada (`ALTER TABLE ... IF NOT EXISTS` + índice) — 150 filas existentes con `deal_ticket` NULL: sin conflicto.
+- `routers/ai.py` — el webhook `/trade/filled` parsea y transmite `deal_ticket`/`position_id` a `record_trade_filled`.
+- `services/auto_retrain.py` — `_persist_trade_outcome` ejecuta `ON CONFLICT (deal_ticket) ... DO NOTHING RETURNING id`; si `record_trade_filled` recibe `trade_id is None` (duplicado) sale temprano: sin journal, sin contador, sin retrain.
+- Tests — 3 nuevos: threading del webhook, dedup sin journal, schema declara índice único.
+
+**Limitación conocida (→ Lote D):** el MCP de MT5 no expone historial de deals → la reconciliación de cierres perdidos será EA-side (backfill de historial + reintento con dedup server-side), junto al order gate.
+
+**Validación (2026-09-28):** `pytest fastapi/tests/ -q` → **79 passed** (baseline de sesión: 73 passed, 2 failed).
+
+**Archivos editados:**
+- `fastapi/db/schema.sql`
+- `fastapi/routers/ai.py`
+- `fastapi/services/auto_retrain.py`
+- `fastapi/tests/test_trade_filled_webhook.py`

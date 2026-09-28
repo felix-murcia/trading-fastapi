@@ -6,13 +6,15 @@ These tests verify the complete flow:
 
 The MQL5 EA calls /trade/filled when an order closes, so this is a critical path
 that must work correctly for the auto-retrain pipeline to function.
-
-NOTE: These tests use source-code inspection rather than importing routers.ai directly,
-because routers.ai imports torch/pandas which are not installed in the test environment.
-We verify the critical behaviors by checking the source code directly.
 """
 import os
 import re
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from fastapi.testclient import TestClient
+
+from main import app
 
 
 class TestTradeFilledDirectionNormalization:
@@ -166,3 +168,71 @@ class TestRetrainTriggerLogic:
             "record_trade_filled must track filled_count"
         assert "state.filled_count" in func_source or "filled_count +" in func_source, \
             "filled_count must be incremented on each trade"
+
+
+class TestDealTicketPersistence:
+    """P0-4: deal_ticket/position_id llegan del EA, se persisten y se deduplican."""
+
+    def test_webhook_threads_deal_ticket_and_position_id(self):
+        """El webhook debe pasar deal_ticket/position_id a record_trade_filled (no ignorarlos)."""
+        with patch("main.init_pool", AsyncMock()), \
+             patch("main.close_pool", AsyncMock()), \
+             patch("routers.ai.load_inference_artifacts"), \
+             patch("routers.ai.record_trade_filled", AsyncMock()) as record_mock:
+            with TestClient(app) as client:
+                response = client.post(
+                    "/api/v1/ai/trade/filled",
+                    json={
+                        "symbol": "EURUSD",
+                        "entry_time": "1725450000",
+                        "exit_time": "1725453600",
+                        "pnl": 12.5,
+                        "pnl_pct": 0.0125,
+                        "direction": "LONG",
+                        "sl_hit": False,
+                        "tp_hit": True,
+                        "exit_reason": "tp",
+                        "deal_ticket": 123456,
+                        "position_id": 789012,
+                    },
+                    headers={"x-internal-token": "test-token", "x-cycle-id": "e2e-filled"},
+                )
+
+        assert response.status_code == 200, response.text
+        kwargs = record_mock.await_args.kwargs
+        assert kwargs["deal_ticket"] == 123456
+        assert kwargs["position_id"] == 789012
+        assert kwargs["direction"] == "LONG"
+
+    def test_duplicate_deal_ticket_skips_journal_and_counter(self):
+        """ON CONFLICT DO NOTHING → trade_id None → no journal, no contador, sin excepción."""
+        from services.auto_retrain import record_trade_filled
+
+        pool = MagicMock()
+        pool.fetchval = AsyncMock(return_value=None)  # conflicto: deal_ticket ya existía
+        with patch("db.connection.get_pool", return_value=pool), \
+             patch("services.trade_journal.record_trade_closed", AsyncMock()) as journal_mock:
+            asyncio.run(record_trade_filled(
+                symbol="EURUSD",
+                entry_time="1725450000",
+                exit_time="1725453600",
+                pnl=-10.0,
+                pnl_pct=-0.01,
+                direction="SHORT",
+                sl_hit=True,
+                tp_hit=False,
+                exit_reason="sl",
+                deal_ticket=999999,
+                position_id=111111,
+            ))
+
+        journal_mock.assert_not_called()
+
+    def test_schema_declares_unique_deal_ticket(self):
+        """schema.sql debe declarar deal_ticket + índice único parcial (dedup a nivel DB)."""
+        schema_path = os.path.join(os.path.dirname(__file__), "..", "db", "schema.sql")
+        with open(schema_path, "r") as f:
+            schema = f.read()
+        assert "deal_ticket  BIGINT" in schema
+        assert "idx_trade_outcomes_deal_ticket" in schema
+        assert "WHERE deal_ticket IS NOT NULL" in schema

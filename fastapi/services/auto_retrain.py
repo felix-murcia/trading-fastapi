@@ -170,8 +170,13 @@ async def _persist_trade_outcome(
     sl_hit: bool,
     tp_hit: bool,
     exit_reason: str,
-) -> int:
-    """Persiste el trade outcome a la tabla trade_outcomes en PostgreSQL. Retorna el trade_id."""
+    deal_ticket: int | None = None,
+    position_id: int | None = None,
+) -> int | None:
+    """Persiste el trade outcome a la tabla trade_outcomes en PostgreSQL. Retorna el trade_id.
+
+    Retorna None si el deal_ticket ya existía (dedup: webhook reintentado o backfill EA).
+    """
     from db.connection import get_pool
     pool = get_pool()
     entry_ts = _parse_timestamp(entry_time)
@@ -179,14 +184,17 @@ async def _persist_trade_outcome(
     trade_id = await pool.fetchval(
         """
         INSERT INTO trade_outcomes
-            (symbol, direction, entry_time, exit_time, pnl, pnl_pct, exit_reason, sl_hit, tp_hit)
-        VALUES ($1,$2,to_timestamp($3::double precision),to_timestamp($4::double precision),$5,$6,$7,$8,$9)
+            (symbol, direction, entry_time, exit_time, pnl, pnl_pct, exit_reason, sl_hit, tp_hit,
+             deal_ticket, position_id)
+        VALUES ($1,$2,to_timestamp($3::double precision),to_timestamp($4::double precision),$5,$6,$7,$8,$9,$10,$11)
+        ON CONFLICT (deal_ticket) WHERE deal_ticket IS NOT NULL DO NOTHING
         RETURNING id
         """,
         symbol, direction,
         entry_ts, exit_ts,
         pnl, pnl_pct,
         exit_reason, sl_hit, tp_hit,
+        deal_ticket, position_id,
     )
     return trade_id
 
@@ -201,6 +209,8 @@ async def record_trade_filled(
     sl_hit: bool,
     tp_hit: bool,
     exit_reason: str,
+    deal_ticket: int | None = None,
+    position_id: int | None = None,
 ) -> None:
     """
     Llamar cada vez que una orden se cierra como 'filled'.
@@ -211,7 +221,16 @@ async def record_trade_filled(
 
     trade_id = await _persist_trade_outcome(
         symbol, entry_ts, exit_ts, pnl, pnl_pct, direction, sl_hit, tp_hit, exit_reason,
+        deal_ticket, position_id,
     )
+
+    if trade_id is None:
+        # deal_ticket ya registrado: webhook reintentado o backfill EA. No contar dos veces.
+        logger.warning(
+            "[TRADE-FILLED] deal_ticket=%s duplicado en %s — ignorado (ya registrado)",
+            deal_ticket, symbol,
+        )
+        return
 
     # Opción 5: Post-Trade Journal — análisis asíncrono con Qwen
     from services.trade_journal import record_trade_closed
