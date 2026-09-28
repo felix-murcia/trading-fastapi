@@ -150,7 +150,7 @@ def test_real_loss_produces_negative_feedback():
     env.reset()
 
     feedback = env._apply_real_outcome_feedback(
-        np.array([1.0, 0.2, 0.2, 0.2], dtype=np.float32)
+        np.array([1.0, 0.2], dtype=np.float32)   # contrato P2-1: [direction, volume]
     )
 
     assert feedback < 0
@@ -187,8 +187,6 @@ def _env_cfg(df: pd.DataFrame, **over) -> dict:
         initial_balance=1000.0,
         lot_size=100000.0,
         max_lot=0.5,
-        max_sl_pips=100.0,
-        max_tp_pips=200.0,
         pip_size=0.0001,
         spread_pips=1.5,
         commission_per_lot=0.0001,
@@ -198,13 +196,21 @@ def _env_cfg(df: pd.DataFrame, **over) -> dict:
         random_reset=True,
         real_outcomes=[],
         real_outcome_weight=0.3,
+        # P2-1: espejo de los inputs del EA (mql5 §V); SL/TP salen de
+        # production_stops() — por eso no hay max_sl_pips/max_tp_pips.
+        trailing_enabled=True,
+        trailing_percent=0.25,
+        trailing_min_pips=15.0,
+        trailing_atr_mult=2.0,
+        min_stop_dist_pips=1.0,
     )
     cfg.update(over)
     return cfg
 
 
 class _ZerosModel:
-    """Política determinista: acción [0,0,0,0] → nunca abre posición."""
+    """Política determinista: acción [0,0,0,0] (bundle legado 4-dim, evaluable
+    en el gate walk-forward) → nunca abre posición."""
 
     def predict(self, observation, deterministic=True):
         return np.zeros(4, dtype=np.float32), None

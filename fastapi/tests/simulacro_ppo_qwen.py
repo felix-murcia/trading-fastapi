@@ -3,7 +3,7 @@
 Simulacro de operaciones — Probador de flujo PPO + Qwen sobre datos históricos.
 Pasa datos H1 vela por vela (últimos 6 meses) y registra:
   - Observación (17 features)
-  - Acción del modelo PPO v3 (direction, volume, sl_pips, tp_pips)
+  - Acción del modelo PPO v3 (direction, volume — contrato P2-1: sin sl/tp en la acción)
   - Respuesta Qwen (quality, bias, regime)
   - Decisión final (BUY/SELL/HOLD) con guards aplicados
   - Resultado simulado (P&L con SL/TP dinámico)

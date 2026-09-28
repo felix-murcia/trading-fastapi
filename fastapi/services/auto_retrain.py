@@ -402,6 +402,10 @@ def _make_train_env(env_cfg: dict, model_path: str):
     if vec_norm_file:
         pkl_path = os.path.join(os.path.dirname(model_path), vec_norm_file)
         train_env = VecNormalize.load(pkl_path, DummyVecEnv([lambda: ForexTradingEnvV2(**env_cfg)]))
+        # P2-1: el pickle de VecNormalize arrastra el action_space del bundle
+        # origen y set_venv() no lo refresca; sin esta línea PPO construiría
+        # la política con la cabeza vieja (p.ej. 4 tras pasar a [dir, volume]).
+        train_env.action_space = train_env.venv.action_space
         train_env.training = True
         train_env.norm_reward = True
         logger.warning("[RETRAIN] Continuando con stats de normalización del bundle activo: %s", vec_norm_file)
@@ -484,6 +488,42 @@ def _evaluate_model(model, df: pd.DataFrame, env_cfg: dict, obs_rms=None) -> dic
     }
 
 
+def _load_or_create_model(model_path: str, train_env, cfg) -> "PPO":
+    """Carga el modelo activo para continuar el entrenamiento, o crea uno nuevo.
+
+    P2-1: si el contrato de acción del bundle activo no coincide con el env
+    (p.ej. 4→2 cabezas al unificar train/serve), `PPO.load(..., env=)` lanza
+    "Action spaces do not match" — en ese caso se reentrena DESDE CERO con la
+    política nueva (nunca se arrastra una cabeza muerta) y se deja constancia
+    en el log. Un zip ilegible o dañado propaga su error (sin fallos
+    silenciosos): solo el cambio de contrato dispara el reinicio.
+    """
+    from stable_baselines3 import PPO
+
+    def _fresh() -> PPO:
+        return PPO("MlpPolicy", train_env, learning_rate=cfg.learning_rate,
+                   verbose=cfg.verbose)
+
+    if not os.path.exists(model_path):
+        logger.warning("[RETRAIN] No hay modelo previo — creando nuevo")
+        return _fresh()
+
+    probe = PPO.load(model_path)  # sin env: solo para inspeccionar el contrato
+    model_shape = tuple(getattr(probe.action_space, "shape", ()))
+    env_shape = tuple(getattr(train_env.action_space, "shape", ()))
+    if model_shape != env_shape:
+        logger.warning(
+            "[RETRAIN] Contrato de acción %s ≠ env %s (P2-1: [direction, volume]) "
+            "— reentreno desde cero con política nueva",
+            model_shape, env_shape,
+        )
+        return _fresh()
+
+    model = PPO.load(model_path, env=train_env)
+    logger.info("[RETRAIN] Modelo existente cargado — continuando entrenamiento (con VecNormalize)")
+    return model
+
+
 async def _do_retrain() -> None:
     """
     Ejecuta el retrain efectivo.
@@ -536,8 +576,6 @@ async def _do_retrain() -> None:
         initial_balance=cfg.initial_balance,
         lot_size=100000.0,
         max_lot=0.5,
-        max_sl_pips=100.0,
-        max_tp_pips=200.0,
         pip_size=0.0001,
         spread_pips=1.5,
         commission_per_lot=cfg.commission,
@@ -547,23 +585,21 @@ async def _do_retrain() -> None:
         random_reset=True,
         real_outcomes=real_outcomes,
         real_outcome_weight=cfg.real_outcome_weight,
+        # P2-1: trailing espejo de los inputs del EA (mql5 §V); SL/TP salen
+        # de production_stops() (misma fórmula que /predict) — sin max_sl/max_tp.
+        trailing_enabled=True,
+        trailing_percent=0.25,
+        trailing_min_pips=15.0,
+        trailing_atr_mult=2.0,
+        min_stop_dist_pips=1.0,
     )
 
     from stable_baselines3 import PPO
 
     train_env = _make_train_env(env_cfg, MODEL_PATH)
 
-    if os.path.exists(MODEL_PATH):
-        model = PPO.load(MODEL_PATH, env=train_env)
-        logger.info("[RETRAIN] Modelo existente cargado — continuando entrenamiento (con VecNormalize)")
-    else:
-        logger.warning("[RETRAIN] No hay modelo previo — creando nuevo")
-        model = PPO(
-            "MlpPolicy",
-            train_env,
-            learning_rate=cfg.learning_rate,
-            verbose=cfg.verbose,
-        )
+    # P2-1: carga continuable o política nueva si cambió el contrato de acción.
+    model = _load_or_create_model(MODEL_PATH, train_env, cfg)
 
     logger.info("[RETRAIN] Entrenando %d timesteps...", cfg.total_timesteps)
     model.learn(

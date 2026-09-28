@@ -143,14 +143,20 @@ def main():
         'initial_balance': 10000.0,
         'lot_size': 100000.0,
         'max_lot': 0.5,
-        'max_sl_pips': 100.0,
-        'max_tp_pips': 200.0,
         'pip_size': 0.0001,
         'spread_pips': 1.5,
         'commission_per_lot': 7.0,
         'max_episode_steps': 1000,
         'max_holding_steps': 120,
         'random_reset': True,   # Descorrelaciona episodios en train
+        # P2-1: trailing espejo de los inputs del EA (mql5 §V) — el env
+        # modela lo que el EA ejecuta. SL/TP salen de production_stops()
+        # (misma fórmula que /predict), por eso no hay max_sl/max_tp aquí.
+        'trailing_enabled': True,
+        'trailing_percent': 0.25,
+        'trailing_min_pips': 15.0,
+        'trailing_atr_mult': 2.0,
+        'min_stop_dist_pips': 1.0,
     }
 
     eval_env_config = train_env_config.copy()
@@ -227,7 +233,7 @@ def main():
         'version': '3.0',
         'total_steps': total_timesteps,
         'action_type': 'continuous',
-        'action_space': ['direction', 'volume', 'sl_pips', 'tp_pips'],
+        'action_space': ['direction', 'volume'],   # P2-1/D3: sin cabezas sl/tp
         'env_config': train_env_config,
         'train_date_range': (str(train_df['time'].min()), str(train_df['time'].max())),
         'eval_date_range': (str(eval_df['time'].min()), str(eval_df['time'].max())),

@@ -1,9 +1,15 @@
 """
-P1-4: tests donde hay dinero — ForexTradingEnvV2.step (SL/TP, comisiones, reward).
+P1-4 / P2-1: tests donde hay dinero — ForexTradingEnvV2.step (SL/TP, comisiones, reward).
 
 El env simula la ejecución que después cobra el broker: cada aserción verifica
 dinero concreto sobre balances exactos (initial=1000, lot=100000, comm=7/lot,
 spread=1.5 pips, pip=1e-4).
+
+Fixture P2-1: close fijo 1.1000 y rango 0.0011 → ATR(14) exacto 0.001 = 10 pips
+→ production_stops() da SL 15 pips / TP 30 pips (misma fórmula que /predict).
+La acción es [direction, volume] (Box(2,)); el trailing del EA queda inerte en
+este fixture (nunca se recupera el riesgo de 15 pips con close fijo) — su
+comportamiento se cubre en test_p21_unification.py.
 
 Cubertura:
 - Apertura: spread aplicado al entry + comisión cobrada al abrir.
@@ -28,23 +34,23 @@ INITIAL = 1000.0
 LOT = 100000.0
 COMM = 7.0
 VOL_OPEN = 0.2          # vol_norm 0.4 × max_lot 0.5
-SL_PIPS = 10.0          # sl_norm 0.1 × max_sl_pips 100
-TP_PIPS = 200.0         # tp_norm 1.0 × max_tp_pips 200
+SL_PIPS = 15.0          # production_stops: ATR 10 pips × 1.5 (P2-1, no acción)
+TP_PIPS = 30.0          # TP = 2 × SL
 HALF_SPREAD = 1.5 * 0.0001 / 2   # 7.5e-5
 
-OPEN = np.array([0.5, 0.4, 0.1, 1.0], dtype=np.float32)   # long, vol=0.2, sl=10p, tp=200p
-OPEN_BIG = np.array([0.5, 1.0, 1.0, 1.0], dtype=np.float32)  # vol=0.5, sl=100p
-FLAT = np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+OPEN = np.array([0.5, 0.4], dtype=np.float32)    # long, vol_norm=0.4 → 0.2 lots
+OPEN_BIG = np.array([0.5, 1.0], dtype=np.float32)  # vol_norm=1.0 → 0.5 lots
+FLAT = np.array([0.0, 0.0], dtype=np.float32)
 
 
 def _raw_df(n=40):
-    """OHLC determinista (tendencia fija) — sin aleatoriedad entre runs."""
-    closes = 1.1000 + 0.00002 * np.arange(n, dtype=float)
+    """OHLC determinista: close fijo y rango 0.0011 → ATR 10 pips exacto."""
+    closes = np.full(n, 1.1000)
     return pd.DataFrame({
         "time": pd.date_range("2024-01-01", periods=n, freq="h"),
         "open": closes,
-        "high": closes + 0.0004,
-        "low": closes - 0.0004,
+        "high": closes + 0.00055,
+        "low": closes - 0.00055,
         "close": closes,
         "tick_volume": np.full(n, 1000),
     })
@@ -57,8 +63,6 @@ def _env(df, **overrides):
         initial_balance=INITIAL,
         lot_size=LOT,
         max_lot=0.5,
-        max_sl_pips=100.0,
-        max_tp_pips=200.0,
         pip_size=0.0001,
         spread_pips=1.5,
         commission_per_lot=COMM,
@@ -97,6 +101,9 @@ class TestOpenAppliesSpreadAndCommission:
         assert info["balance"] == pytest.approx(expected_balance)
         assert info["equity"] == pytest.approx(expected_balance)
         assert terminated is False and truncated is False
+        # Stops de producción en la apertura (P2-1): no salen de la acción
+        assert env.sl_pips == pytest.approx(SL_PIPS)
+        assert env.tp_pips == pytest.approx(TP_PIPS)
         # Reward de apertura: Δequity = −comisión; −risk_penalty por capital en riesgo
         capital_at_risk = VOL_OPEN * LOT * (SL_PIPS * 0.0001)
         risk_penalty = (capital_at_risk / expected_balance) * 0.02
@@ -117,17 +124,17 @@ class TestOpenAppliesSpreadAndCommission:
 class TestIntraCandleExits:
     def test_sl_has_priority_over_tp_when_both_hit(self):
         env, entry = _make_opened_env()
-        sl = entry - SL_PIPS * 0.0001          # entry − 0.001
-        tp = entry + TP_PIPS * 0.0001          # entry + 0.02
+        sl = entry - SL_PIPS * 0.0001          # entry − 0.0015
+        tp = entry + TP_PIPS * 0.0001          # entry + 0.0030
         # Vela que toca AMBOS: gap adverso (low ≤ sl) y favorable (high ≥ tp)
-        env.df.loc[6, ["high", "low", "close"]] = [entry + 0.021, entry - 0.0012, entry]
+        env.df.loc[6, ["high", "low", "close"]] = [entry + 0.021, entry - 0.0016, entry]
         balance_before = env.balance                                # 998.6
 
         _, reward, terminated, _, info = env.step(FLAT)
 
         assert env.position == 0
-        realized = VOL_OPEN * LOT * (sl - entry) - VOL_OPEN * COMM  # −20 −1.4
-        expected_balance = balance_before + realized                # 977.2
+        realized = VOL_OPEN * LOT * (sl - entry) - VOL_OPEN * COMM  # −30 −1.4
+        expected_balance = balance_before + realized                # 967.2
         assert info["balance"] == pytest.approx(expected_balance)
         assert info["trades"] == 1
         assert info["win_rate"] == 0.0                              # pérdida
@@ -142,14 +149,14 @@ class TestIntraCandleExits:
     def test_tp_close_realizes_distance_minus_commission(self):
         env, entry = _make_opened_env()
         tp = entry + TP_PIPS * 0.0001
-        # high toca TP; low NO toca SL (entry−0.0005 > entry−0.001)
+        # high toca TP; low NO toca SL (entry−0.0005 > entry−0.0015)
         env.df.loc[6, ["high", "low", "close"]] = [entry + 0.021, entry - 0.0005, entry]
         balance_before = env.balance
 
         _, reward, terminated, _, info = env.step(FLAT)
 
-        realized = VOL_OPEN * LOT * (tp - entry) - VOL_OPEN * COMM  # 400 −1.4 = 398.6
-        expected_balance = balance_before + realized                # 1397.2
+        realized = VOL_OPEN * LOT * (tp - entry) - VOL_OPEN * COMM  # 60 −1.4 = 58.6
+        expected_balance = balance_before + realized                # 1057.2
         assert env.position == 0
         assert info["balance"] == pytest.approx(expected_balance)
         assert info["trades"] == 1
@@ -174,15 +181,16 @@ class TestIntraCandleExits:
         assert env.trade_count == 1
 
     def test_big_sl_terminates_on_50_percent_drawdown(self):
-        env, entry = _make_opened_env(action=OPEN_BIG)          # vol=0.5, sl=100p
-        sl = entry - 100.0 * 0.0001                             # entry − 0.01
+        # initial=100: el SL de 15 pips con 0.5 lots (−75) supera el 50% → quiebra
+        env, entry = _make_opened_env(action=OPEN_BIG, initial_balance=100.0)
+        sl = entry - SL_PIPS * 0.0001                            # entry − 0.0015
         env.df.loc[6, ["high", "low", "close"]] = [entry, entry - 0.011, entry - 0.005]
 
         _, _, terminated, _, info = env.step(FLAT)
 
-        # 1000 − 3.5 (apertura) − 500 (SL) − 3.5 (cierre) = 493 ≤ 500 → quiebra
-        expected = INITIAL - 0.5 * COMM - 0.5 * LOT * 0.01 - 0.5 * COMM
-        assert info["balance"] == pytest.approx(expected)       # 493.0
+        # 100 − 3.5 (apertura) − 75 (SL) − 3.5 (cierre) = 18 ≤ 50 → quiebra
+        expected = 100.0 - 0.5 * COMM - 0.5 * LOT * (SL_PIPS * 0.0001) - 0.5 * COMM
+        assert info["balance"] == pytest.approx(expected)       # 18.0
         assert terminated is True
         assert info["drawdown"] > 0.5
         assert info["win_rate"] == 0.0

@@ -6,6 +6,10 @@ ForexTradingEnv v3 — Arquitectura Óptima para RL (PPO)
 - Espacio de acción continuo optimizado: Zona muerta reducida a [-0.05, 0.05] para preservar gradientes.
 - Observación extendida: Distancias normalizadas a SL/TP por ATR y tiempo transcurrido en el trade.
 - Manejo correcto de fin de episodio: Bootstrapping en 'truncated' sin liquidaciones forzadas artificiales.
+- P2-1 / D3 (train/serve unificado): la acción es [direction, volume]; los stops
+  salen de `production_stops()` — MISMA fórmula que `/api/v1/ai/predict` — y el
+  trailing del EA está modelado (`_apply_trailing`). El MDP entrenado es el MDP
+  ejecutado: lo que el modelo aprende es exactamente lo que el sistema ejecuta.
 """
 
 from datetime import datetime
@@ -165,6 +169,27 @@ def decode_v3_direction(direction: float, current_position: int) -> Tuple[int, s
     return target_pos, decision
 
 
+def production_stops(atr_norm: float, pip_size: float) -> Tuple[float, float]:
+    """Stops de producción (P2-1): única fuente de verdad del cálculo SL/TP.
+
+    La usan AMBOS lados del contrato train/serve:
+    - el env al abrir posiciones (entrenamiento y evaluación walk-forward), y
+    - `/api/v1/ai/predict` al proponer `sl_pips`/`tp_pips` de la decisión.
+
+    Regla (idéntica a la que ya usaba /predict, sin cambios en serve):
+    pips ATR = atr_norm / pip_size; SL = clamp(pips × 1.5, 10, 50); TP = 2 × SL.
+
+    Nota: `atr_norm` es adimensional (max(rango)/close, ver
+    `engineer_market_features`); la conversión `atr/pip_size` escala bien en
+    EURUSD (precio ≈ 1) y el clamp [10, 50] cubre el resto. Se replica tal cual
+    para no alterar el comportamiento ya desplegado.
+    """
+    atr_pips = atr_norm / pip_size
+    sl_pips = max(10.0, min(50.0, atr_pips * 1.5))
+    tp_pips = sl_pips * 2.0
+    return sl_pips, tp_pips
+
+
 class ForexTradingEnvV2(gym.Env):
     """
     Entorno Forex con simulación estocástica por episodios, PnL estándar y recompensa incremental.
@@ -178,8 +203,6 @@ class ForexTradingEnvV2(gym.Env):
         initial_balance: float = 10000.0,
         lot_size: float = 100000.0,
         max_lot: float = 0.5,
-        max_sl_pips: float = 100.0,
-        max_tp_pips: float = 200.0,
         pip_size: float = 0.0001,
         spread_pips: float = 1.5,
         commission_per_lot: float = 7.0,
@@ -189,6 +212,11 @@ class ForexTradingEnvV2(gym.Env):
         random_reset: bool = True,
         real_outcomes: Optional[list] = None,
         real_outcome_weight: float = 0.1,
+        trailing_enabled: bool = True,
+        trailing_percent: float = 0.25,
+        trailing_min_pips: float = 15.0,
+        trailing_atr_mult: float = 2.0,
+        min_stop_dist_pips: float = 1.0,
     ):
         super(ForexTradingEnvV2, self).__init__()
         self.df = df.reset_index(drop=True)
@@ -196,8 +224,6 @@ class ForexTradingEnvV2(gym.Env):
         self.initial_balance = initial_balance
         self.lot_size = lot_size
         self.max_lot = max_lot
-        self.max_sl_pips = max_sl_pips
-        self.max_tp_pips = max_tp_pips
         self.pip_size = pip_size
         self.spread = spread_pips * pip_size
         self.commission_per_lot = commission_per_lot
@@ -206,15 +232,27 @@ class ForexTradingEnvV2(gym.Env):
         self.reward_scale = reward_scale
         self.random_reset = random_reset
 
+        # Trailing espejo de los inputs del EA (mql5 §V): EnableTrailing,
+        # TrailingPercent, TrailingMinPips, TrailingATRMult y stops-level
+        # (SYMBOL_TRADE_STOPS_LEVEL ≈ 1 pip). P2-1: el env modela lo que
+        # el EA ejecuta.
+        self.trailing_enabled = trailing_enabled
+        self.trailing_percent = trailing_percent
+        self.trailing_min_pips = trailing_min_pips
+        self.trailing_atr_mult = trailing_atr_mult
+        self.min_stop_dist_pips = min_stop_dist_pips
+
         self.real_outcomes = real_outcomes or []
         self.real_outcome_weight = real_outcome_weight
         self._real_outcomes_by_step = self._index_real_outcomes(self.real_outcomes)
         self._used_outcomes = set()
 
         self.features = get_market_features(self.df)
+        # P2-1 / D3: el modelo decide [direction, volume]; SL/TP los pone
+        # production_stops() igual que en /predict (cabezas muertas fuera).
         self.action_space = spaces.Box(
-            low=np.array([-1.0, 0.0, 0.0, 0.0], dtype=np.float32),
-            high=np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32),
+            low=np.array([-1.0, 0.0], dtype=np.float32),
+            high=np.array([1.0, 1.0], dtype=np.float32),
             dtype=np.float32
         )
         self.observation_space = spaces.Box(
@@ -331,8 +369,17 @@ class ForexTradingEnvV2(gym.Env):
         return self._get_observation(), {}
 
     def step(self, action):
-        dir_val, vol_norm, sl_norm, tp_norm = action
-        target_pos, _ = decode_v3_direction(float(dir_val), self.position)
+        action = np.asarray(action, dtype=np.float32).reshape(-1)
+        if action.size not in (2, 4):
+            raise ValueError(
+                f"Acción con {action.size} elementos; se esperan 2 ([direction, volume], "
+                "contrato P2-1) o 4 (bundle legado pre-P2-1, evaluable en el gate "
+                "walk-forward). Tamaños distintos no son un contrato conocido."
+            )
+        # P2-1 / D3: solo direction+volume; las cabezas sl/tp (legado 4-dim) se
+        # ignoran — el MDP no las consume, igual que /predict.
+        dir_val, vol_norm = float(action[0]), float(action[1])
+        target_pos, _ = decode_v3_direction(dir_val, self.position)
 
         candle = self.df.iloc[self.current_step]
         high_price = float(candle['high'])
@@ -402,8 +449,11 @@ class ForexTradingEnvV2(gym.Env):
         if self.position == 0 and target_pos != 0:
             self.position = target_pos
             self.volume = max(0.01, float(vol_norm) * self.max_lot)
-            self.sl_pips = max(5.0, float(sl_norm) * self.max_sl_pips)
-            self.tp_pips = max(5.0, float(tp_norm) * self.max_tp_pips)
+            # P2-1: mismos stops que /predict (production_stops) — el modelo ya
+            # no elige SL/TP (D3): el MDP entrenado usa los stops ejecutados.
+            self.sl_pips, self.tp_pips = production_stops(
+                float(candle["atr"]), self.pip_size
+            )
             self.steps_in_trade = 0
 
             # Aplicar spread al precio de entrada
@@ -431,6 +481,14 @@ class ForexTradingEnvV2(gym.Env):
             mark_price = close_price - (self.spread / 2.0) if self.position == 1 else close_price + (self.spread / 2.0)
             unrealized = (self.volume * self.lot_size * (mark_price - self.entry_price)) if self.position == 1 else (self.volume * self.lot_size * (self.entry_price - mark_price))
             self.equity = self.balance + unrealized
+
+        # -------------------------------------------------------------
+        # 4b. Trailing stop espejo del EA (P2-1) — se calcula con el close de
+        #     esta vela y rige desde la SIGUIENTE (sin lookahead: el EA lo hace
+        #     con ticks dentro de la vela; se aproxima sin ver el futuro).
+        # -------------------------------------------------------------
+        if self.position != 0:
+            self._apply_trailing(close_price, float(candle["atr"]))
 
         # -------------------------------------------------------------
         # 5. Cálculo del Reward Diferencial (Moody & Saffell)
@@ -472,6 +530,74 @@ class ForexTradingEnvV2(gym.Env):
         }
 
         return self._get_observation(), float(reward), terminated, truncated, info
+
+    def _apply_trailing(self, close_price: float, atr_norm: float) -> None:
+        """Trailing stop espejo de `ManageTrailingStop` del EA (mql5 §V).
+
+        Regla BUY (SELL simétrica):
+        - riskDist = entry − SL actual; si ≤ 0 (SL ya en beneficio) → sin
+          cambios, igual que el `return` del EA: tras el primer movimiento el
+          trailing queda congelado.
+        - Activación: precio ≥ entry + riskDist (el precio recupera el riesgo).
+        - Destino: entry + max(riskDist × TrailingPercent, minTrail) con
+          minTrail = max(TrailingMinPips, ATR real/pip × TrailingATRMult).
+        - Solo aprieta (newSL > SL actual) y solo si newSL ≤ precio −
+          stops-level (SYMBOL_TRADE_STOPS_LEVEL ≈ 1 pip en el EA).
+
+        `atr_norm × close_price` aproxima el ATR en precio que lee el EA
+        (iATR sobre precios reales; el ATR del env es adimensional). El precio
+        empleado es el de mark (bid/ask con spread), conservador frente al
+        ASK/BID del EA. `sl_pips` se recalcula SOLO si el SL se movió (evita
+        arrastrar ruido de coma flotante en el caso habitual).
+        """
+        if not self.trailing_enabled or self.position == 0 or self.sl_price == 0.0:
+            return
+
+        mark_price = (
+            close_price - (self.spread / 2.0) if self.position == 1
+            else close_price + (self.spread / 2.0)
+        )
+        atr_real = atr_norm * close_price
+        min_trail_pips = self.trailing_min_pips
+        if self.trailing_atr_mult > 0 and atr_real > 0:
+            min_trail_pips = max(
+                min_trail_pips, (atr_real / self.pip_size) * self.trailing_atr_mult
+            )
+        min_trail_price = min_trail_pips * self.pip_size
+        min_stop_dist = self.min_stop_dist_pips * self.pip_size
+
+        moved = False
+        if self.position == 1:
+            risk_dist = self.entry_price - self.sl_price
+            if risk_dist <= 0:
+                return
+            new_sl = self.entry_price + max(
+                risk_dist * self.trailing_percent, min_trail_price
+            )
+            if (
+                mark_price >= self.entry_price + risk_dist
+                and new_sl > self.sl_price
+                and new_sl <= mark_price - min_stop_dist
+            ):
+                self.sl_price = new_sl
+                moved = True
+        else:
+            risk_dist = self.sl_price - self.entry_price
+            if risk_dist <= 0:
+                return
+            new_sl = self.entry_price - max(
+                risk_dist * self.trailing_percent, min_trail_price
+            )
+            if (
+                mark_price <= self.entry_price - risk_dist
+                and new_sl < self.sl_price
+                and new_sl >= mark_price + min_stop_dist
+            ):
+                self.sl_price = new_sl
+                moved = True
+
+        if moved:
+            self.sl_pips = abs(self.entry_price - self.sl_price) / self.pip_size
 
     def _apply_real_outcome_feedback(self, action: np.ndarray) -> float:
         outcome = self._real_outcomes_by_step.get(self.current_step)

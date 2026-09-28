@@ -25,6 +25,7 @@ from ml.trading_env_v2 import (
     decode_v3_direction,
     engineer_market_features,
     get_market_features,
+    production_stops,
 )
 from services.auto_retrain import (
     approve_retrain as _approve_retrain,
@@ -286,10 +287,10 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
 
     digits = 5 if not req.symbol.upper().endswith("JPY") and len(str(current_price).split(".")[1]) >= 4 else 2
     pip_size = 0.0001 if digits == 5 else 0.01
-    atr_pips = current_atr / pip_size
 
-    sl_pips = max(10.0, min(50.0, atr_pips * 1.5))
-    tp_pips = sl_pips * 2.0
+    # P2-1: mismos stops que el env de entrenamiento (production_stops) —
+    # única fuente de verdad del contrato train/serve.
+    sl_pips, tp_pips = production_stops(current_atr, pip_size)
     sl_distance_price = sl_pips * pip_size
 
     if env_position != 0 and req.entry_price > 0:
@@ -324,7 +325,10 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
 
     action, _ = _CACHED_MODEL.predict(norm_obs, deterministic=True)
     raw_action = np.asarray(action, dtype=np.float32).reshape(-1)
-    direction, volume_norm, sl_norm, tp_norm = raw_action
+    # P2-1 / D3: contrato [direction, volume]. El bundle activo pre-P2-1
+    # (4 cabezas) sigue siendo válido durante la transición: sl/tp ya se
+    # ignoraban en serve (los stops salen de production_stops).
+    direction, volume_norm = float(raw_action[0]), float(raw_action[1])
 
     target_pos, decision = decode_v3_direction(float(direction), env_position)
     ml_prob = float(np.clip(abs(direction), 0.1, 0.99))

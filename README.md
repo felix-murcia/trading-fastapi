@@ -56,11 +56,11 @@ este README.
 El EA `AI_Quant_Terminal.mq5` consulta a FastAPI cada nueva vela H1:
 
 **Modelo v3 — Acción CONTINUA AUTÓNOMA** (preferido):
-- `ppo_trading_bot_v3.zip`: acción Box(4,) — `[direction, volume, sl_pips, tp_pips]`
-- El agente aprende **totalmente** qué volumen, SL y TP poner por sí mismo
-- Sin heurísticas externas: todo emerge del aprendizaje por refuerzo
-- Parámetros de respuesta: `volume`, `sl_pips`, `tp_pips` directamente del modelo
-- Observation space: `(10, 16)` — 12 features de mercado + 4 canales de estado
+- `ppo_trading_bot_v3.zip`: acción Box(2,) — `[direction, volume]` (P2-1 / D3)
+- El agente decide autónomamente **dirección y volumen** sin heurísticas externas
+- SL/TP salen de `production_stops()` (ATR relativo ×1.5 acotado a [10,50] pips, TP = 2×SL): la MISMA función que usa el env de entrenamiento → paridad train/serve
+- Trailing stop modelado dentro del env, espejo de `ManageTrailingStop` del EA
+- Observation space: `(20, 24)` — 17 features de mercado + 7 canales de estado
 - 12 features: `returns`, `range`, `dist_sma20`, `rsi14`, `macd`, `macd_signal`, `macd_hist`, `bb_pos`, `lag_return_1/2/3/5`
 - **Guards activos**: volume ∈ [10%, 30%], SL ∈ [15, 30] pips, TP ∈ [25, 60] pips
   - **Guard logic**: SL/TP capped **siempre** a 30/60 pips (sin threshold `>0.95`)
@@ -248,7 +248,7 @@ docker logs trading-fastapi -f
 │       ├── train_ppo.py          # Script de entrenamiento PPO (legacy, 8 features)
 │   ├── train_ppo_v2.py       # Script de entrenamiento PPO v2 (legacy, 10 features)
 │   │   ├── train_ppo_v3.py       # Script de entrenamiento PPO v3 (12 features, acción continua)
-│   │   ├── trading_env_v2.py     # Entorno Gymnasium con acción continua Box(4,)
+│   │   ├── trading_env_v2.py     # Entorno Gymnasium con acción continua Box(2,)
 │   │   ├── retrain_agent.py      # Agente de auto-retrain
 │   │   └── logs/
 │
@@ -256,7 +256,7 @@ docker logs trading-fastapi -f
 │       model.pkl                 # {'feature_names', 'n_features', 'window_size', 'version'} (v2)
 │       model_v3.pkl              # {'feature_names', 'n_features', 'window_size', 'version'} (v3)
 │       ppo_trading_bot.zip       # Modelo PPO v2 (10 features, obs (10,11), acción Discrete(3))
-│       ppo_trading_bot_v3.zip    # Modelo PPO v3 (12 features, obs (10,16), acción Box(4,))
+│       ppo_trading_bot_v3.zip    # Modelo PPO v3 (17 features, obs (20,24), acción Box(2,))
 │       best_model.zip            # Backup del mejor modelo anterior
 │           └── evaluations.npz   # Métricas de evaluación del modelo
 │
@@ -336,7 +336,7 @@ Cada vez que un trade se cierra, se registra en `trade_outcomes`. Cada 10 trades
 - Usa **`ForexTradingEnvV2`** (spread=3 pips EURUSD) — coincide con producción
 - Modelo reentrenado: **`ppo_trading_bot_v3.zip`** — el mismo que el EA consume
 
-**Modelo actual**: `ppo_trading_bot_v3.zip` — 200k steps, obs space `(10, 16)`, 12 features, acción continua Box(4,), entrenado con `train_ppo_v3.py`
+**Modelo actual**: `ppo_trading_bot_v3.zip` — obs space `(20, 24)` (17 features + 7 canales de estado), acción continua Box(2,) `[direction, volume]` — stops ATR de `production_stops()` compartidos con `/predict` (P2-1)
 
 **Modelo legacy**: `ppo_trading_bot.zip` — 200k steps, obs space `(10, 11)`, 10 features, acción Discrete(3), entrenado con `train_ppo_v2.py`
 
@@ -388,7 +388,7 @@ uv run --with pandas --with pytest --with pytest-asyncio --with httpx --with fas
 ## Estado Actual (Septiembre 2026)
 
 - ✅ **AI_Quant_Terminal v10.1** - Trading activo con ML + LLM
-- ✅ **PPO v3 Continuo** - Acción Box(4,) autónoma: volume/sl/tp aprendidos sin heurísticas
+- ✅ **PPO v3 Continuo** - Acción Box(2,) `[direction, volume]` autónoma; stops ATR + trailing compartidos con producción (P2-1: sin train/serve skew)
 - ✅ **Risk Guardian** - Daily loss limit + max posiciones abiertas
 - ✅ **Order Manager** - Validación geométrica + detección de duplicados
 - ✅ **Structured Logging** - trace_id para correlación MQL5↔FastAPI↔MT5
@@ -1307,3 +1307,25 @@ Ahora, si las Bandas de Bollinger son inválidas o el ratio es insuficiente, el 
 **Validación (2026-09-28):** `pytest fastapi/tests/ -q` → **239 passed** (228 → 239; +6 en `test_qwen_client.py` — HTTP 500/bad-JSON degradan en vez de raise, estado y recuperación de racha — y +5 en `test_qwen_semantics.py` nuevo: componente en health, status `degraded` + alerta, y `qwen_degraded` en audit_log con veto fail-closed).
 
 **Archivos:** `fastapi/services/qwen_client.py`, `fastapi/routers/ai.py`, `fastapi/tests/test_qwen_client.py`, `fastapi/tests/test_qwen_semantics.py` (nuevo), `README.md`.
+
+### AI. P2-1: unificación train/serve — MDP entrenado = MDP ejecutado (2026-09-29)
+
+**Problema (auditoría, D3):** el entorno de entrenamiento y la inferencia ejecutaban MDPs distintos: el env derivaba SL/TP de las cabezas muertas `sl_norm`/`tp_norm` (`max(5, …)` pips) mientras `/predict` calculaba `sl_pips = clamp(ATR×1.5, 10, 50)` con `tp = 2×SL`; el trailing del EA no existía en el modelo del mundo; y 2 de las 4 cabezas de la acción no las consumía nadie (en serve ya se ignoraban). El modelo aprendía un sistema que no era el que operaba.
+
+**Cambios:**
+- **`ml/trading_env_v2.py`**:
+  - `production_stops(atr_norm, pip_size)` — **única fuente de verdad** de SL/TP, compartida por el env (apertura) y `routers/ai.py` (inferencia). Fórmula intacta respecto a lo desplegado (ATR relativo/pip ×1.5, clamp [10,50] pips, TP = 2×SL): P2-1 unifica el contrato, no rediseña la regla.
+  - Acción **`Box(2,)` `[direction, volume]`**; `step()` acepta también vectores de 4 (bundle legado pre-P2-1, evaluable en el gate walk-forward) y **rechaza con `ValueError`** cualquier otro tamaño.
+  - **Trailing modelado**: `_apply_trailing()` espejo de `ManageTrailingStop` del EA — activación cuando el precio recupera el riesgo actual, destino `entry + max(25% riesgo, minTrail)` con `minTrail = max(15 pips, ATR real × 2)`, solo aprieta, respeta stops-level (≈1 pip) y queda congelado tras el primer movimiento (igual que el `return` del EA con `riskDist ≤ 0`). Se calcula con el cierre de la vela y rige desde la siguiente (sin lookahead; el EA lo hace con ticks intra-vela). Parámetros `trailing_*` espejo de los inputs del EA (`TrailingPercent=0.25`, `TrailingMinPips=15`, `TrailingATRMult=2`).
+  - Eliminados `max_sl_pips`/`max_tp_pips`: el env no tiene ninguna otra fuente de stops.
+- **`routers/ai.py`**: decode `direction, volume_norm = raw_action[0], raw_action[1]` (el modelo vivo de 4 cabezas sigue servible hasta el retrain — puente verificado en vivo) y stops vía `production_stops` importada (un test de identidad de objeto bloquea que alguien meta una copia local).
+- **`ml/train_ppo_v3.py`** y **`services/auto_retrain.py`**: configs del env sin `max_sl/max_tp` + bloque `trailing_*` (espejo EA); manifest `action_space: ['direction', 'volume']`.
+- **`services/auto_retrain.py`** — dos comportamientos de SB3 2.3.2 verificados empíricamente y corregidos:
+  - `VecNormalize.load` restaura el `action_space` del pickle del bundle origen (`set_venv` no lo refresca) → `PPO` construiría la política con la cabeza vieja. `_make_train_env` lo refresca desde el venv interno.
+  - `PPO.load(zip, env=)` lanza `ValueError: Action spaces do not match` con el contrato nuevo → **`_load_or_create_model()`** inspecciona el contrato (load sin env) y **reentrena desde cero** si cambió (log explícito); si coincide, continúa entrenando como antes. Un zip dañado propaga su error (sin fallos silenciosos).
+
+**Tests (+16 → 255):** `test_p21_unification.py` (nuevo): `production_stops` (fórmula, ambos clamps, identidad con predict), contrato de acción (`Box(2,)`, puente de 4 cabezas, rechazo de tamaños desconocidos), trailing espejo EA (sin activación parcial, activación y bloqueo de beneficio con `minTrail`, vigencia desde la vela siguiente/no-lookahead, congelado tras el primer movimiento, SELL simétrico, `trailing_enabled=False`), y retrain (pickle con `action_space` viejo refrescado; `_load_or_create_model` → fresh cuando no hay modelo o el contrato difiere, continuidad con seed cuando coincide). `test_trading_env_step.py` reescrito al contrato nuevo (fixture ATR exacto 10 pips → SL 15/TP 30; quiebra al 50% reconstruida con `initial=100`). `test_auto_retrain.py`: `_env_cfg` alineado con producción.
+
+**Validación (2026-09-29):** `pytest fastapi/tests/ -q` → **255 passed** host **y** contenedor (239 → 255; +16). Smoke en vivo (contenedor reconstruido): `/health` ok (equity 418.87), `/pipeline/health` `healthy` (qwen 3/3 ok), y `/predict` con el **modelo vivo de 4 cabezas** responde correctamente por el decode `[0],[1]` con `sl_pips=18.3` / `tp_pips=36.6` (2×SL) — salida de `production_stops` con el ATR H1 actual.
+
+**Archivos:** `fastapi/ml/trading_env_v2.py`, `fastapi/routers/ai.py`, `fastapi/ml/train_ppo_v3.py`, `fastapi/services/auto_retrain.py`, `fastapi/tests/test_p21_unification.py` (nuevo), `fastapi/tests/test_trading_env_step.py` (reescrito), `fastapi/tests/test_auto_retrain.py`, `fastapi/tests/simulacro_ppo_qwen.py` (docstring), `README.md`.
