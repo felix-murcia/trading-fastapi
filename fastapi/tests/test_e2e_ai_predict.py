@@ -18,8 +18,10 @@ from ml.trading_env_v2 import (
     engineer_market_features,
 )
 from ml.train_ppo_v3 import FEATURE_NAMES
+from config import settings
 from main import app
 from routers.ai import PredictRequest, PredictResponse, TradeFilledRequest
+from services.position_sizing import pip_value_per_lot, size_ppo_position
 
 
 class FakeAsyncClient:
@@ -135,6 +137,19 @@ def test_ai_predict_e2e_flow():
             assert payload["sl_pips"] > 0
             assert payload["tp_pips"] > 0
             assert payload["tp_pips"] == payload["sl_pips"] * 2.0
+            # P2-2: el volumen numérico sale del sizing delegado cableado con
+            # el equity mockeado (1000), la vol_norm del modelo (acción[1]=0.18)
+            # y settings — ni constante ni la heurística "3€" previa.
+            expected_lots = size_ppo_position(
+                volume_norm=0.18,
+                sl_pips=payload["sl_pips"],
+                equity=1000.0,
+                pip_value=pip_value_per_lot("EURUSD", 1.1),
+                risk_pct=settings.ppo_risk_pct,
+                max_lot=settings.max_volume,
+                min_lot=settings.min_volume,
+            )
+            assert abs(payload["volume"] - expected_lots) < 1e-9
 
 
 def test_predict_mt5_down_returns_ok_hold_with_cycle_id():

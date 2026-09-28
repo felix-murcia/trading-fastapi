@@ -166,33 +166,43 @@ def assert_obs_shape(manifest: dict, obs_shape) -> None:
 async def record_promotion(manifest: dict, gate: dict) -> None:
     """P1-2: registra la promoción en la tabla model_registry (historial vivo).
 
-    Desactiva la fila activa anterior e inserta la nueva en UNA sola sentencia
-    (CTE): o queda exactamente un bundle activo o la operación entera falla —
-    sin ventana con 0 o 2 activos.
+    Desactiva la fila activa anterior e inserta la nueva dentro de UNA
+    transacción sobre la MISMA conexión, con orden garantizado (UPDATE →
+    INSERT): o queda exactamente un bundle activo o la operación entera
+    falla — sin ventana con 0 o 2 activos.
+
+    Nota P2-2: la versión con CTE (`WITH deactivated AS (UPDATE …) INSERT …`)
+    falló en vivo el 2026-09-28 con `idx_model_registry_one_active`. Las
+    sub-sentencias de un CTE de PostgreSQL no ven sus mutuos efectos y su
+    orden es indefinido: el INSERT comprobó la unicidad antes de que el
+    UPDATE se aplicara. Con la tabla vacía (primera promoción) no se
+    manifestó; con una fila activa ya existente, sí.
     """
     from db.connection import get_pool
 
     pool = get_pool()
-    await pool.execute(
-        """
-        WITH deactivated AS (
-            UPDATE model_registry SET is_active = FALSE WHERE is_active
-        )
-        INSERT INTO model_registry
-            (model_sha256, vec_norm_sha256, source, obs_shape, extra, gate_reason, is_active)
-        VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, TRUE)
-        """,
-        manifest["model_sha256"],
-        manifest.get("vec_norm_sha256"),
-        manifest["source"],
-        json.dumps([int(d) for d in manifest["obs_shape"]]),
-        json.dumps(
-            {"gate": gate, "manifest_extra": manifest.get("extra", {})},
-            default=float,
-            ensure_ascii=False,
-        ),
-        gate.get("reason"),
-    )
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "UPDATE model_registry SET is_active = FALSE WHERE is_active"
+            )
+            await conn.execute(
+                """
+                INSERT INTO model_registry
+                    (model_sha256, vec_norm_sha256, source, obs_shape, extra, gate_reason, is_active)
+                VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, TRUE)
+                """,
+                manifest["model_sha256"],
+                manifest.get("vec_norm_sha256"),
+                manifest["source"],
+                json.dumps([int(d) for d in manifest["obs_shape"]]),
+                json.dumps(
+                    {"gate": gate, "manifest_extra": manifest.get("extra", {})},
+                    default=float,
+                    ensure_ascii=False,
+                ),
+                gate.get("reason"),
+            )
     logger.info(
         "[MODEL-REGISTRY] Promoción registrada: sha=%s… reason=%s",
         manifest["model_sha256"][:12], gate.get("reason"),
