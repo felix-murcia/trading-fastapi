@@ -108,7 +108,6 @@ def test_ai_predict_e2e_flow():
     with patch("main.init_pool", AsyncMock()), \
          patch("main.close_pool", AsyncMock()), \
          patch("routers.ai.get_pool", return_value=MagicMock(execute=AsyncMock())), \
-         patch("routers.ai.os.path.exists", side_effect=lambda path: path == "/app/ml/ppo_trading_bot_v3.zip"), \
          patch("routers.ai.PPO.load", return_value=model), \
          patch("services.news_scraper.get_macro_news", AsyncMock(return_value="No macro news")), \
          patch("httpx.AsyncClient", FakeAsyncClient):

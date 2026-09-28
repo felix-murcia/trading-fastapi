@@ -239,6 +239,18 @@ def main():
         pickle.dump(metadata, f)
     print(f"[Train V3] Metadata guardada en: {metadata_path}")
 
+    # P0-5: certificar el bundle (zip + VecNormalize) con hashes SHA-256 y obs_shape
+    from services.model_registry import build_manifest, write_manifest
+    manifest_out = write_manifest(model_output_path, build_manifest(
+        model_output_path,
+        obs_shape=train_env.observation_space.shape,
+        vec_norm_file=os.path.basename(norm_output_path),
+        source="train_ppo_v3_manual",
+        features=list(FEATURE_NAMES),
+        extra={"total_steps": total_timesteps, "window_size": train_env_config["window_size"]},
+    ))
+    print(f"[Train V3] Manifest del bundle: {manifest_out}")
+
     # ── 7. Validación Final Fuera de Muestra ───────────────────
     # Sincronizar estadísticas definitivas con el entorno de test
     eval_env.obs_rms = train_env.obs_rms

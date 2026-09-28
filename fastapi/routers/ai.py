@@ -55,7 +55,6 @@ logger = logging.getLogger(__name__)
 # Paths de artefactos
 MODEL_DIR = os.getenv("PPO_OUTPUT_DIR", "/app/ml")
 MODEL_V3_PATH = os.path.join(MODEL_DIR, "ppo_trading_bot_v3.zip")
-VEC_NORM_PATH = os.path.join(MODEL_DIR, "ppo_trading_bot_v3_vec_norm.pkl")
 QWEN_URL = getattr(settings, "qwen_url", "http://100.90.16.33:8080/v1/chat/completions")
 
 QUALITY_THRESHOLD = 5.0
@@ -86,26 +85,35 @@ _CACHED_VEC_NORM: Optional[VecNormalize] = None
 
 
 def load_inference_artifacts():
-    """Carga en memoria PPO y las estadísticas de normalización una sola vez."""
-    global _CACHED_MODEL, _CACHED_VEC_NORM
-    if os.path.exists(MODEL_V3_PATH):
-        _CACHED_MODEL = PPO.load(MODEL_V3_PATH, device="cpu")
-        logger.info("[AI-STARTUP] Modelo PPO v3 cargado en memoria exitosamente.")
+    """Carga PPO y VecNormalize una sola vez, validando el bundle contra su manifest (P0-5).
 
-        if os.path.exists(VEC_NORM_PATH):
-            obs_space = getattr(_CACHED_MODEL, "observation_space", None)
-            if obs_space is None:
-                raise RuntimeError("Modelo PPO cargado sin observation_space; no se puede inicializar VecNormalize.")
-            dummy_env = DummyVecEnv([lambda: _DummyEnv(obs_space, _CACHED_MODEL.action_space)])
-            _CACHED_VEC_NORM = VecNormalize.load(VEC_NORM_PATH, dummy_env)
-            _CACHED_VEC_NORM.training = False
-            _CACHED_VEC_NORM.norm_reward = False
-            logger.info("[AI-STARTUP] Estadísticas de VecNormalize cargadas.")
-        else:
-            _CACHED_VEC_NORM = None
-            logger.warning("[AI-STARTUP] Alerta: No se encontró %s. Inferencia sin normalizar.", VEC_NORM_PATH)
+    Cualquier incoherencia (manifest ausente, hash distinto, obs_shape distinto)
+    lanza RuntimeError y detiene el arranque: nunca se sirve un binario sin
+    certificar ni se degrada en silencio.
+    """
+    global _CACHED_MODEL, _CACHED_VEC_NORM
+    from services.model_registry import assert_obs_shape, validate_bundle
+
+    manifest = validate_bundle(MODEL_V3_PATH)
+    _CACHED_MODEL = PPO.load(MODEL_V3_PATH, device="cpu")
+    logger.info("[AI-STARTUP] Modelo PPO v3 cargado en memoria exitosamente.")
+
+    obs_space = getattr(_CACHED_MODEL, "observation_space", None)
+    assert_obs_shape(manifest, getattr(obs_space, "shape", None))
+
+    vec_norm_file = manifest.get("vec_norm_file")
+    if vec_norm_file:
+        vec_path = os.path.join(os.path.dirname(MODEL_V3_PATH), vec_norm_file)
+        dummy_env = DummyVecEnv([lambda: _DummyEnv(obs_space, _CACHED_MODEL.action_space)])
+        _CACHED_VEC_NORM = VecNormalize.load(vec_path, dummy_env)
+        _CACHED_VEC_NORM.training = False
+        _CACHED_VEC_NORM.norm_reward = False
+        logger.info("[AI-STARTUP] Estadísticas de VecNormalize cargadas (hash verificado).")
     else:
-        raise RuntimeError("No se encontró el modelo PPO en %s." % MODEL_V3_PATH)
+        _CACHED_VEC_NORM = None
+        logger.warning(
+            "[AI-STARTUP] Bundle certificado SIN normalización — inferencia en crudo (declarado en manifest)."
+        )
 
 
 @router.on_event("startup")

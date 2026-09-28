@@ -13,6 +13,11 @@ os.environ.setdefault("database_url", "postgresql://test:test@localhost/test")
 os.environ.setdefault("internal_token", "test-token")
 os.environ.setdefault("hmac_secret", "test-hmac")
 os.environ.setdefault("mt5_http_url", "http://localhost:8000")
+# Bundles de modelo reales (repo ml/) — validate_bundle certifica los artefactos activos en E2E
+os.environ.setdefault(
+    "PPO_OUTPUT_DIR",
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "ml")),
+)
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 

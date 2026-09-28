@@ -1124,3 +1124,30 @@ Ahora, si las Bandas de Bollinger son inválidas o el ratio es insuficiente, el 
 - `fastapi/routers/ai.py`
 - `fastapi/services/auto_retrain.py`
 - `fastapi/tests/test_trade_filled_webhook.py`
+
+### Z. Fix P0-5 + decisión D6: bundle certificado con manifest e integridad verificada (2026-09-28)
+
+**Problema:** No había forma de saber si el zip servido, las estadísticas de VecNormalize y el contrato de observación eran coherentes. Evidencia: `ppo_trading_bot_v3.zip` (28-sep, reentrenado por `_do_retrain` EN CRUDO) se servía con `ppo_trading_bot_v3_vec_norm.pkl` del 11-sep → inputs normalizados con estadísticas que el modelo nunca usó en su último entrenamiento. Un zip cambiado sin recertificar se servía en silencio.
+
+**Cambios:**
+- `services/model_registry.py` (nuevo) — manifest JSON por bundle (`<modelo>.manifest.json`): SHA-256 del zip, SHA-256 del pkl si procede, `obs_shape`, `features`, `source`. `validate_bundle()` lanza `RuntimeError` si falta el manifest, está corrupto o algún hash no coincide; `assert_obs_shape()` falla si el zip cargado no corresponde al manifest. Solo stdlib.
+- `routers/ai.py` — `load_inference_artifacts()` valida el bundle ANTES de servir: manifest → hash → carga PPO → `obs_shape` certificado → VecNormalize solo si el manifest lo declara (hash ya verificado). Desaparece el "warning y sigo sin normalizar": o el bundle es coherente o el arranque no arranca. Constante `VEC_NORM_PATH` eliminada (huérfana).
+- `services/auto_retrain.py` — `_do_retrain` escribe manifest al promover candidato: promover sin certificado = arranque fallido ruidoso.
+- `ml/train_ppo_v3.py` — el entrenamiento manual escribe manifest (zip + vec_norm + features).
+- `tests/conftest.py` — `PPO_OUTPUT_DIR` apunta a `fastapi/ml/` real: el E2E valida los artefactos de producción de verdad (hash incluido).
+- `tests/test_e2e_ai_predict.py` — eliminado el patch muerto de `os.path.exists` (ya no se usa en la carga).
+- `tests/test_model_registry.py` (nuevo) — 15 tests: roundtrip, manifest ausente/corrupto/incompleto, zip alterado, pkl alterado, pkl ausente, source obligatorio, obs_shape.
+
+**D6 — destino del modelo activo:** verificado en código: `_do_retrain` entrena con `DummyVecEnv` crudo y sobrescribe el zip SIN tocar el pkl. Decisión: el manifest del bundle activo declara `vec_norm_file: null` → **se sirve en crudo** (coherente con el último entrenamiento del artefacto; elimina el sesgo de stats obsoletas). El pkl del 11-sep queda inactivo. `not_for_live: true` hasta el reentrenamiento con el pipeline corregido (Lote E / P1-1+P1-3). OOS conocido: Sharpe -4.79, DD 51% (ver "Pendiente — Retraining" 2026-09-11) → ninguno de los artefactos existentes es apto para real.
+
+**Validación (2026-09-28):** `pytest fastapi/tests/ -q` → **94 passed** (baseline de sesión: 73 passed, 2 failed).
+
+**Archivos editados/creados:**
+- `fastapi/services/model_registry.py` (nuevo)
+- `fastapi/tests/test_model_registry.py` (nuevo)
+- `fastapi/ml/ppo_trading_bot_v3.manifest.json` (nuevo — certificado del bundle activo)
+- `fastapi/routers/ai.py`
+- `fastapi/services/auto_retrain.py`
+- `fastapi/ml/train_ppo_v3.py`
+- `fastapi/tests/conftest.py`
+- `fastapi/tests/test_e2e_ai_predict.py`

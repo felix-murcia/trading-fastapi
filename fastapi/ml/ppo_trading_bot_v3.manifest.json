@@ -1,0 +1,37 @@
+{
+  "created_at": "2026-09-28T17:55:46.628156+00:00",
+  "extra": {
+    "decision": "D6 (auditoría 2026-09-28): zip reentrenado por _do_retrain sin VecNormalize; se sirve EN CRUDO hasta reentrenar con el pipeline corregido.",
+    "not_for_live": true,
+    "replaces_vec_norm": "ppo_trading_bot_v3_vec_norm.pkl (2026-09-11) queda sin usar por incoherente"
+  },
+  "features": [
+    "spread",
+    "real_volume",
+    "returns",
+    "range",
+    "sma20",
+    "dist_sma20",
+    "macd",
+    "macd_signal",
+    "macd_hist",
+    "tr",
+    "atr",
+    "rsi14",
+    "bb_pos",
+    "lag_return_1",
+    "lag_return_2",
+    "lag_return_3",
+    "lag_return_5"
+  ],
+  "model_file": "ppo_trading_bot_v3.zip",
+  "model_sha256": "d94b7d23d42f9b6a2cce6ade71a84f928a434979f3cd6e19a042156a5888dcf7",
+  "obs_shape": [
+    20,
+    24
+  ],
+  "schema_version": 1,
+  "source": "auto_retrain_raw_2026-09-28",
+  "vec_norm_file": null,
+  "vec_norm_sha256": null
+}

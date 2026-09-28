@@ -456,6 +456,17 @@ async def _do_retrain() -> None:
     candidate_path = MODEL_PATH.removesuffix(".zip") + ".candidate.zip"
     model.save(candidate_path)
     os.replace(candidate_path, MODEL_PATH)
+
+    # P0-5: certificar el bundle promovido. Sin manifest válido el próximo
+    # arranque fallará en validate_bundle (fail-fast: nunca sirve binarios sucios).
+    from services.model_registry import build_manifest, write_manifest
+    write_manifest(MODEL_PATH, build_manifest(
+        MODEL_PATH,
+        obs_shape=getattr(model.observation_space, "shape", ()),
+        vec_norm_file=None,  # _do_retrain entrena sin VecNormalize: el bundle es crudo
+        source="auto_retrain_raw",
+        extra={"candidate_metrics": candidate_metrics},
+    ))
     state = await _ensure_retrain_state()
     state.last_retrain_time = time.time()
     await _save_retrain_state(state)
