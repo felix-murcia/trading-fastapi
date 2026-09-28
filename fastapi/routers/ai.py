@@ -25,6 +25,7 @@ from ml.trading_env_v2 import (
     get_market_features,
 )
 from services.auto_retrain import (
+    approve_retrain as _approve_retrain,
     force_retrain as _force_retrain,
     get_state as _get_retrain_state,
     record_trade_filled,
@@ -431,6 +432,24 @@ async def force_retrain_endpoint(_: None = Depends(verify_token)):
         },
     )
     return {"status": result["status"], "filled_count": state.filled_count, "in_progress": state.retrain_in_progress}
+
+
+@router.post("/retrain/approve")
+async def approve_retrain_endpoint(_: None = Depends(verify_token)):
+    """Aprueba el retrain pendiente (umbral alcanzado con retrain_auto_approve=false).
+
+    No salta el gate de promoción: ese se aplica dentro de _do_retrain.
+    """
+    result = await _approve_retrain()
+    await log_to_audit(
+        "retrain_approved",
+        {
+            "status": result.get("status"),
+            "filled_count": result.get("filled_count"),
+            "min_trades_for_retrain": result.get("min_trades_for_retrain"),
+        },
+    )
+    return result
 
 
 @router.get("/retrain/status")

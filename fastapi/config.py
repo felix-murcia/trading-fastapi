@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     retrain_enabled: bool = True          # Habilitar reentrenamiento automático
     trades_before_retrain: int = 50       # N trades antes de disparar retrain
     min_trades_for_retrain: int = 20     # Mínimo de trades para considerar datos suficientes
-    retrain_auto_approve: bool = False    # P0-1: promoción automática nunca implícita; aprobar vía /admin/retrain/approve
+    retrain_auto_approve: bool = False    # P0-1: promoción automática nunca implícita; aprobar vía POST /api/v1/ai/retrain/approve
 
     # ─── Market Microstructure ────────────────────────────────────────────────
     microstructure_features_enabled: bool = False  # Añade VP + Orderbook al predict (requiere retrain del modelo si se activa)

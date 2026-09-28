@@ -1219,3 +1219,24 @@ Ahora, si las Bandas de Bollinger son inválidas o el ratio es insuficiente, el 
 - `fastapi/services/auto_retrain.py`
 - `fastapi/config.py`
 - `fastapi/tests/test_auto_retrain.py` (+18)
+
+### AD. Fix P1-3: aprobación de retrain + gestión de tasks con alerta (2026-09-28)
+
+**Problemas (auditoría):**
+1. `asyncio.create_task(_trigger_retrain())` sin referencia (2 sitios) → el task podía recolectarse y sus excepciones morían en silencio; un fallo de retrain era invisible.
+2. El trigger logueaba "usar endpoint `/admin/retrain/approve`" **que no existía**: con `retrain_auto_approve=false` no había forma legítima de aprobar el retrain pendiente (solo `/retrain/force`, que no valida umbral).
+3. Fallo de retrain sin alerta asociada.
+
+**Cambios:**
+- `_spawn_retrain_task()` en `services/auto_retrain.py`: conserva la referencia (`_RETRAIN_TASK`), reutiliza el task vivo (sin duplicados) y en el done-callback emite `send_alert(ERROR)` con la excepción si termina en fallo (o si se cancela).
+- `approve_retrain()` + **`POST /api/v1/ai/retrain/approve`** (token obligatorio): aprueba **solo** si el umbral está alcanzado y no hay retrain en curso → `no_pending` / `already_running` / `approved`; evento de auditoría `retrain_approved`. No salta el gate de promoción (ese vive dentro de `_do_retrain`).
+- Trigger automático y `force_retrain` usan el spawn helper (sin `create_task` suelto).
+- Log y `config.py` apuntan al path real `/api/v1/ai/retrain/approve`.
+
+**Validación (2026-09-28):** `pytest fastapi/tests/ -q` → **140 passed** (128 → 140). Tests nuevos (`test_retrain_approval.py`, 12): ruta existe, auth 422/401, wiring + auditoría, semántica de approve ×3, force con spawn, referencia + no-duplicado, alerta en fallo del task, trigger con aprobación ×3.
+
+**Archivos:**
+- `fastapi/services/auto_retrain.py`
+- `fastapi/routers/ai.py`
+- `fastapi/config.py`
+- `fastapi/tests/test_retrain_approval.py` (nuevo)

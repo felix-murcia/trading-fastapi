@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 
 from config import settings
+from services.alerting import AlertLevel, send_alert
 
 logger = logging.getLogger(__name__)
 
@@ -284,9 +285,12 @@ async def record_trade_filled(
             RetrainConfig.min_trades_for_retrain,
         )
         if not settings.retrain_auto_approve:
-            logger.warning("[RETRAIN] Auto-retrain bloqueado: retrain_auto_approve=false. Usar endpoint /admin/retrain/approve para aprobar.")
+            logger.warning(
+                "[RETRAIN] Auto-retrain bloqueado: retrain_auto_approve=false. "
+                "Usar POST /api/v1/ai/retrain/approve para aprobar el retrain pendiente."
+            )
             return
-        asyncio.create_task(_trigger_retrain())
+        _spawn_retrain_task()
 
 
 async def _trigger_retrain() -> None:
@@ -304,6 +308,43 @@ async def _trigger_retrain() -> None:
         finally:
             state.retrain_in_progress = False
             await _save_retrain_state(state)
+
+
+_RETRAIN_TASK: asyncio.Task | None = None
+
+
+def _spawn_retrain_task() -> asyncio.Task | None:
+    """Lanza _trigger_retrain en background con referencia y manejo de fallo.
+
+    Sin referencia, el task puede recolectarse y sus excepciones mueren en
+    silencio (violación de 'no silent failures'): aquí se conserva la
+    referencia, no se duplica si ya hay uno vivo y se alerta en el
+    done-callback si termina con error.
+    """
+    global _RETRAIN_TASK
+    if _RETRAIN_TASK is not None and not _RETRAIN_TASK.done():
+        logger.warning("[RETRAIN] Ya hay un retrain en curso — se reutiliza el task vivo")
+        return _RETRAIN_TASK
+
+    task = asyncio.create_task(_trigger_retrain())
+    _RETRAIN_TASK = task
+
+    def _on_done(t: asyncio.Task) -> None:
+        if t.cancelled():
+            send_alert(AlertLevel.ERROR, "auto_retrain", "Retrain cancelado (task)")
+            return
+        exc = t.exception()
+        if exc is not None:
+            send_alert(
+                AlertLevel.ERROR,
+                "auto_retrain",
+                f"Retrain fallido: {type(exc).__name__}: {exc}",
+                exc=exc,
+                context={"stage": "retrain_pipeline"},
+            )
+
+    task.add_done_callback(_on_done)
+    return task
 
 
 def _load_obs_rms(model_path: str, env_cfg: dict):
@@ -629,10 +670,32 @@ async def _save_retrain_metrics(df: pd.DataFrame, cfg: RetrainConfig) -> None:
 # ─── HTTP Endpoint para forzar retrain manualmente ────────────────────────────
 
 async def force_retrain() -> dict:
-    """Fuerza un retrain inmediato (para uso manual/debug)."""
+    """Fuerza un retrain inmediato (para uso manual/debug).
+
+    No salta el gate de promoción: eso vive dentro de _do_retrain.
+    """
     state = await _ensure_retrain_state()
     if state.retrain_in_progress:
         return {"status": "already_running"}
 
-    asyncio.create_task(_trigger_retrain())
+    _spawn_retrain_task()
     return {"status": "triggered", "filled_count": state.filled_count}
+
+
+async def approve_retrain() -> dict:
+    """Aprueba el retrain pendiente (umbral alcanzado con retrain_auto_approve=false).
+
+    Solo aprueba si hay umbral realmente alcanzado y no hay otro en curso;
+    el gate de promoción del candidato se aplica igual dentro de _do_retrain.
+    """
+    state = await _ensure_retrain_state()
+    if state.retrain_in_progress:
+        return {"status": "already_running", "filled_count": state.filled_count}
+    if state.filled_count < RetrainConfig.min_trades_for_retrain:
+        return {
+            "status": "no_pending",
+            "filled_count": state.filled_count,
+            "min_trades_for_retrain": RetrainConfig.min_trades_for_retrain,
+        }
+    _spawn_retrain_task()
+    return {"status": "approved", "filled_count": state.filled_count}
