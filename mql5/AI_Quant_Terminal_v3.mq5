@@ -6,10 +6,10 @@ Terminal de Ejecución y Telemetría para Cerebro Autónomo (FastAPI + PPO v3).
 - Rol del Servidor: Decisión direccional, dimensionamiento de lotes, SL, TP y gestión de riesgo.
 */
 #property copyright "AI Quant Terminal v3"
-#property version   "12.10"
+#property version   "13.0"
 #property strict
 
-#define EA_VERSION "12.10"
+#define EA_VERSION "13.0"
 
 #include <Trade\Trade.mqh>
 
@@ -130,6 +130,48 @@ void ReportEADecision(const string cycle_id, const string received, const string
    string responseHeaders;
    int res = WebRequest("POST", FastAPI_URL + "/api/v1/ai/ea/decision", headers, 10000, postData, resultArr, responseHeaders);
    PrintFormat("[AI Terminal] EA decision reported cycle=%s decision=%s action=%s HTTP=%d", cycle_id, received, action, res);
+  }
+
+//+------------------------------------------------------------------+
+//| Gate del servidor (P0-3): ninguna orden se coloca sin pasar por   |
+//| /v1/orders/prepare (idempotencia + Risk Guardian + validadores).  |
+//| Fail-closed: si el gate no responde, NO se coloca la orden.       |
+//+------------------------------------------------------------------+
+bool RequestOrderPermission(const string cycle_id, const string order_type,
+                            const double entry, const double sl, const double tp,
+                            const double volume, string &refReason)
+  {
+   refReason = "";
+   string body = "";
+   StringConcatenate(body, "{",
+      "\"cycle_id\":\"", cycle_id, "\",",
+      "\"symbol\":\"", Symbol(), "\",",
+      "\"type\":\"", order_type, "\",",
+      "\"entry\":", DoubleToString(entry, 5), ",",
+      "\"sl\":", DoubleToString(sl, 5), ",",
+      "\"tp\":", DoubleToString(tp, 5), ",",
+      "\"volume\":", DoubleToString(volume, 2),
+      "}");
+   char postData[], resultArr[];
+   string headers = "Content-Type: application/json\r\n"
+                    "X-Internal-Token: " + InternalToken + "\r\n";
+   StringToCharArray(body, postData, 0, StringLen(body));
+   ArrayResize(postData, StringLen(body));
+   string responseHeaders;
+   int res = WebRequest("POST", FastAPI_URL + "/v1/orders/prepare", headers, 10000, postData, resultArr, responseHeaders);
+   if(res != 200)
+     {
+      refReason = "gate_unreachable_http_" + IntegerToString(res);
+      PrintFormat("[AI Terminal] GATE inaccesible (HTTP %d) — orden NO colocada (fail-closed). body=%s", res, body);
+      return false;
+     }
+   string r = CharArrayToString(resultArr);
+   if(GetJsonValue(r, "approved") == "true")
+      return true;
+   refReason = GetJsonValue(r, "rejection_reason");
+   if(refReason == "") refReason = "rejected_no_reason";
+   PrintFormat("[AI Terminal] GATE rechazó %s: %s | resp=%s", order_type, refReason, r);
+   return false;
   }
 
 void OnTick()
@@ -308,6 +350,14 @@ void OnTick()
             double tpPrice = NormalizeDouble(ask + tpDist, digits);
             if(ask - slPrice < minStopDist) slPrice = NormalizeDouble(ask - minStopDist, digits);
             if(tpPrice - ask < minStopDist) tpPrice = NormalizeDouble(ask + minStopDist, digits);
+
+            // P0-3: gate del servidor antes de colocar (fail-closed)
+            string gateReason = "";
+            if(!RequestOrderPermission(cycle_id, "BUY", ask, slPrice, tpPrice, lot, gateReason))
+              {
+               ReportEADecision(cycle_id, decision, "rejected_by_gate", r);
+               return;
+              }
             bool placed = trade.Buy(lot, Symbol(), ask, slPrice, tpPrice, "AI-Predict-v3");
             if(placed)
               {
@@ -335,6 +385,14 @@ void OnTick()
             double tpPrice = NormalizeDouble(bid - tpDist, digits);
             if(slPrice - bid < minStopDist) slPrice = NormalizeDouble(bid + minStopDist, digits);
             if(bid - tpPrice < minStopDist) tpPrice = NormalizeDouble(bid - minStopDist, digits);
+
+            // P0-3: gate del servidor antes de colocar (fail-closed)
+            string gateReason = "";
+            if(!RequestOrderPermission(cycle_id, "SELL", bid, slPrice, tpPrice, lot, gateReason))
+              {
+               ReportEADecision(cycle_id, decision, "rejected_by_gate", r);
+               return;
+              }
             bool placed = trade.Sell(lot, Symbol(), bid, slPrice, tpPrice, "AI-Predict-v3");
             if(placed)
               {

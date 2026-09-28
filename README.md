@@ -1151,3 +1151,26 @@ Ahora, si las Bandas de Bollinger son inválidas o el ratio es insuficiente, el 
 - `fastapi/ml/train_ppo_v3.py`
 - `fastapi/tests/conftest.py`
 - `fastapi/tests/test_e2e_ai_predict.py`
+
+### AA. Fix P0-3: order gate EA → `/v1/orders/prepare` (EA v13.0) (2026-09-28)
+
+**Problema:** `order_manager.prepare()` (idempotencia por cycle_id + Risk Guardian + validadores geométricos + registro `pending` + firma HMAC) existía pero **ninguna ruta lo exponía**: el EA colocaba órdenes con `trade.Buy/trade.Sell` directamente, saltándose todo el pipeline de defensa. Autonomía sin frenos.
+
+**Cambios:**
+- `routers/orders.py` — nueva ruta `POST /v1/orders/prepare` (token interno).
+- `mql5/AI_Quant_Terminal_v3.mq5` — **v12.10 → v13.0**:
+  - helper `RequestOrderPermission()` — **fail-closed**: si el gate no responde (HTTP != 200), la orden NO se coloca.
+  - BUY y SELL consultan el gate con precios/SL/TP/lote finales ANTES de `trade.Buy/Sell`; si `approved=false` → `ReportEADecision(action="rejected_by_gate")` y `return`.
+- Los rechazos quedan auditados server-side (`order_rejected` en `audit_log`, con motivo) + log en el EA.
+- `tests/test_orders_prepare.py` (nuevo, 11 tests): 401/422 de auth, aprobación con payload firmado + INSERT `pending`, idempotencia por cycle, bloqueo del Risk Guardian, geometría inválida, duplicado, volumen fuera de rango; contrato de la fuente MQL5 (gate antes de placement ×2, fail-closed, bump de versión).
+
+**Efectos conocidos:**
+- `orders` conserva filas `pending` (reserva de idempotencia); la transición a `placed/filled` queda para P1 (la telemetría `ea/decision` aún no envía `order_ticket`).
+- Si `trade.Buy` falla tras aprobar, la fila `pending` puede bloquear reintentos en el mismo precio durante `order_max_age_hours=48` (conservador: anti-duplicados).
+
+**Validación (2026-09-28):** `pytest fastapi/tests/ -q` → **105 passed**.
+
+**Archivos editados/creados:**
+- `fastapi/routers/orders.py`
+- `fastapi/tests/test_orders_prepare.py` (nuevo)
+- `mql5/AI_Quant_Terminal_v3.mq5` (v13.0)
