@@ -19,6 +19,7 @@ import httpx
 import pandas as pd
 
 from config import settings
+from core.rules import is_winning_close
 from db.connection import get_pool
 
 logger = logging.getLogger(__name__)
@@ -61,13 +62,14 @@ async def record_trade_closed(
     direction: str,
     entry_time: datetime,
     exit_time: datetime,
+    pnl: float,
     pnl_pct: float,
     exit_reason: str,
     sl_hit: bool,
     tp_hit: bool,
 ) -> None:
     """
-    Llamado desde order_manager cuando un trade se cierra.
+    Llamado desde auto_retrain.record_trade_filled al registrar un cierre.
     Dispara análisis asíncrono con Qwen (no bloquea).
     """
     asyncio.create_task(
@@ -77,6 +79,7 @@ async def record_trade_closed(
             direction=direction,
             entry_time=entry_time,
             exit_time=exit_time,
+            pnl=pnl,
             pnl_pct=pnl_pct,
             exit_reason=exit_reason,
             sl_hit=sl_hit,
@@ -84,8 +87,8 @@ async def record_trade_closed(
         )
     )
     logger.info(
-        "[JOURNAL] Trade %d closed: %s %s pnl=%.4f reason=%s → análisis disparado",
-        trade_id, direction, symbol, pnl_pct, exit_reason
+        "[JOURNAL] Trade %d closed: %s %s pnl=%.2f EUR (%.4f) reason=%s → análisis disparado",
+        trade_id, direction, symbol, pnl, pnl_pct, exit_reason
     )
 
 
@@ -95,6 +98,7 @@ async def _analyze_trade_async(
     direction: str,
     entry_time: datetime,
     exit_time: datetime,
+    pnl: float,
     pnl_pct: float,
     exit_reason: str,
     sl_hit: bool,
@@ -107,6 +111,7 @@ async def _analyze_trade_async(
             direction=direction,
             entry_time=entry_time,
             exit_time=exit_time,
+            pnl=pnl,
             pnl_pct=pnl_pct,
             exit_reason=exit_reason,
             sl_hit=sl_hit,
@@ -142,6 +147,7 @@ async def _query_qwen_trade_insight(
     direction: str,
     entry_time: datetime,
     exit_time: datetime,
+    pnl: float,
     pnl_pct: float,
     exit_reason: str,
     sl_hit: bool,
@@ -170,7 +176,8 @@ async def _query_qwen_trade_insight(
 
     # Calcular duración
     duration = (exit_time - entry_time).total_seconds() / 3600  # horas
-    win = "WIN" if pnl_pct > 0 else "LOSS"
+    # Convención AGENTS.md: cierre < MIN_WIN_EUR (3€) = pérdida (core/rules).
+    win = "WIN" if is_winning_close(pnl) else "LOSS"
 
     prompt = f"""Analyze this {symbol} trade and identify the key pattern or insight.
 
@@ -179,7 +186,7 @@ Trade Details:
 - Entry time: {entry_time.strftime('%Y-%m-%d %H:%M UTC')}
 - Exit time: {exit_time.strftime('%Y-%m-%d %H:%M UTC')}
 - Duration: {duration:.1f} hours
-- PnL: {pnl_pct:.4%} ({win})
+- PnL: {pnl:.2f} EUR / {pnl_pct:.4%} ({win})
 - Exit reason: {exit_reason} (sl={'YES' if sl_hit else 'NO'}, tp={'YES' if tp_hit else 'NO'})
 
 Your task: Identify the most likely reason for this outcome.

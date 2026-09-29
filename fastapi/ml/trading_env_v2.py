@@ -23,6 +23,8 @@ from gymnasium import spaces
 import numpy as np
 import pandas as pd
 
+from core.rules import is_winning_close
+
 # P2-2: el sizing del PPO vive en position_sizing (misma función que /predict)
 from services.position_sizing import size_ppo_position
 
@@ -439,7 +441,10 @@ class ForexTradingEnvV2(gym.Env):
             self.balance += realized_pnl
             self.equity = self.balance
             self.trade_count += 1
-            if realized_pnl > 0:
+            # Convención AGENTS.md: cierre < MIN_WIN_EUR (3€) = pérdida
+            # también en simulación — el win rate del entrenamiento mide
+            # la misma regla que el mercado real.
+            if is_winning_close(realized_pnl):
                 self.wins += 1
             else:
                 self.losses += 1

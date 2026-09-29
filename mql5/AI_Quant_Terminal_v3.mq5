@@ -6,10 +6,10 @@ Terminal de Ejecución y Telemetría para Cerebro Autónomo (FastAPI + PPO v3).
 - Rol del Servidor: Decisión direccional, dimensionamiento de lotes, SL, TP y gestión de riesgo.
 */
 #property copyright "AI Quant Terminal v3"
-#property version   "13.1"
+#property version   "13.2"
 #property strict
 
-#define EA_VERSION "13.1"
+#define EA_VERSION "13.2"
 
 #include <Trade\Trade.mqh>
 
@@ -666,13 +666,18 @@ void CloseAllPositions()
       PrintFormat("[AI Terminal] Buscando openingDeal: dealTicket=%I64u positionId=%I64d", dealTicket, positionId);
 
       ulong openingDeal = 0;
+      long currentEntry = -1;
       if(HistorySelectByPosition(positionId))
         {
          for(int i = 0; i < HistoryDealsTotal(); i++)
            {
             ulong hTicket = HistoryDealGetTicket(i);
             if(hTicket <= 0) continue;
-            if(hTicket == dealTicket) continue;
+            if(hTicket == dealTicket)
+              {
+               currentEntry = HistoryDealGetInteger(hTicket, DEAL_ENTRY);
+               continue;
+              }
             long hEntry = HistoryDealGetInteger(hTicket, DEAL_ENTRY);
             long hType = HistoryDealGetInteger(hTicket, DEAL_TYPE);
             if(hEntry == DEAL_ENTRY_IN && (hType == DEAL_TYPE_BUY || hType == DEAL_TYPE_SELL))
@@ -681,6 +686,15 @@ void CloseAllPositions()
                break;
               }
            }
+        }
+
+      // v13.2: solo se reportan cierres. El deal de apertura (DEAL_ENTRY_IN,
+      // beneficio 0 y entry==exit) duplicaba cada posición en trade_outcomes.
+      // El backend también lo ignora (guard en POST /trade/filled).
+      if(currentEntry == DEAL_ENTRY_IN)
+        {
+         PrintFormat("[AI Terminal] OnTradeTransaction descartado: deal=%I64u es apertura (DEAL_ENTRY_IN)", dealTicket);
+         return;
         }
 
      if(openingDeal <= 0)

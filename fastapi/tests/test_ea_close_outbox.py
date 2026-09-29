@@ -48,7 +48,15 @@ class TestCloseOutbox:
         src = _ea_source()
         assert "OUTBOX_MAX_PER_FLUSH" in src, "Falta límite de reintentos por ciclo"
 
-    def test_ea_version_bumped_to_13_1(self):
+    def test_ea_version_bumped_to_13_2(self):
         src = _ea_source()
-        assert re.search(r'#property\s+version\s+"13\.1"', src), "Falta bump a 13.1"
-        assert re.search(r'#define\s+EA_VERSION\s+"13\.1"', src)
+        assert re.search(r'#property\s+version\s+"13\.2"', src), "Falta bump a 13.2"
+        assert re.search(r'#define\s+EA_VERSION\s+"13\.2"', src)
+
+    def test_ea_filters_opening_deals_v13_2(self):
+        # v13.2: OnTradeTransaction descarta DEAL_ENTRY_IN — el deal de
+        # apertura (pnl 0, entry==exit) no es un cierre y duplicaba cada
+        # posición en trade_outcomes. El backend tiene el guard equivalente.
+        src = _ea_source()
+        assert "if(currentEntry == DEAL_ENTRY_IN)" in src
+        assert "long currentEntry = -1;" in src

@@ -789,6 +789,20 @@ async def trade_filled_webhook(req: TradeFilledRequest, _: None = Depends(verify
     from services.auto_retrain import _parse_timestamp
     entry_ts = _parse_timestamp(req.entry_time)
     exit_ts = _parse_timestamp(req.exit_time)
+
+    # El EA (OnTradeTransaction) reporta también el deal de APERTURA:
+    # DEAL_ENTRY_IN tiene beneficio 0 por definición y entry==exit (no hay
+    # duración). No es un cierre → no se fabrican timestamps ni se persiste.
+    # Fix raíz en EA v13.2 (filtra DEAL_ENTRY_IN); este guard protege la BD
+    # mientras la versión compilada siga siendo anterior.
+    if entry_ts == exit_ts and float(req.pnl) == 0.0 and float(req.pnl_pct) == 0.0:
+        logger.warning(
+            "[TRADE-FILLED] Reporte de APERTURA ignorado (entry==exit, pnl=0): "
+            "symbol=%s entry=%s deal=%s position=%s",
+            req.symbol, entry_ts, req.deal_ticket, req.position_id,
+        )
+        return {"status": "ignored_open_deal"}
+
     minimum_timestamp = 946684800.0  # 2000-01-01 UTC
     if entry_ts == 0:
         entry_ts = exit_ts - 1

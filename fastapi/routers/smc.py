@@ -3,6 +3,7 @@ import logging
 import time
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from core.rules import is_winning_close
 from db.connection import get_pool
 from services import simple_pipeline, mt5_client, news_filter
 from services.auto_retrain import record_trade_filled
@@ -290,22 +291,21 @@ async def get_analytics(_: None = Depends(verify_token)):
         daily_pnl[date_str] += pnl
         by_symbol[d.get("symbol", "UNKNOWN")] += pnl
         
-        if pnl > 0:
+        # Convención AGENTS.md: cierre < MIN_WIN_EUR (3€) = pérdida, aunque
+        # el pnl en euros sea positivo (no cubre spread/slippage reales).
+        if is_winning_close(pnl):
             wins += 1
             current_win_streak += 1
             current_loss_streak = 0
             current_consec_profit += pnl
             if current_win_streak > max_win_streak: max_win_streak = current_win_streak
             if current_consec_profit > max_consec_profit: max_consec_profit = current_consec_profit
-        elif pnl <= 0:
-            if pnl < 0:
-                losses += 1
-                current_loss_streak += 1
-                current_win_streak = 0
-                current_consec_profit = 0.0
-                if current_loss_streak > max_loss_streak: max_loss_streak = current_loss_streak
-            else:
-                losses += 1
+        else:
+            losses += 1
+            current_loss_streak += 1
+            current_win_streak = 0
+            current_consec_profit = 0.0
+            if current_loss_streak > max_loss_streak: max_loss_streak = current_loss_streak
 
         if pnl > best_trade: best_trade = pnl
         if pnl < worst_trade: worst_trade = pnl

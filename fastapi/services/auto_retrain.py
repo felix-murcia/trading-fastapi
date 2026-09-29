@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 
 from config import settings
+from core.rules import is_winning_close
 from services import data_snapshot, drift_monitor, experiment_tracker
 from services.alerting import AlertLevel, send_alert
 from services.walk_forward import (
@@ -279,6 +280,7 @@ async def record_trade_filled(
         direction=direction,
         entry_time=entry_ts,
         exit_time=exit_ts,
+        pnl=pnl,
         pnl_pct=pnl_pct,
         exit_reason=exit_reason,
         sl_hit=sl_hit,
@@ -848,7 +850,7 @@ async def _log_retrain_event(event: str, data: dict) -> None:
         "last_retrain_time": state.last_retrain_time,
         "outcomes": len(state.outcomes),
         "avg_pnl": float(np.mean([o.pnl for o in state.outcomes])) if state.outcomes else 0.0,
-        "outcomes_win_rate": float(np.mean([o.pnl > 0 for o in state.outcomes])) if state.outcomes else 0.0,
+        "outcomes_win_rate": float(np.mean([is_winning_close(o.pnl) for o in state.outcomes])) if state.outcomes else 0.0,
     })
     payload.setdefault("config", {
         "walk_forward_folds": RetrainConfig.walk_forward_folds,

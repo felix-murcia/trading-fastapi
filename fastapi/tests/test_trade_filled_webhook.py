@@ -273,3 +273,41 @@ class TestDealTicketPersistence:
         assert "deal_ticket  BIGINT" in schema
         assert "idx_trade_outcomes_deal_ticket" in schema
         assert "WHERE deal_ticket IS NOT NULL" in schema
+
+
+class TestOpenDealReportIgnored:
+    """v13.2: el EA descarta DEAL_ENTRY_IN; el guard backend descarta lo que
+    llegue de versiones anteriores.
+
+    Un deal de apertura tiene beneficio 0 por definición y entry==exit (no
+    hay duración). Persistirlo fabricaba una fila fantasma por posición en
+    trade_outcomes (pnl 0.00, duración 1s, duplicando filled_count y el
+    análisis de Qwen)."""
+
+    @pytest.mark.parametrize("pnl", [0.0, "0.00"])
+    def test_opening_deal_report_is_ignored(self, pnl):
+        response, record_mock = _post_filled(
+            entry_time="1725450000",
+            exit_time="1725450000",
+            pnl=pnl,
+            pnl_pct=0.0,
+        )
+        assert response.status_code == 200
+        assert response.json() == {"status": "ignored_open_deal"}
+        record_mock.assert_not_called()
+
+    def test_same_second_close_with_real_pnl_is_recorded(self):
+        """Un cierre real en el mismo segundo (pnl != 0) sigue registrándose:
+        la normalización entry==exit → exit+1s queda intacta."""
+        response, record_mock = _post_filled(
+            entry_time="1725450000",
+            exit_time="1725450000",
+            pnl=0.95,
+            pnl_pct=0.0159,
+        )
+        assert response.status_code == 200
+        assert record_mock.call_count == 1
+        kwargs = record_mock.call_args.kwargs
+        assert kwargs["entry_time"] == "1725450000"
+        assert kwargs["exit_time"] == "1725450001"
+        assert kwargs["pnl"] == 0.95
