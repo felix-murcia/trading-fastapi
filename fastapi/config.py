@@ -43,6 +43,14 @@ class Settings(BaseSettings):
     # ─── P3-2c: Monitor de drift ─────────────────────────────────────────────
     drift_check_interval_hours: int = 24      # Cadencia del check PSI + decay
 
+    # ─── P3-1: Pares habilitados (mundos independientes, sin acoplamiento) ─────
+    # Cada par construye su propio PairContext (modelo, riesgo, estado) vía
+    # core.container — añadir un par NO toca el código de otro. 'enabled' es
+    # obligatorio en cada especificación: listar un par nunca lo activa solo.
+    # P3-3 añade aquí un segundo par (+ canary) y nada más cambia.
+    # Env (JSON): PAIRS='[{"symbol":"EURUSD","enabled":true},{"symbol":"GBPUSD","enabled":false}]'
+    pairs: list[dict] = [{"symbol": "EURUSD", "enabled": True}]
+
     # ─── Market Microstructure ────────────────────────────────────────────────
     microstructure_features_enabled: bool = False  # Añade VP + Orderbook al predict (requiere retrain del modelo si se activa)
     volume_profile_bins: int = 50         # Niveles de precio para Volume Profile
