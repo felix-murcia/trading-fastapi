@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 MODEL_PATH = "/app/ml/ppo_trading_bot_v3.zip"   # ← EA usa v3, no v2
 RETRAIN_LOCK = asyncio.Lock()
+SCHEDULE_CHECK_S = 3600   # P3-2d: el calendario se revisa cada hora
 
 
 @dataclass
@@ -74,6 +75,20 @@ class RetrainState:
     last_retrain_time: float = 0.0
     outcomes: list = field(default_factory=list)
     retrain_in_progress: bool = False
+    # P3-2d: retrain programado por tiempo (calendario)
+    scheduled_due: bool = False     # el calendario marca retrain (pendiente si auto_approve=false)
+    schedule_anchor: float = 0.0    # ancla inicial cuando nunca hubo intento
+
+
+def _parse_bool(value, default: bool = False) -> bool:
+    """jsonb puede devolver bool, número o string según el escritor."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes")
+    return bool(value)
 
 
 def _retrain_state_row_key(key: str) -> str:
@@ -84,13 +99,21 @@ async def _load_retrain_state() -> RetrainState:
     from db.connection import get_pool
 
     pool = get_pool()
-    rows = await pool.fetch("SELECT key, value FROM retrain_state WHERE key = ANY($1::text[])", ["retrain_state.filled_count", "retrain_state.last_retrain_time"])
+    rows = await pool.fetch(
+        "SELECT key, value FROM retrain_state WHERE key = ANY($1::text[])",
+        ["retrain_state.filled_count", "retrain_state.last_retrain_time",
+         "retrain_state.scheduled_due", "retrain_state.schedule_anchor"],
+    )
     payload = {row["key"]: row["value"] for row in rows}
     state = RetrainState(
         filled_count=int(payload.get(_retrain_state_row_key("filled_count"), 0)),
         last_retrain_time=float(payload.get(_retrain_state_row_key("last_retrain_time"), 0.0)),
         outcomes=[],
         retrain_in_progress=False,
+        scheduled_due=_parse_bool(payload.get(_retrain_state_row_key("scheduled_due"))),
+        schedule_anchor=float(
+            payload.get(_retrain_state_row_key("schedule_anchor"), 0.0) or 0.0
+        ),
     )
     if state.filled_count == 0 and state.last_retrain_time == 0.0:
         # Bootstrap solo si NUNCA hubo retrain: filled_count = cierres desde el inicio.
@@ -108,6 +131,8 @@ async def _save_retrain_state(state: RetrainState) -> None:
     rows = [
         (_retrain_state_row_key("filled_count"), str(state.filled_count)),
         (_retrain_state_row_key("last_retrain_time"), str(state.last_retrain_time)),
+        (_retrain_state_row_key("scheduled_due"), json.dumps(bool(state.scheduled_due))),
+        (_retrain_state_row_key("schedule_anchor"), json.dumps(float(state.schedule_anchor))),
     ]
     for key, value in rows:
         await pool.execute(
@@ -312,6 +337,7 @@ async def _trigger_retrain(trigger: str = "manual") -> None:
     async with RETRAIN_LOCK:
         state = await _ensure_retrain_state()
         state.retrain_in_progress = True
+        state.scheduled_due = False   # el intento consume el disparador del calendario
         await _save_retrain_state(state)
         try:
             await _do_retrain(trigger=trigger)
@@ -691,6 +717,11 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int) -> None:
             gate_reason=decision.reason,
             gate_metrics=report.to_dict(),
         )
+        # P3-2d: cada intento (aunque rechazado) ancla el calendario — sin esto
+        # el programado reintentaría cada hora tras un rechazo (tormenta).
+        state = await _ensure_retrain_state()
+        state.last_retrain_time = time.time()
+        await _save_retrain_state(state)
         await _log_retrain_event("retrain_rejected", {
             "reason": decision.reason,
             "gate": decision.details,
@@ -849,20 +880,85 @@ async def force_retrain() -> dict:
     return {"status": "triggered", "filled_count": state.filled_count}
 
 
-async def approve_retrain() -> dict:
-    """Aprueba el retrain pendiente (umbral alcanzado con retrain_auto_approve=false).
+async def check_scheduled_retrain() -> bool:
+    """P3-2d: decide si el calendario marca un retrain. Devuelve True si toca.
 
-    Solo aprueba si hay umbral realmente alcanzado y no hay otro en curso;
+    Ancla = último intento (promoción O rechazo); si nunca hubo, la primera
+    revisión fija `schedule_anchor` (primer hito a `retrain_interval_hours`).
+    Con `retrain_auto_approve=false` deja `scheduled_due` para el flujo de
+    aprobación (approve_retrain lo acepta sin alcanzar el umbral de trades);
+    con true, dispara directamente con trigger='scheduled'.
+    """
+    state = await _ensure_retrain_state()
+    if state.retrain_in_progress:
+        return False
+    now = time.time()
+    interval_h = max(1, settings.retrain_interval_hours)
+    anchor = state.last_retrain_time or state.schedule_anchor
+    if anchor <= 0:
+        state.schedule_anchor = now
+        await _save_retrain_state(state)
+        logger.info(
+            "[RETRAIN-SCHED] Sin historial: primer check del calendario anclado "
+            "ahora — primer retrain programado en %dh", interval_h,
+        )
+        return False
+    elapsed_h = (now - anchor) / 3600.0
+    if elapsed_h < interval_h:
+        return False
+    state.scheduled_due = True
+    await _save_retrain_state(state)
+    logger.warning(
+        "[RETRAIN-SCHED] Retrain programado pendiente: último intento hace "
+        "%.1fh (intervalo %dh)", elapsed_h, interval_h,
+    )
+    if not settings.retrain_auto_approve:
+        logger.warning(
+            "[RETRAIN-SCHED] auto_approve=false — aprobar vía "
+            "POST /api/v1/ai/retrain/approve"
+        )
+        return True
+    _spawn_retrain_task("scheduled")
+    return True
+
+
+async def _retrain_schedule_loop() -> None:
+    """Calendario de retrain: revisa cada hora si toca (P3-2d)."""
+    await asyncio.sleep(SCHEDULE_CHECK_S)   # warmup: dejar arrancar el sistema
+    while True:
+        try:
+            await check_scheduled_retrain()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            send_alert(
+                AlertLevel.ERROR, "auto_retrain",
+                f"Check de retrain programado falló: {type(exc).__name__}: {exc}",
+                exc=exc,
+            )
+        await asyncio.sleep(SCHEDULE_CHECK_S)
+
+
+async def approve_retrain() -> dict:
+    """Aprueba el retrain pendiente (umbral alcanzado o calendario vencido).
+
+    Solo aprueba si hay un disparo realmente pendiente (umbral de trades
+    alcanzado O scheduled_due del calendario) y no hay otro en curso;
     el gate de promoción del candidato se aplica igual dentro de _do_retrain.
     """
     state = await _ensure_retrain_state()
     if state.retrain_in_progress:
         return {"status": "already_running", "filled_count": state.filled_count}
-    if state.filled_count < RetrainConfig.min_trades_for_retrain:
+    if (state.filled_count < RetrainConfig.min_trades_for_retrain
+            and not state.scheduled_due):
         return {
             "status": "no_pending",
             "filled_count": state.filled_count,
             "min_trades_for_retrain": RetrainConfig.min_trades_for_retrain,
         }
     _spawn_retrain_task("approved")
-    return {"status": "approved", "filled_count": state.filled_count}
+    return {
+        "status": "approved",
+        "filled_count": state.filled_count,
+        "scheduled_due": state.scheduled_due,
+    }

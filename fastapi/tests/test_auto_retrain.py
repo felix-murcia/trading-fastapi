@@ -502,7 +502,8 @@ class TestDoRetrainPromotion:
         # Bundle activo intacto: ni manifest nuevo, ni registro, ni recarga.
         assert not os.path.exists(str(tmp_path / "ppo_trading_bot_v3.manifest.json"))
         assert state.filled_count == 7
-        assert state.last_retrain_time == 1.0
+        # P3-2d: el rechazo también ancla el calendario (1.0 era el inicial)
+        assert state.last_retrain_time > 1.0
         record_promo.assert_not_awaited()
         reload_mock.assert_not_called()
 

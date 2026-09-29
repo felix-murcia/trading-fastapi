@@ -132,6 +132,9 @@ async def lifespan(app: FastAPI):
     # P3-2c: drift programado (PSI + decay; primera pasada a los 300 s).
     from services.drift_monitor import _drift_monitor_loop
     _bg_tasks.add(asyncio.create_task(_drift_monitor_loop()))
+    # P3-2d: calendario de retrain programado (revisión horaria).
+    from services.auto_retrain import _retrain_schedule_loop
+    _bg_tasks.add(asyncio.create_task(_retrain_schedule_loop()))
     yield
     _queue_task.cancel()
     for _task in _bg_tasks:

@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     trades_before_retrain: int = 50       # N trades antes de disparar retrain
     min_trades_for_retrain: int = 20     # Mínimo de trades para considerar datos suficientes
     retrain_auto_approve: bool = False    # P0-1: promoción automática nunca implícita; aprobar vía POST /api/v1/ai/retrain/approve
+    retrain_interval_hours: int = 168     # P3-2d: retrain programado (7 días desde el último intento)
 
     # ─── P3-2b: Backup del bundle ─────────────────────────────────────────────
     model_backup_enabled: bool = True         # GCS además del backup local verificado
