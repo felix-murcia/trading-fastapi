@@ -12,8 +12,6 @@ from config import settings
 from db.connection import init_pool, close_pool
 from routers import orders, smc, journal
 from routers.deps import verify_token
-from services.order_queue import get_pending_orders, mark_order_processing, mark_order_placed, mark_order_failed
-from services.mt5_client import place_order
 from services.performance_metrics import get_metrics, reset_metrics
 from services.risk_guardian import set_daily_start
 from services.structured_logging import StructuredLoggingMiddleware, log_to_audit
@@ -22,7 +20,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(nam
 logger = logging.getLogger(__name__)
 
 _mcp_status: dict = {"connected": False, "last_check": None, "detail": "pending"}
-_queue_task: asyncio.Task | None = None
 # Tareas de fondo con referencia viva (P0-6/P3-2): sin referencia el task puede
 # recolectarse y sus excepciones mueren en silencio; se cancelan en shutdown.
 _bg_tasks: set[asyncio.Task] = set()
@@ -52,51 +49,6 @@ async def _mcp_health_loop():
             was_connected = connected
 
         await asyncio.sleep(30)
-
-
-async def _order_queue_processor():
-    """
-    Background task que reprocesa órdenes pendientes cuando MT5 está disponible.
-    Se activa cada 60s y también cuando MT5 pasa de desconectado a conectado.
-    """
-    while True:
-        try:
-            if not _mcp_status["connected"]:
-                await asyncio.sleep(30)
-                continue
-
-            pending = await get_pending_orders(limit=10)
-            if not pending:
-                await asyncio.sleep(60)
-                continue
-
-            logger.info("[ORDER-QUEUE] Procesando %d órdenes pendientes", len(pending))
-            for order in pending:
-                order_id = order["id"]
-                await mark_order_processing(order_id)
-                try:
-                    result = await place_order(
-                        symbol=order["symbol"],
-                        order_type=order["order_type"],
-                        volume=float(order["volume"]),
-                        price=float(order["entry_price"]),
-                        sl=float(order["stop_loss"]),
-                        tp=float(order["take_profit"]),
-                        comment=order.get("comment", ""),
-                    )
-                    ticket = result.get("ticket", "")
-                    await mark_order_placed(order_id, str(ticket))
-                except httpx.HTTPStatusError as exc:
-                    error_msg = f"HTTP {exc.response.status_code}: {exc.response.text[:200]}"
-                    await mark_order_failed(order_id, error_msg)
-                except Exception as exc:
-                    await mark_order_failed(order_id, str(exc)[:200])
-
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.error("[ORDER-QUEUE] Error en processor: %s", exc)
-            await asyncio.sleep(60)
 
 
 @asynccontextmanager
@@ -131,9 +83,7 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("[RISK-GUARDIAN] No se pudo inicializar equity: %s", exc)
 
-    global _queue_task
     _bg_tasks.add(asyncio.create_task(_mcp_health_loop()))
-    _queue_task = asyncio.create_task(_order_queue_processor())
     # P3-2b: backup programado del bundle (primera pasada a los 60 s).
     from services.model_backup import _model_backup_loop
     _bg_tasks.add(asyncio.create_task(_model_backup_loop()))
@@ -144,7 +94,6 @@ async def lifespan(app: FastAPI):
     from services.auto_retrain import _retrain_schedule_loop
     _bg_tasks.add(asyncio.create_task(_retrain_schedule_loop()))
     yield
-    _queue_task.cancel()
     for _task in _bg_tasks:
         _task.cancel()
     await close_pool()

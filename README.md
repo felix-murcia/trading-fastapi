@@ -1480,3 +1480,20 @@ Ahora, si las Bandas de Bollinger son inválidas o el ratio es insuficiente, el 
 **Tests 437 → 459 host + contenedor (exit 0):** `test_p31d_pair_risk.py` (nuevo, 16): una instancia por símbolo (misma para el mismo mundo, distinta entre mundos), estados por par independientes, enrutado de `check_risk` por símbolo (GBPUSD bloqueado no afecta a EURUSD), siembra del baseline a guardianes tardíos y actualización global, `equity_allocation_pct` default 100 + 7 casos inválidos → `ValueError`, wiring del lifespan (guardianes antes del baseline) y presencia real de la eliminación del código muerto; `test_orders_prepare.py` +6: rechazo de par desconocido (**sin llegar a riesgo**), par deshabilitado, `open_count` que solo cuenta las posiciones del símbolo pedido (mezcla EURUSD/GBPUSD/ EURUSD → 2), techo de asignación (0.30 > 0.25 → rechazo con `0.25` en la razón; 0.20 → aprobado) y 100% → techo global sin cambio; `_prepare` extiende con `positions` y expone `pool.risk_check` para inspeccionar argumentos.
 
 **Archivos:** `fastapi/services/risk_guardian.py`, `services/order_manager.py`, `services/mt5_client.py` (−`place_order_with_fallback`), `services/correlation_sizing.py` (eliminado), `core/pair.py` (+`equity_allocation_pct`), `core/adapters.py` (doc), `main.py` (lifespan), `fastapi/tests/test_p31d_pair_risk.py` (nuevo), `test_orders_prepare.py` (extendido), `README.md`.
+
+### P1-5. Cola `deferred_orders` eliminada — fin de la falsa confianza (2026-09-29)
+
+**Objetivo (P1-5 / decisión D4):** la cola deferred se creó como "resiliencia para MT5 desconectado", pero **nadie escribió nunca en ella**: `enqueue_order` tenía cero llamantes y el `_order_queue_processor` de `main.py` re-leía una tabla permanentemente vacía cada 60 s. D4 fijó el criterio en 1 sprint: cablear en la ruta SMC si hay uso real, **eliminarla** si no — se han pasado múltiples sprints sin un solo `INSERT`, así que se elimina entera (la resiliencia real de órdenes ya existe: el gate `/v1/orders/prepare` (P0-3) y el outbox de cierres con reintento del EA v13.1 (P0-4 EA)).
+
+**Qué cambia:**
+- **`services/order_queue.py` eliminado** (entero): `enqueue_order`, `get_pending_orders`, `mark_order_processing/placed/failed`, `purge_old_orders` y `OrderQueueStatus` — todo el módulo operaba sobre `deferred_orders`.
+- **`main.py`:** se elimina `_order_queue_processor` (el background task que "reprocesaba pendientes" de la tabla vacía), su task en lifespan, su cancel en shutdown, la referencia global `_queue_task` y los imports `order_queue`/`place_order` (solo los usaba el processor).
+- **`performance_metrics`:** flag `order_deferred` del ciclo, contador `deferred` de `by_symbol` y clave `orders_deferred` del summary — `record_cycle_metrics` nunca recibía el parámetro (siempre `False` → `orders_deferred` siempre 0): métrica-museo de la cola eliminada.
+- **`db/schema.sql`:** DDL de `deferred_orders` + índice parcial `idx_deferred_pending`.
+- **BD en vivo:** `DROP TABLE deferred_orders` con **0 filas** (previo: volcado del DDL en `/tmp/opencode/p15_backup/deferred_orders_ddl.txt`).
+
+**Evidencia (2026-09-29):** grep de `order_queue|deferred_orders|enqueue_order|_queue_task|order_deferred` en `fastapi/` → **0 referencias**; `frontend/` no leía `orders_deferred` (la eliminación de la clave no rompe ningún consumidor); tras rebuild → arranque limpio (guardián + `Día iniciado — equity=423.89` + startup completo, 0 Tracebacks), `health` → `ok` (`equity=423.97`, MCP conectado), `POST /predict` → `200 (20.3 s, decision=HOLD)`.
+
+**Tests 459 (sin cambios de red):** ningún test referenciaba la cola; la suite completa pasa igual en host y en contenedor (`PYTEST_EXIT=0`) tras la eliminación — la remoción es regresión-neutral verificada.
+
+**Archivos:** `fastapi/services/order_queue.py` (eliminado), `fastapi/main.py`, `services/performance_metrics.py`, `db/schema.sql`, `README.md`.

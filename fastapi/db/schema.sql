@@ -40,28 +40,6 @@ CREATE TABLE IF NOT EXISTS audit_log (
 
 CREATE INDEX IF NOT EXISTS idx_audit_cycle ON audit_log(cycle_id);
 
--- Cola de órdenes offline/deferred (resilience para MT5 desconectado)
-CREATE TABLE IF NOT EXISTS deferred_orders (
-    id           BIGSERIAL PRIMARY KEY,
-    cycle_id     TEXT NOT NULL,
-    symbol       TEXT NOT NULL,
-    order_type   TEXT NOT NULL CHECK (order_type IN ('BUY', 'SELL')),
-    volume       NUMERIC(6,3)  NOT NULL,
-    entry_price  NUMERIC(10,5) NOT NULL,
-    stop_loss    NUMERIC(10,5) NOT NULL,
-    take_profit  NUMERIC(10,5) NOT NULL,
-    comment      TEXT,
-    status       TEXT NOT NULL CHECK (status IN ('pending', 'processing', 'failed', 'placed')),
-    retry_count  INTEGER NOT NULL DEFAULT 0,
-    last_error   TEXT,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_deferred_pending
-    ON deferred_orders(created_at)
-    WHERE status = 'pending';
-
 -- Trade outcomes para auto-retrain y métricas
 CREATE TABLE IF NOT EXISTS trade_outcomes (
     id           BIGSERIAL PRIMARY KEY,

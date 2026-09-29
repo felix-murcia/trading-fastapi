@@ -21,7 +21,6 @@ class CycleMetrics:
     latency_ms: float = 0.0
     mt5_available: bool = True
     order_placed: bool = False
-    order_deferred: bool = False
     order_ticket: Optional[int] = None
     error: Optional[str] = None
     ts: float = field(default_factory=time.time)
@@ -37,7 +36,7 @@ class PerformanceMetrics:
         self._cycles: list[CycleMetrics] = []
         self._symbol_stats: dict[str, dict] = defaultdict(lambda: {
             "total": 0, "buy": 0, "sell": 0, "hold": 0,
-            "errors": 0, "deferred": 0, "latency_sum": 0.0
+            "errors": 0, "latency_sum": 0.0
         })
         self._order_stats: dict[str, int] = defaultdict(int)
         # 0=FLAT, 1=LONG, 2=SHORT
@@ -63,8 +62,6 @@ class PerformanceMetrics:
             s["hold"] += 1
         if m.error:
             s["errors"] += 1
-        if m.order_deferred:
-            s["deferred"] += 1
         s["latency_sum"] += m.latency_ms
         if m.order_placed:
             self._order_stats["placed"] += 1
@@ -83,7 +80,6 @@ class PerformanceMetrics:
         uptime_s = time.time() - self._start_ts
         total = len(self._cycles)
         errors = sum(1 for c in self._cycles if c.error)
-        deferred = sum(1 for c in self._cycles if c.order_deferred)
         placed = sum(1 for c in self._cycles if c.order_placed)
         avg_latency = sum(c.latency_ms for c in self._cycles) / total if total else 0
         hold_pct = sum(1 for c in self._cycles if c.decision == "HOLD") / total * 100 if total else 0
@@ -106,7 +102,6 @@ class PerformanceMetrics:
             "avg_latency_ms": round(avg_latency, 1),
             "hold_pct": round(hold_pct, 1),
             "orders_placed": placed,
-            "orders_deferred": deferred,
             "errors": errors,
             "by_symbol": dict(self._symbol_stats),
             "action_winrates": action_wr,
@@ -123,13 +118,13 @@ _metrics = PerformanceMetrics()
 def record_cycle_metrics(
     symbol: str, decision: str, ml_prob: float, llm_bias: str,
     latency_ms: float, mt5_available: bool,
-    order_placed: bool = False, order_deferred: bool = False,
+    order_placed: bool = False,
     order_ticket: Optional[int] = None, error: Optional[str] = None,
 ):
     m = CycleMetrics(
         symbol=symbol, decision=decision, ml_prob=ml_prob, llm_bias=llm_bias,
         latency_ms=latency_ms, mt5_available=mt5_available,
-        order_placed=order_placed, order_deferred=order_deferred,
+        order_placed=order_placed,
         order_ticket=order_ticket, error=error,
     )
     _metrics.record_cycle(m)
