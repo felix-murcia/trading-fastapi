@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 
 _mcp_status: dict = {"connected": False, "last_check": None, "detail": "pending"}
 _queue_task: asyncio.Task | None = None
+# Tareas de fondo con referencia viva (P0-6/P3-2): sin referencia el task puede
+# recolectarse y sus excepciones mueren en silencio; se cancelan en shutdown.
+_bg_tasks: set[asyncio.Task] = set()
 
 
 async def _mcp_health_loop():
@@ -121,10 +124,15 @@ async def lifespan(app: FastAPI):
         logger.warning("[RISK-GUARDIAN] No se pudo inicializar equity: %s", exc)
 
     global _queue_task
-    asyncio.create_task(_mcp_health_loop())
+    _bg_tasks.add(asyncio.create_task(_mcp_health_loop()))
     _queue_task = asyncio.create_task(_order_queue_processor())
+    # P3-2b: backup programado del bundle (primera pasada a los 60 s).
+    from services.model_backup import _model_backup_loop
+    _bg_tasks.add(asyncio.create_task(_model_backup_loop()))
     yield
     _queue_task.cancel()
+    for _task in _bg_tasks:
+        _task.cancel()
     await close_pool()
     logger.info("Shutdown completo")
 

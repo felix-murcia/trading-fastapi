@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     min_trades_for_retrain: int = 20     # Mínimo de trades para considerar datos suficientes
     retrain_auto_approve: bool = False    # P0-1: promoción automática nunca implícita; aprobar vía POST /api/v1/ai/retrain/approve
 
+    # ─── P3-2b: Backup del bundle ─────────────────────────────────────────────
+    model_backup_enabled: bool = True         # GCS además del backup local verificado
+    model_backup_interval_hours: int = 24     # Cadencia del backup programado
+
     # ─── Market Microstructure ────────────────────────────────────────────────
     microstructure_features_enabled: bool = False  # Añade VP + Orderbook al predict (requiere retrain del modelo si se activa)
     volume_profile_bins: int = 50         # Niveles de precio para Volume Profile
