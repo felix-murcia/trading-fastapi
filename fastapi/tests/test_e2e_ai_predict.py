@@ -95,7 +95,10 @@ def _build_candles():
             "close": round(close_price, 5),
             "tick_volume": 1000 + i,
         })
-    return candles
+    # P0: el MCP real devuelve las velas más NUEVA primero (descendente) — el
+    # harness ascendente nunca reproducía el orden de producción y por eso la
+    # suite no detectó el bug de orden temporal (test_p0_time_order.py).
+    return candles[::-1]
 
 
 def test_ai_predict_e2e_flow():

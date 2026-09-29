@@ -41,8 +41,24 @@ EXTRA_STATE_FEATURES = 7  # [entry_norm, pos, unrealized_pnl, balance_norm, dist
 
 
 def engineer_market_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Calcula indicadores técnicos normalizados y acotados para redes neuronales."""
+    """Calcula indicadores técnicos normalizados y acotados para redes neuronales.
+
+    Orden temporal (P0): el MCP entrega velas DESCENDENTES (más nueva primero)
+    y `ml/train_ppo_v3.py` ordena ascendente su CSV inicial — sin un punto de
+    normalización común, inferencia y retrain calculaban las features HACIA
+    ATRÁS: `returns` con signo invertido, `lag_return_*` = vela futura,
+    `iloc[-1]` ("actual") = la vela de hace días, walk-forward y split del env
+    simulando en tiempo inverso, y el modelo (entrenado ascendente) servido con
+    datos espejados (train/serve skew desde el despliegue: 0 retrains en
+    training_experiments). Esta función es el choke point por el que pasan
+    TODOS los caminos (inferencia `routers/ai.py`, retrain `auto_retrain`,
+    entrenamiento y tests): con columna `time`, la serie se ordena
+    cronológicamente ascendente — la convención de todo el sistema
+    (iloc[-1]=actual, tail(n)=recientes, lag=vela anterior, split pasado→futuro).
+    """
     result = df.copy()
+    if "time" in result.columns:
+        result = result.sort_values("time").reset_index(drop=True)
     close = result["close"].astype(float)
     high = result["high"].astype(float)
     low = result["low"].astype(float)

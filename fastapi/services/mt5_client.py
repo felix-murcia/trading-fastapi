@@ -72,7 +72,9 @@ async def get_candles(symbol: str, timeframe: str, count: int) -> list[dict]:
         from datetime import datetime, timezone
         return int(datetime.fromisoformat(str(t).replace("Z", "+00:00")).timestamp())
 
-    return [
+    # P0: el MCP devuelve las velas DESCENDENTES (más nueva primero) — la
+    # convención de todo el sistema es ascendente (iloc[-1]=actual, tail=recientes).
+    return sorted((
         {
             "time":   _to_ts(c.get("time", 0)),
             "open":   float(c.get("open",  0)),
@@ -82,7 +84,7 @@ async def get_candles(symbol: str, timeframe: str, count: int) -> list[dict]:
             "volume": float(c.get("tick_volume", c.get("volume", 0))),
         }
         for c in candles
-    ]
+    ), key=lambda c: c["time"])
 
 
 async def get_positions() -> dict:

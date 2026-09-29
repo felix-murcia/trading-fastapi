@@ -388,7 +388,10 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
 
     df = engineer_market_features(raw_df)
     features_list = get_market_features(df)
-    candle_context = _build_qwen_candle_context(raw_df, count=10)
+    # P0: leer de `df` (ordenada por engineer) — con raw_df (descendente del
+    # MCP) el "reciente" eran las velas más ANTIGUAS y la hora de sesión la de
+    # una semana atrás.
+    candle_context = _build_qwen_candle_context(df, count=10)
 
     brain = _BRAINS.get(sym)
     if brain is None:
@@ -488,7 +491,7 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         bb_pos=float(df['bb_pos'].iloc[-1]),
         range_pct=float(df['range'].iloc[-1]),
         last_ret=float(df['returns'].iloc[-1]),
-        hour=utc_hour_from_candle(pd.to_datetime(raw_df['time'].iloc[-1])),
+        hour=utc_hour_from_candle(pd.to_datetime(df['time'].iloc[-1])),
         news=live_news,
         candle_context=candle_context,
         sl_proposed=sl_pips_final / 100.0,
