@@ -129,6 +129,9 @@ async def lifespan(app: FastAPI):
     # P3-2b: backup programado del bundle (primera pasada a los 60 s).
     from services.model_backup import _model_backup_loop
     _bg_tasks.add(asyncio.create_task(_model_backup_loop()))
+    # P3-2c: drift programado (PSI + decay; primera pasada a los 300 s).
+    from services.drift_monitor import _drift_monitor_loop
+    _bg_tasks.add(asyncio.create_task(_drift_monitor_loop()))
     yield
     _queue_task.cancel()
     for _task in _bg_tasks:

@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 
 from config import settings
-from services import data_snapshot, experiment_tracker
+from services import data_snapshot, drift_monitor, experiment_tracker
 from services.alerting import AlertLevel, send_alert
 from services.walk_forward import (
     build_walk_forward_split,
@@ -712,6 +712,10 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int) -> None:
     # P0-5: certificar el bundle promovido. Sin manifest válido el próximo
     # arranque fallará en validate_bundle (fail-fast: nunca sirve binarios sucios).
     from services.model_registry import build_manifest, record_promotion, write_manifest
+    # P3-2c: baseline de drift congelado sobre el df de ENTRENO — la referencia
+    # contra la que el monitor PSI compara las velas vivas. Si no hay baseline
+    # utilizable, no se promueve (mejor no promover que promover a ciegas).
+    baseline_info = drift_monitor.save_baseline(train_df)
     manifest = build_manifest(
         MODEL_PATH,
         obs_shape=getattr(model.observation_space, "shape", ()),
@@ -720,6 +724,7 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int) -> None:
         extra={
             "walk_forward": report.to_dict(),
             "gate": {"ok": decision.ok, "reason": decision.reason},
+            "drift_baseline": baseline_info,
         },
     )
     write_manifest(MODEL_PATH, manifest)

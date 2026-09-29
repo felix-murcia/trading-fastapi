@@ -572,6 +572,18 @@ async def model_status(_: None = Depends(verify_token)):
     }
 
 
+@router.get("/model/drift")
+async def model_drift(_: None = Depends(verify_token)):
+    """P3-2c: PSI de features vivas vs baseline del entreno + decay de métricas.
+
+    Devuelve SIEMPRE el reporte (los fallos parciales quedan reflejados y
+    alertados en lugar de romper el endpoint de observabilidad).
+    """
+    from services.drift_monitor import run_drift_check
+
+    return await run_drift_check()
+
+
 @router.get("/retrain/status")
 async def retrain_status(_: None = Depends(verify_token)):
     """Estado actual del auto-retrain."""

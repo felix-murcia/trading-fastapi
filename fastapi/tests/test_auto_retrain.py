@@ -399,6 +399,12 @@ class TestDoRetrainPromotion:
             )),
         )
         monkeypatch.setattr("services.data_snapshot.prune_snapshots", MagicMock(return_value=[]))
+        # P3-2c: baseline de drift congelado en la promoción (sin escritura en ml/)
+        monkeypatch.setattr(
+            "services.drift_monitor.save_baseline",
+            MagicMock(return_value={"path": "/x/feature_drift_baseline.json",
+                                    "sha256": "f" * 64, "n_features": 17}),
+        )
         monkeypatch.setattr(
             "services.experiment_tracker.start_experiment", AsyncMock(return_value=42)
         )

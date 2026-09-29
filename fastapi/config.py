@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     model_backup_enabled: bool = True         # GCS además del backup local verificado
     model_backup_interval_hours: int = 24     # Cadencia del backup programado
 
+    # ─── P3-2c: Monitor de drift ─────────────────────────────────────────────
+    drift_check_interval_hours: int = 24      # Cadencia del check PSI + decay
+
     # ─── Market Microstructure ────────────────────────────────────────────────
     microstructure_features_enabled: bool = False  # Añade VP + Orderbook al predict (requiere retrain del modelo si se activa)
     volume_profile_bins: int = 50         # Niveles de precio para Volume Profile
