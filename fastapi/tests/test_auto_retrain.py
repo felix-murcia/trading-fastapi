@@ -395,7 +395,7 @@ class TestDoRetrainPromotion:
         monkeypatch.setattr(
             "services.data_snapshot.save_snapshot",
             MagicMock(return_value=SnapshotInfo(
-                path=str(tmp_path / "snapshots" / "20260101T000000Z__deadbeef0000__retrain.csv.gz"),
+                path=str(tmp_path / "snapshots" / "20260101T000000Z_20260102T000000Z__deadbeef0000__retrain.parquet"),
                 sha256="d" * 64, rows=candles, columns=24,
             )),
         )

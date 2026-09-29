@@ -12,6 +12,8 @@ torch==2.3.0+cpu
 gymnasium==0.29.1
 stable-baselines3==2.3.2
 google-cloud-storage==2.12.0
+# P2-5: snapshots de datos de entrenamiento en parquet (retrain reproducible)
+pyarrow
 
 # Testing
 pytest>=8.0.0

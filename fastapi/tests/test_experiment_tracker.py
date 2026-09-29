@@ -25,7 +25,7 @@ class TestStartExperiment:
         from services import experiment_tracker
 
         exp_id = await experiment_tracker.start_experiment(
-            "scheduled", "/snap/a.csv.gz", "a" * 64, symbol="EURUSD"
+            "scheduled", "/snap/20260101T000000Z_20260102T000000Z__aaaaaaaaaaaa__retrain.parquet", "a" * 64, symbol="EURUSD"
         )
 
         assert exp_id == 7
@@ -33,7 +33,7 @@ class TestStartExperiment:
         assert "INSERT INTO training_experiments" in sql
         assert "RETURNING id" in sql
         assert pool.fetchval.await_args.args[1:] == (
-            "scheduled", "EURUSD", "/snap/a.csv.gz", "a" * 64,
+            "scheduled", "EURUSD", "/snap/20260101T000000Z_20260102T000000Z__aaaaaaaaaaaa__retrain.parquet", "a" * 64,
         )
 
     @pytest.mark.asyncio
