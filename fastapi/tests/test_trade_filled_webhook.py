@@ -179,6 +179,41 @@ class TestRetrainTriggerLogic:
         assert state.outcomes[0].pnl == 12.5
 
     @pytest.mark.asyncio
+    async def test_record_trade_filled_feeds_guardian_streak_by_3eur_rule(self, monkeypatch):
+        """P2-4: el cierre < 3 EUR cuenta como PÉRDIDA en la racha del par
+        (convención >= 3 EUR) y >= 3 EUR la limpia — el guardián no re-deriva."""
+        from services import auto_retrain as ar
+        from services import risk_guardian as rg
+
+        pool = MagicMock()
+        pool.fetchval = AsyncMock(return_value=1)
+        pool.execute = AsyncMock()
+        monkeypatch.setattr("db.connection.get_pool", lambda: pool)
+        monkeypatch.setattr("services.risk_state_store.get_pool", MagicMock(return_value=pool))
+        monkeypatch.setattr(rg, "_GUARDIANS", {})
+        monkeypatch.setattr(rg, "_ACCOUNT", rg.AccountRiskState())
+
+        state = ar.RetrainState()
+        monkeypatch.setattr(ar, "_ensure_retrain_state", AsyncMock(return_value=state))
+        monkeypatch.setattr(ar, "_save_retrain_state", AsyncMock())
+        monkeypatch.setattr("services.trade_journal.record_trade_closed", AsyncMock())
+
+        base = dict(
+            symbol="EURUSD", entry_time="1725450000", exit_time="1725453600",
+            direction="LONG", sl_hit=False, tp_hit=False, exit_reason="tp",
+        )
+        # 1.5 EUR < 3 → pérdida para la racha (aunque pnl_pct > 0)
+        await ar.record_trade_filled(**base, pnl=1.5, pnl_pct=0.0015,
+                                     deal_ticket=700001, position_id=700001)
+        g = rg.get_risk_guardian("EURUSD")
+        assert g.state.consecutive_losses == 1
+
+        # 10 EUR >= 3 → ganancia: racha limpia
+        await ar.record_trade_filled(**base, pnl=10.0, pnl_pct=0.010,
+                                     deal_ticket=700002, position_id=700002)
+        assert g.state.consecutive_losses == 0
+
+    @pytest.mark.asyncio
     async def test_duplicate_deal_does_not_increment_counter(self, monkeypatch):
         from services import auto_retrain as ar
 

@@ -4,11 +4,15 @@ P1-4: tests donde hay dinero — Risk Guardian (bloqueos de riesgo en vivo).
 Cobertura de comportamiento (sin red, instancias frescas):
 - Pérdida diaria ≥ límite → check_equity devuelve mensaje y can_open_position bloquea.
 - Dentro del límite → pasa.
-- Max posiciones alcanzado → bloquea con razón.
+- Max posiciones alcanzado → bloquea con razón; exposición TOTAL de la cuenta
+  alcanzada → bloquea aunque el par tenga cupo (P2-4).
 - Drawdown ≥10% desde peak → alerta (log ERROR) pero NO bloquea.
 - Cooldown de alertas: la segunda del mismo tipo en <1h no se emite.
-- Racha de pérdidas: se acumula y se resetea con un resultado no negativo.
+- Racha de pérdidas: se acumula con is_win=False y se resetea con is_win=True
+  (la clasificación ≥3 EUR la decide el caller — core.rules).
 - Sin daily_start (0) → sin ZeroDivisionError, sin bloqueo.
+- El baseline del día vive en AccountRiskState (cuenta compartida) — los
+  guardianes leídos como g.account.*
 """
 import logging
 import time
@@ -23,7 +27,7 @@ class TestDailyLossLimit:
         g = RiskGuardian(max_positions=5, daily_loss_pct=5.0)
         g.set_daily_start(1000.0)
 
-        allowed, reason = g.can_open_position(950.0, open_positions=0)
+        allowed, reason = g.can_open_position(950.0, open_positions=0, total_open_positions=0)
 
         assert allowed is False
         assert "DAILY LOSS LIMIT 5.0%" in reason
@@ -54,8 +58,8 @@ class TestMaxPositions:
         g = RiskGuardian(max_positions=3, daily_loss_pct=5.0)
         g.set_daily_start(1000.0)
 
-        assert g.can_open_position(1000.0, open_positions=2) == (True, "")
-        allowed, reason = g.can_open_position(1000.0, open_positions=3)
+        assert g.can_open_position(1000.0, open_positions=2, total_open_positions=2) == (True, "")
+        allowed, reason = g.can_open_position(1000.0, open_positions=3, total_open_positions=3)
         assert allowed is False
         assert reason == "MAX_POSITIONS 3 reached"
 
@@ -63,7 +67,7 @@ class TestMaxPositions:
         g = RiskGuardian(max_positions=3, daily_loss_pct=5.0)
         g.set_daily_start(1000.0)
 
-        allowed, reason = g.can_open_position(900.0, open_positions=9)
+        allowed, reason = g.can_open_position(900.0, open_positions=9, total_open_positions=9)
         assert allowed is False
         assert "DAILY LOSS" in reason  # chequeo de equity primero
 
@@ -112,28 +116,35 @@ class TestDrawdownAlert:
 class TestConsecutiveLosses:
     def test_losses_accumulate_and_win_resets(self):
         g = RiskGuardian()
-        g.record_trade_result(-0.02)
-        g.record_trade_result(-0.01)
+        g.record_trade_result(False)
+        g.record_trade_result(False)
         assert g.state.consecutive_losses == 2
 
-        g.record_trade_result(0.03)
+        g.record_trade_result(True)
         assert g.state.consecutive_losses == 0
 
-    def test_zero_pnl_resets_streak(self):
+    def test_streak_change_marks_dirty_for_persistence(self):
+        # P2-4: la racha solo persiste si cambió (dirty en False→0 no se marca)
         g = RiskGuardian()
-        g.record_trade_result(-0.01)
-        g.record_trade_result(0.0)  # pnl_pct >= 0 → racha limpia
-        assert g.state.consecutive_losses == 0
+        assert g.state.dirty is False
+        g.record_trade_result(False)
+        assert g.state.dirty is True
+        g.state.dirty = False
+        g.record_trade_result(True)
+        assert g.state.dirty is True and g.state.consecutive_losses == 0
+        g.state.dirty = False
+        g.record_trade_result(True)  # sin cambio → sin dirty
+        assert g.state.dirty is False
 
 
 class TestGlobalWrapper:
     def test_check_risk_blocks_on_max_positions(self, monkeypatch):
         g = get_risk_guardian()
         # Estado determinista independiente de tests anteriores (lifespan u otros)
-        g.state.daily_start_equity = 0.0
-        g.state.peak_equity = 0.0
+        g.account.daily_start_equity = 0.0
+        g.account.peak_equity = 0.0
 
-        assert check_risk(1000.0, open_positions=0) == (True, "")
-        allowed, reason = check_risk(1000.0, open_positions=g.state.max_positions + 1)
+        assert check_risk(1000.0, open_positions=0, total_open_positions=0) == (True, "")
+        allowed, reason = check_risk(1000.0, open_positions=g.state.max_positions + 1, total_open_positions=1)
         assert allowed is False
         assert "MAX_POSITIONS" in reason

@@ -297,6 +297,14 @@ async def record_trade_filled(
         )
         return
 
+    # P2-4: racha del par en el guardián — clasificado con la convención
+    # >= 3 EUR (is_winning_close) y persistida en risk_pair_state. Solo para
+    # cierres reales (el duplicado de arriba no toca la racha).
+    from services.risk_guardian import record_trade
+    from services.risk_state_store import flush_risk_state
+    record_trade(is_winning_close(pnl), symbol=symbol)
+    await flush_risk_state(symbol=symbol)
+
     # Opción 5: Post-Trade Journal — análisis asíncrono con Qwen
     from services.trade_journal import record_trade_closed
     await record_trade_closed(

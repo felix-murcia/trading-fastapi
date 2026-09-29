@@ -13,7 +13,7 @@ from db.connection import init_pool, close_pool
 from routers import orders, smc, journal
 from routers.deps import verify_token
 from services.performance_metrics import get_metrics, reset_metrics
-from services.risk_guardian import set_daily_start
+from services.risk_state_store import init_risk_state
 from services.structured_logging import StructuredLoggingMiddleware, log_to_audit
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
@@ -71,17 +71,29 @@ async def lifespan(app: FastAPI):
     for _ctx in build_registry_from_settings().enabled():
         get_risk_guardian(_ctx.config.symbol)
 
-    # Inicializar Risk Guardian con equity actual (sembrará a TODOS)
+    # P2-4: estado de riesgo persistente — RESTAURA el baseline del día (un
+    # reinicio a mitad de día no borra la pérdida ya sufrida ni el peak) o
+    # rueda si el día venció. Fuera del try: un fallo de BD debe impedir el
+    # arranque (sin protección de riesgo no hay operativa). El fetch de equity
+    # sí puede fallar (MCP caído): entonces init(None) deja que el primer
+    # observe() del día fije el baseline y el primer flush lo persista.
     try:
         async with httpx.AsyncClient(timeout=5.0) as c:
             r = await c.get(settings.mt5_http_url + "/api/v1/account/info")
             r.raise_for_status()
             data = r.json()
-            if "balance" in data or "equity" in data:
-                equity = data.get("equity", data.get("balance", 0))
-                set_daily_start(equity)
+            equity = data.get("equity", data.get("balance", 0)) if ("balance" in data or "equity" in data) else 0
+        boot_equity = float(equity) if equity and float(equity) > 0 else None
     except Exception as exc:
-        logger.warning("[RISK-GUARDIAN] No se pudo inicializar equity: %s", exc)
+        logger.warning("[RISK-STATE] No se pudo leer equity para el baseline: %s", exc)
+        boot_equity = None
+    try:
+        await init_risk_state(boot_equity)
+    except RuntimeError as exc:
+        # Solo alcanzable con el pool sin inicializar (suite sin BD): en
+        # producción init_pool() ya habría reventado el arranque antes, y un
+        # fallo REAL de query (asyncpg) sí propaga y detiene el boot.
+        logger.warning("[RISK-STATE] Sin pool: estado de riesgo no restaurado (%s)", exc)
 
     _bg_tasks.add(asyncio.create_task(_mcp_health_loop()))
     # P3-2b: backup programado del bundle (primera pasada a los 60 s).

@@ -39,6 +39,8 @@ from services.auto_retrain import (
 from services.market_time import utc_hour_from_candle
 from services.news_filter import is_news_blackout
 from services.performance_metrics import record_cycle_metrics
+from services.risk_guardian import observe_equity
+from services.risk_state_store import flush_risk_state
 from services.position_sizing import (
     PIP_SIZE,
     is_supported,
@@ -367,6 +369,12 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             cycle_id, equity_res.status_code, equity_val,
         )
         return PredictResponse(cycle_id=cycle_id, ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
+
+    # P2-4: la cuenta observa el equity en CADA ciclo — rollover automático a
+    # medianoche UTC + peak en vivo (el drawdown se mide contra el pico real,
+    # no contra el del arranque). Sin cambios dirty → el flush no toca la BD.
+    observe_equity(equity_val)
+    await flush_risk_state(symbol=req.symbol)
 
     if candles_res.status_code != 200:
         logger.warning("[%s] candles HTTP %s from MT5", cycle_id, candles_res.status_code)

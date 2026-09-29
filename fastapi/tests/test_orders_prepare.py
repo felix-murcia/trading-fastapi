@@ -79,6 +79,9 @@ def _prepare(payload, *, fetchrow=None, risk=(True, ""), fetchval=42, headers=No
         risk_check = stack.enter_context(
             patch("services.risk_guardian.check_risk", return_value=risk)
         )
+        risk_flush = stack.enter_context(
+            patch("services.risk_state_store.flush_risk_state", AsyncMock())
+        )
         stack.enter_context(
             patch("services.mt5_client.get_account", AsyncMock(return_value={"equity": 5000.0}))
         )
@@ -94,6 +97,7 @@ def _prepare(payload, *, fetchrow=None, risk=(True, ""), fetchval=42, headers=No
                 headers=headers if headers is not None else TOKEN,
             )
     pool.risk_check = risk_check
+    pool.risk_flush = risk_flush
     return response, pool
 
 
@@ -230,6 +234,10 @@ class TestOpenCountPerSymbol:
         args = pool.risk_check.call_args
         assert args.args[1] == 2                      # las 2 de EURUSD, no las 3
         assert args.kwargs["symbol"] == "EURUSD"
+        # P2-4: la exposición AGREGADA de la cuenta viaja en el mismo check
+        assert args.kwargs["total_open_positions"] == 3
+        # P2-4: el estado de riesgo se persiste tras cada check (solo si dirty)
+        pool.risk_flush.assert_awaited_once_with(symbol="EURUSD")
 
 
 class TestPairAllocationCeiling:

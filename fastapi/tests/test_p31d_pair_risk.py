@@ -31,7 +31,7 @@ _CORRELATION = os.path.join(os.path.dirname(mt5_client.__file__), "correlation_s
 def fresh_risk(monkeypatch):
     """Registro de guardianes y baseline limpios (sin polución de otros tests)."""
     monkeypatch.setattr(rg, "_GUARDIANS", {})
-    monkeypatch.setattr(rg, "_day_baseline", 0.0)
+    monkeypatch.setattr(rg, "_ACCOUNT", rg.AccountRiskState())
     return rg
 
 
@@ -56,24 +56,24 @@ class TestGuardiansPerPair:
 
     def test_check_risk_routes_to_pair_guardian(self, fresh_risk):
         fresh_risk.get_risk_guardian("GBPUSD").state.max_positions = 0
-        ok, reason = fresh_risk.check_risk(1000.0, 1, symbol="GBPUSD")
+        ok, reason = fresh_risk.check_risk(1000.0, 1, total_open_positions=1, symbol="GBPUSD")
         assert ok is False and "MAX_POSITIONS" in reason
         # EURUSD NO hereda la decisión de GBPUSD
-        ok_eu, _ = fresh_risk.check_risk(1000.0, 1, symbol="EURUSD")
+        ok_eu, _ = fresh_risk.check_risk(1000.0, 1, total_open_positions=1, symbol="EURUSD")
         assert ok_eu is True
 
     def test_baseline_seeds_late_guardian(self, fresh_risk):
         fresh_risk.set_daily_start(2000.0)              # aún sin guardianes
         late = fresh_risk.get_risk_guardian("GBPUSD")   # aparece DESPUÉS
-        assert late.state.daily_start_equity == 2000.0
-        assert late.state.peak_equity == 2000.0
+        assert late.account.daily_start_equity == 2000.0
+        assert late.account.peak_equity == 2000.0
 
     def test_set_daily_start_updates_all(self, fresh_risk):
         a = fresh_risk.get_risk_guardian("EURUSD")
         b = fresh_risk.get_risk_guardian("GBPUSD")
         fresh_risk.set_daily_start(1500.0)
-        assert a.state.daily_start_equity == 1500.0
-        assert b.state.daily_start_equity == 1500.0
+        assert a.account.daily_start_equity == 1500.0
+        assert b.account.daily_start_equity == 1500.0
 
 
 class TestEquityAllocation:
@@ -96,8 +96,9 @@ class TestWiringAndDeadCode:
         create = "get_risk_guardian(_ctx.config.symbol)"
         assert "build_registry_from_settings().enabled()" in src
         assert create in src
-        # El guardián se crea ANTES de sembrar el baseline del día
-        assert src.index(create) < src.index("set_daily_start(equity)")
+        # El guardián se crea ANTES de restaurar/ruedear el baseline del día
+        # (P2-4: init_risk_state restaura desde DB o rueda según la fecha)
+        assert src.index(create) < src.index("init_risk_state(boot_equity)")
 
     def test_dead_code_removed_for_real(self):
         with open(_MT5, encoding="utf-8") as f:

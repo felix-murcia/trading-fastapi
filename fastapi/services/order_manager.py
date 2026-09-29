@@ -69,17 +69,29 @@ async def prepare(req: OrderPrepareRequest) -> OrderPrepareResponse:
 
     # 1c. Risk Guardian: ¿se puede abrir nueva posición en ESTE par?
     from services.risk_guardian import check_risk
+    from services.risk_state_store import flush_risk_state
     from services.mt5_client import get_account, get_positions
     try:
         acct = await get_account()
         positions_data = await get_positions()
         # P3-1d: el cupo de posiciones es POR PAR — solo cuentan las de este
         # mundo; un par jamás consume la capacidad de otro.
-        open_count = sum(
-            1 for p in positions_data.get("open", [])
-            if isinstance(p, dict) and p.get("symbol") == req.symbol
+        open_all = [
+            p for p in positions_data.get("open", [])
+            if isinstance(p, dict)
+        ]
+        open_count = sum(1 for p in open_all if p.get("symbol") == req.symbol)
+        # P2-4: exposición AGREGADA de la cuenta (todas las estrategias y
+        # pares) — un límite que ninguna estrategia puede rebasar sola.
+        total_open = len(open_all)
+        can_open, reason = check_risk(
+            acct["equity"], open_count,
+            total_open_positions=total_open, symbol=req.symbol,
         )
-        can_open, reason = check_risk(acct["equity"], open_count, symbol=req.symbol)
+        # P2-4: persiste baseline/racha si este ciclo los modificó (sin dirty
+        # no hay I/O). Flush también cuando el guardián bloquea: la alerta
+        # emitida (cooldown) es estado que debe sobrevivir a un reinicio.
+        await flush_risk_state(symbol=req.symbol)
         if not can_open:
             await _audit(req.cycle_id, "order_rejected", {"reason": f"risk_guardian_blocked:{reason}", "symbol": req.symbol})
             return _reject(f"risk_guardian_blocked: {reason}")

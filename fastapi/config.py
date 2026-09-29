@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     mt5_http_timeout: float = 10.0
     min_volume: float = 0.01
     max_volume: float = 0.50
+    max_total_positions: int = 5   # P2-4: exposición agregada de TODA la cuenta (todas las estrategias y pares)
     ppo_risk_pct: float = 0.03        # P2-2: tope de riesgo por trade del PPO (fracción del equity)
     order_max_age_hours: int = 48
     simple_pipeline_enabled: bool = True

@@ -1,36 +1,92 @@
 """
 Risk Guardian — protege contra pérdidas excesivas.
-- Daily loss limit: cierra todas las posiciones si DDD > threshold
-- Max open positions: bloquea nuevas órdenes si se alcanza el límite
+- Daily loss limit: bloquea nuevas órdenes si la pérdida del día supera el umbral
+- Max open positions: cupo por par
+- Max total positions (P2-4): exposición AGREGADA de todas las estrategias/pares
 - Drawdown alerting: loguea cuando equity cae de peak
 
 P3-1d: UN guardián POR PAR (_GUARDIANS[symbol]) — el cupo de posiciones
 abiertas, la racha de pérdidas y el cooldown de alertas son del mundo que
-los vive; un par nunca consume la capacidad de otro. El baseline de día
-(daily_start/peak) es del ACCOUNT equity y se comparte: set_daily_start
-sembrará a todos los guardiánies (incluidos los creados después).
-"""
+los vive; un par nunca consume la capacidad de otro.
 
+P2-4: el baseline del día (day/daily_start/peak — propiedades del equity de
+la CUENTA) vive en UN `AccountRiskState` compartido por todos los guardianes:
+una sola fuente de verdad (sin divergencia de peak entre mundos) que
+`services.risk_state_store` persiste en `risk_account_state`:
+- Un reinicio a mitad de día NO borra la pérdida ya sufrida ni el peak
+  (restauración desde DB en vez de reiniciar el baseline con el equity actual).
+- `observe(equity)` hace rollover automático al cambiar la fecha UTC: el
+  límite diario mide de verdad un día, no "desde el último arranque".
+- La racha del par se persiste en `risk_pair_state` y se registra bajo la
+  convención >= 3 EUR (el caller decide quién ganó — core.rules).
+"""
 import time
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from typing import Optional
 
+from config import settings
 from core.pair import LEGACY_SYMBOL
 
 logger = logging.getLogger(__name__)
 
 
+def _utc_today() -> date:
+    return datetime.now(timezone.utc).date()
+
+
+@dataclass
+class AccountRiskState:
+    """Equity de la CUENTA — UNA instancia compartida por todos los guardianes.
+
+    `dirty` = cambios aún no persistidos (lo consume services.risk_state_store).
+    """
+    day: Optional[date] = None
+    daily_start_equity: float = 0.0
+    peak_equity: float = 0.0
+    daily_start_ts: float = 0.0
+    dirty: bool = False
+
+    def start(self, equity: float) -> None:
+        """Baseline nuevo (día nuevo o primer arranque)."""
+        self.day = _utc_today()
+        self.daily_start_equity = equity
+        self.peak_equity = equity
+        self.daily_start_ts = time.time()
+        self.dirty = True
+
+    def restore(self, day: date, daily_start_equity: float, peak_equity: float) -> None:
+        """Restauración desde DB (mismo día): preserva el baseline REAL del día."""
+        self.day = day
+        self.daily_start_equity = daily_start_equity
+        self.peak_equity = peak_equity
+        self.dirty = False
+
+    def observe(self, equity: float) -> None:
+        """Rollover automático + peak. Llamar en cada ciclo que conozca el equity."""
+        today = _utc_today()
+        if self.day != today:  # None (nunca sembrado) o día vencido → día nuevo
+            logger.warning(
+                "[RISK-GUARDIAN] Rollover diario (%s → %s) — baseline = equity actual %.2f",
+                self.day, today, equity,
+            )
+            self.start(equity)
+        elif equity > self.peak_equity:
+            self.peak_equity = equity
+            self.dirty = True
+
+
 @dataclass
 class RiskState:
-    peak_equity: float = 0.0
-    daily_start_equity: float = 0.0
-    daily_start_ts: float = field(default_factory=time.time)
+    """Estado del PAR (cupo, racha, alertas). El baseline del día NO vive aquí:
+    es de la cuenta y se comparte vía AccountRiskState."""
     max_positions: int = 5
-    daily_loss_limit_pct: float = 5.0  # 5% del equity inicial del día
+    daily_loss_limit_pct: float = 5.0  # 5% del equity inicial del día (cuenta)
     consecutive_losses: int = 0
     last_alert_ts: float = 0.0
     alert_cooldown_s: float = 3600.0  # 1h entre alertas del mismo tipo
+    dirty: bool = False  # racha/alerta sin persistir
 
 
 class RiskGuardian:
@@ -38,124 +94,154 @@ class RiskGuardian:
     Vigila equity y bloquea operaciones cuando se superan umbrales de riesgo.
     """
 
-    def __init__(self, max_positions: int = 5, daily_loss_pct: float = 5.0):
+    def __init__(self, max_positions: int = 5, daily_loss_pct: float = 5.0,
+                 *, account: AccountRiskState | None = None):
+        # Cada guardián nace con SU cuenta (tests/instancias sueltas); los
+        # registrados por par comparten la cuenta real del módulo.
+        self.account = account if account is not None else AccountRiskState()
         self.state = RiskState(
             max_positions=max_positions,
             daily_loss_limit_pct=daily_loss_pct,
         )
-        self._position_count: int = 0
 
     def set_daily_start(self, equity: float):
-        """Llamar al iniciar el día (o al arrancar el servidor)."""
-        self.state.daily_start_equity = equity
-        self.state.peak_equity = equity
-        self.state.daily_start_ts = time.time()
+        """Fija el baseline del día en la cuenta compartida."""
+        self.account.start(equity)
         logger.warning("[RISK-GUARDIAN] Día iniciado — equity=%.2f", equity)
 
     def update_peak(self, equity: float):
-        """Actualiza el peak de equity tras cada ciclo."""
-        if equity > self.state.peak_equity:
-            self.state.peak_equity = equity
+        """Rollover + peak en la cuenta (una sola fuente para todos los guardianes)."""
+        self.account.observe(equity)
 
     def check_equity(self, current_equity: float) -> Optional[str]:
         """
         Verifica drawdown y pérdida diaria.
         Retorna mensaje de alerta o None si todo OK.
         """
-        self.update_peak(current_equity)
+        self.account.observe(current_equity)  # rollover + peak (P2-4)
 
-        # 1. Daily loss
-        if self.state.daily_start_equity > 0:
+        # 1. Daily loss (baseline del día vigente en la cuenta)
+        if self.account.daily_start_equity > 0:
             daily_pnl_pct = (
-                (current_equity - self.state.daily_start_equity)
-                / self.state.daily_start_equity * 100
+                (current_equity - self.account.daily_start_equity)
+                / self.account.daily_start_equity * 100
             )
             if daily_pnl_pct <= -self.state.daily_loss_limit_pct:
                 self._alert("DAILY-LOSS", current_equity, daily_pnl_pct)
                 return f"DAILY LOSS LIMIT {abs(daily_pnl_pct):.1f}% reached — blocking new orders"
 
-        # 2. Drawdown desde peak
-        if self.state.peak_equity > 0:
+        # 2. Drawdown desde peak (cuenta)
+        if self.account.peak_equity > 0:
             dd_pct = (
-                (self.state.peak_equity - current_equity)
-                / self.state.peak_equity * 100
+                (self.account.peak_equity - current_equity)
+                / self.account.peak_equity * 100
             )
             if dd_pct >= 10.0:  # 10% drawdown
                 self._alert("DRAWDOWN", current_equity, dd_pct)
 
         return None
 
-    def can_open_position(self, current_equity: float, open_positions: int) -> tuple[bool, str]:
+    def can_open_position(
+        self, current_equity: float, open_positions: int, *, total_open_positions: int
+    ) -> tuple[bool, str]:
         """
         Retorna (True, "") si puede abrir posición, o (False, razón) si no.
+
+        `open_positions` = posiciones de ESTE par; `total_open_positions` = de
+        TODA la cuenta (todas las estrategias y pares) — exigido, sin default:
+        un call sin exposición agregada no puede pasar en silencio.
         """
         # Check equity limits
         reason = self.check_equity(current_equity)
         if reason:
             return False, reason
 
-        # Check max positions
+        # Check max positions (POR PAR)
         if open_positions >= self.state.max_positions:
             reason = f"MAX_POSITIONS {self.state.max_positions} reached"
             logger.warning("[RISK-GUARDIAN] %s", reason)
             return False, reason
 
+        # P2-4: exposición AGREGADA de la cuenta (PPO + SMC + todos los pares)
+        total_limit = settings.max_total_positions
+        if total_open_positions >= total_limit:
+            reason = f"MAX_TOTAL_POSITIONS {total_limit} reached"
+            logger.warning("[RISK-GUARDIAN] %s (abiertas en cuenta)", reason)
+            return False, reason
+
         return True, ""
 
-    def record_trade_result(self, pnl_pct: float):
-        """Llama tras cerrar una operación para trackear racha."""
-        if pnl_pct < 0:
+    def record_trade_result(self, is_win: bool):
+        """Racha del PAR. `is_win` llega ya clasificado bajo la convención
+        >= 3 EUR (core.rules.is_winning_close) — el guardián no re-deriva."""
+        if not is_win:
             self.state.consecutive_losses += 1
+            self.state.dirty = True
             logger.warning("[RISK-GUARDIAN] Pérdida detectada — racha: %d",
                           self.state.consecutive_losses)
-        else:
+        elif self.state.consecutive_losses != 0:
             self.state.consecutive_losses = 0
+            self.state.dirty = True
 
     def _alert(self, alert_type: str, equity: float, value: float):
         now = time.time()
         if now - self.state.last_alert_ts < self.state.alert_cooldown_s:
             return  # Cooldown activo
         self.state.last_alert_ts = now
+        self.state.dirty = True  # cooldown persistido (P2-4)
         logger.error(
             "[RISK-GUARDIAN] 🚨 %s — equity=%.2f, value=%.2f",
             alert_type, equity, value
         )
 
 
-# ─── Registro por par (P3-1d) ────────────────────────────────────────────────
+# ─── Registro por par (P3-1d) + cuenta única (P2-4) ──────────────────────────
 _GUARDIANS: dict[str, RiskGuardian] = {}
-_day_baseline: float = 0.0  # equity al inicio del día (la cuenta es UNA)
+_ACCOUNT = AccountRiskState()  # baseline de la cuenta: UNO, compartido
+
+
+def get_account_state() -> AccountRiskState:
+    """La cuenta es una: la fuente de verdad que persiste risk_state_store."""
+    return _ACCOUNT
+
+
+def registered_guardians() -> dict[str, RiskGuardian]:
+    """Guardianes creados (copia) — para persistir sin crear bajo demanda."""
+    return dict(_GUARDIANS)
+
+
+def observe_equity(equity: float) -> None:
+    """P2-4: cada ciclo con equity observa la cuenta (rollover + peak en vivo)."""
+    _ACCOUNT.observe(equity)
 
 
 def get_risk_guardian(symbol: str = LEGACY_SYMBOL) -> RiskGuardian:
     """Guardián de ESTE par: uno por mundo, creado bajo demanda.
 
-    Si el baseline del día ya se fijó, el guardián tardío se siembra con él —
-    un par que aparece después del arranque jamás queda sin protección diaria.
+    Comparte la cuenta (_ACCOUNT): un guardián tardío ve el baseline del día
+    sin siembra explícita — nunca queda sin protección diaria.
     """
     guardian = _GUARDIANS.get(symbol)
     if guardian is None:
-        guardian = RiskGuardian()
-        if _day_baseline > 0:
-            guardian.set_daily_start(_day_baseline)
+        guardian = RiskGuardian(account=_ACCOUNT)
         _GUARDIANS[symbol] = guardian
         logger.warning("[RISK-GUARDIAN] Guardián creado para %s", symbol)
     return guardian
 
 
 def set_daily_start(equity: float):
-    """Baseline del día para TODOS los guardiánies (el equity es de la cuenta)."""
-    global _day_baseline
-    _day_baseline = equity
-    for guardian in list(_GUARDIANS.values()):
-        guardian.set_daily_start(equity)
+    """Baseline del día para la cuenta entera (AccountRiskState compartido)."""
+    _ACCOUNT.start(equity)
 
 
 def check_risk(
-    equity: float, open_positions: int, *, symbol: str = LEGACY_SYMBOL
+    equity: float, open_positions: int, *, total_open_positions: int,
+    symbol: str = LEGACY_SYMBOL
 ) -> tuple[bool, str]:
-    return get_risk_guardian(symbol).can_open_position(equity, open_positions)
+    return get_risk_guardian(symbol).can_open_position(
+        equity, open_positions, total_open_positions=total_open_positions
+    )
 
 
-def record_trade(pnl_pct: float, *, symbol: str = LEGACY_SYMBOL):
-    get_risk_guardian(symbol).record_trade_result(pnl_pct)
+def record_trade(is_win: bool, *, symbol: str = LEGACY_SYMBOL):
+    get_risk_guardian(symbol).record_trade_result(is_win)

@@ -40,6 +40,24 @@ CREATE TABLE IF NOT EXISTS audit_log (
 
 CREATE INDEX IF NOT EXISTS idx_audit_cycle ON audit_log(cycle_id);
 
+-- P2-4: estado de riesgo persistente (la protección sobrevive a reinicios)
+-- Cuenta: baseline del día (daily_start) + peak — fila única.
+CREATE TABLE IF NOT EXISTS risk_account_state (
+    id                 SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    day                DATE NOT NULL,
+    daily_start_equity DOUBLE PRECISION NOT NULL,
+    peak_equity        DOUBLE PRECISION NOT NULL,
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Par: racha de pérdidas (convención >= 3 EUR) + cooldown de alertas.
+CREATE TABLE IF NOT EXISTS risk_pair_state (
+    symbol             TEXT PRIMARY KEY,
+    consecutive_losses INTEGER NOT NULL DEFAULT 0,
+    last_alert_ts      DOUBLE PRECISION NOT NULL DEFAULT 0,
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- Trade outcomes para auto-retrain y métricas
 CREATE TABLE IF NOT EXISTS trade_outcomes (
     id           BIGSERIAL PRIMARY KEY,
