@@ -3,12 +3,20 @@ Risk Guardian — protege contra pérdidas excesivas.
 - Daily loss limit: cierra todas las posiciones si DDD > threshold
 - Max open positions: bloquea nuevas órdenes si se alcanza el límite
 - Drawdown alerting: loguea cuando equity cae de peak
+
+P3-1d: UN guardián POR PAR (_GUARDIANS[symbol]) — el cupo de posiciones
+abiertas, la racha de pérdidas y el cooldown de alertas son del mundo que
+los vive; un par nunca consume la capacidad de otro. El baseline de día
+(daily_start/peak) es del ACCOUNT equity y se comparte: set_daily_start
+sembrará a todos los guardiánies (incluidos los creados después).
 """
 
 import time
 import logging
 from dataclasses import dataclass, field
 from typing import Optional
+
+from core.pair import LEGACY_SYMBOL
 
 logger = logging.getLogger(__name__)
 
@@ -114,21 +122,40 @@ class RiskGuardian:
         )
 
 
-# Instancia global
-_risk = RiskGuardian()
+# ─── Registro por par (P3-1d) ────────────────────────────────────────────────
+_GUARDIANS: dict[str, RiskGuardian] = {}
+_day_baseline: float = 0.0  # equity al inicio del día (la cuenta es UNA)
 
 
-def get_risk_guardian() -> RiskGuardian:
-    return _risk
+def get_risk_guardian(symbol: str = LEGACY_SYMBOL) -> RiskGuardian:
+    """Guardián de ESTE par: uno por mundo, creado bajo demanda.
+
+    Si el baseline del día ya se fijó, el guardián tardío se siembra con él —
+    un par que aparece después del arranque jamás queda sin protección diaria.
+    """
+    guardian = _GUARDIANS.get(symbol)
+    if guardian is None:
+        guardian = RiskGuardian()
+        if _day_baseline > 0:
+            guardian.set_daily_start(_day_baseline)
+        _GUARDIANS[symbol] = guardian
+        logger.warning("[RISK-GUARDIAN] Guardián creado para %s", symbol)
+    return guardian
 
 
 def set_daily_start(equity: float):
-    _risk.set_daily_start(equity)
+    """Baseline del día para TODOS los guardiánies (el equity es de la cuenta)."""
+    global _day_baseline
+    _day_baseline = equity
+    for guardian in list(_GUARDIANS.values()):
+        guardian.set_daily_start(equity)
 
 
-def check_risk(equity: float, open_positions: int) -> tuple[bool, str]:
-    return _risk.can_open_position(equity, open_positions)
+def check_risk(
+    equity: float, open_positions: int, *, symbol: str = LEGACY_SYMBOL
+) -> tuple[bool, str]:
+    return get_risk_guardian(symbol).can_open_position(equity, open_positions)
 
 
-def record_trade(pnl_pct: float):
-    _risk.record_trade_result(pnl_pct)
+def record_trade(pnl_pct: float, *, symbol: str = LEGACY_SYMBOL):
+    get_risk_guardian(symbol).record_trade_result(pnl_pct)

@@ -46,9 +46,9 @@ class MT5MarketDataAdapter:
 class MT5ExecutionDataAdapter:
     """`ExecutionPort` sobre `services.mt5_client`.
 
-    `place_order_with_fallback` queda fuera a propósito: es código muerto
-    (cero llamantes) marcado para eliminación en P3-1d — un puerto no
-    expone funciones que el sistema no usa.
+    `place_order_with_fallback` fue eliminado en P3-1d (código muerto con
+    cero llamantes, junto a `correlation_sizing.py`): un puerto no expone
+    funciones que el sistema no usa.
     """
 
     async def place_order(self, symbol: str, order_type: str, volume: float,

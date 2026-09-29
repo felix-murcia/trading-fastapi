@@ -110,32 +110,6 @@ async def place_order(symbol: str, order_type: str, volume: float,
     return {"ticket": ticket}
 
 
-async def place_order_with_fallback(symbol: str, order_type: str, volume: float,
-                                     price: float, sl: float, tp: float,
-                                     comment: str = "", cycle_id: str = "") -> dict:
-    """
-    Intenta colocar orden en MT5. Si falla, la guarda en la cola deferred.
-    Ajusta volumen según correlación con posiciones abiertas.
-    """
-    if not settings.paper_mode:
-        positions_data = await get_positions()
-        open_pos = positions_data.get("open", [])
-        if open_pos:
-            open_symbols = [p.get("symbol") for p in open_pos if isinstance(p, dict)]
-            open_lots = [float(p.get("volume", 0)) for p in open_pos if isinstance(p, dict)]
-            from services.correlation_sizing import get_correlated_lot_multiplier
-            multiplier = get_correlated_lot_multiplier(symbol, open_symbols, open_lots)
-            volume = round(volume * multiplier, 2)
-            if multiplier < 1.0:
-                logger.info("[MT5-CLIENT] Volume ajustado por correlación: %.2f → %.2f (mult=%.2f)",
-                           volume / multiplier, volume, multiplier)
-
-    if settings.paper_mode:
-        return await place_order_paper(symbol, order_type, volume, price, sl, tp, comment)
-
-    return await place_order(symbol, order_type, volume, price, sl, tp, comment)
-
-
 async def place_order_paper(symbol: str, order_type: str, volume: float,
                             price: float, sl: float, tp: float,
                             comment: str = "") -> dict:

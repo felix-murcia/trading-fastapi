@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 
+import config
 from main import app
 
 TOKEN = {"x-internal-token": "test-token", "x-cycle-id": "gate-test"}
@@ -54,8 +55,13 @@ class _FakeAsyncClient:
         return response
 
 
-def _prepare(payload, *, fetchrow=None, risk=(True, ""), fetchval=42, headers=None):
-    """POST /v1/orders/prepare con todo el entorno parcheado. Devuelve (response, pool)."""
+def _prepare(payload, *, fetchrow=None, risk=(True, ""), fetchval=42, headers=None,
+             positions=None):
+    """POST /v1/orders/prepare con todo el entorno parcheado. Devuelve (response, pool).
+
+    `positions`: contenido de get_positions (P3-1d, default sin posiciones).
+    El mock de check_risk queda en `pool.risk_check` para inspeccionar args.
+    """
     with ExitStack() as stack:
         stack.enter_context(patch("main.init_pool", AsyncMock()))
         stack.enter_context(patch("main.close_pool", AsyncMock()))
@@ -70,14 +76,15 @@ def _prepare(payload, *, fetchrow=None, risk=(True, ""), fetchval=42, headers=No
         pool.fetchval = AsyncMock(return_value=fetchval)
         pool.execute = AsyncMock()
         stack.enter_context(patch("services.order_manager.get_pool", return_value=pool))
-        stack.enter_context(
+        risk_check = stack.enter_context(
             patch("services.risk_guardian.check_risk", return_value=risk)
         )
         stack.enter_context(
             patch("services.mt5_client.get_account", AsyncMock(return_value={"equity": 5000.0}))
         )
         stack.enter_context(
-            patch("services.mt5_client.get_positions", AsyncMock(return_value={"open": []}))
+            patch("services.mt5_client.get_positions",
+                  AsyncMock(return_value=positions if positions is not None else {"open": []}))
         )
 
         with TestClient(app) as client:
@@ -86,6 +93,7 @@ def _prepare(payload, *, fetchrow=None, risk=(True, ""), fetchval=42, headers=No
                 json=payload,
                 headers=headers if headers is not None else TOKEN,
             )
+    pool.risk_check = risk_check
     return response, pool
 
 
@@ -187,3 +195,62 @@ class TestEAGateContract:
         src = _ea_source()
         assert re.search(r'#property\s+version\s+"13\.', src), "Falta bump de #property version"
         assert re.search(r'#define\s+EA_VERSION\s+"13\.', src), "Falta bump de EA_VERSION"
+
+
+# ─── P3-1d: gate de mundo, cupo por par y presupuesto de equity ─────────────
+
+class TestWorldGatePrepare:
+    def test_unknown_symbol_rejected(self):
+        """Orden de un par no configurado → rechazo explícito (sin tocar riesgo)."""
+        response, pool = _prepare(_order(symbol="BTCUSD"))
+        assert response.json()["rejection_reason"] == "pair_not_configured"
+        pool.risk_check.assert_not_called()
+
+    def test_disabled_pair_rejected(self, monkeypatch):
+        # Un par deshabilitado solo existe junto a uno habilitado
+        # (el registry prohíbe cero mundos activos, P3-1a).
+        monkeypatch.setattr(config.settings, "pairs", [
+            {"symbol": "EURUSD", "enabled": True},
+            {"symbol": "GBPUSD", "enabled": False},
+        ])
+        response, _ = _prepare(_order(symbol="GBPUSD"))
+        assert response.json()["rejection_reason"] == "pair_disabled"
+
+
+class TestOpenCountPerSymbol:
+    def test_counts_only_request_symbol(self):
+        """El cupo de posiciones es POR PAR: solo cuentan las de este mundo."""
+        response, pool = _prepare(
+            _order(),
+            positions={"open": [
+                {"symbol": "EURUSD"}, {"symbol": "GBPUSD"}, {"symbol": "EURUSD"},
+            ]},
+        )
+        assert response.json()["approved"] is True
+        args = pool.risk_check.call_args
+        assert args.args[1] == 2                      # las 2 de EURUSD, no las 3
+        assert args.kwargs["symbol"] == "EURUSD"
+
+
+class TestPairAllocationCeiling:
+    def test_volume_exceeding_allocation_rejected(self, monkeypatch):
+        # techo = max_volume(0.50) × 50% = 0.25
+        monkeypatch.setattr(config.settings, "pairs", [
+            {"symbol": "EURUSD", "enabled": True, "equity_allocation_pct": 50}
+        ])
+        response, _ = _prepare(_order(volume=0.30))
+        reason = response.json()["rejection_reason"]
+        assert reason.startswith("volume_exceeds_pair_allocation")
+        assert "0.25" in reason
+
+    def test_volume_within_allocation_approved(self, monkeypatch):
+        monkeypatch.setattr(config.settings, "pairs", [
+            {"symbol": "EURUSD", "enabled": True, "equity_allocation_pct": 50}
+        ])
+        response, _ = _prepare(_order(volume=0.20))
+        assert response.json()["approved"] is True
+
+    def test_full_allocation_keeps_global_ceiling(self):
+        # 100% (default) → techo idéntico al global de siempre: sin cambio
+        response, _ = _prepare(_order(volume=0.50))
+        assert response.json()["approved"] is True

@@ -43,6 +43,9 @@ class PairConfig:
     symbol: str
     enabled: bool
     model_path: str
+    # P3-1d: fracción de equity (0-100] que el par puede mandar — techo de
+    # size por par. 100 (default) = el techo global de siempre.
+    equity_allocation_pct: float = 100.0
 
     @staticmethod
     def from_spec(spec: dict) -> "PairConfig":
@@ -69,7 +72,26 @@ class PairConfig:
             model_path = default_model_path(symbol)
         elif not isinstance(model_path, str) or not model_path.strip():
             raise ValueError(f"PAIRS: 'model_path' inválido en {spec!r}: {model_path!r}")
-        return PairConfig(symbol=symbol, enabled=enabled, model_path=model_path)
+        # P3-1d: asignación de equity — ausente = 100 (todo el techo global);
+        # presente = número en (0, 100]. Nada de defaults por heurística.
+        allocation = spec.get("equity_allocation_pct", 100.0)
+        if isinstance(allocation, bool) or not isinstance(allocation, (int, float)):
+            raise ValueError(
+                f"PAIRS: 'equity_allocation_pct' debe ser numérico en {spec!r}: "
+                f"{allocation!r}"
+            )
+        allocation = float(allocation)
+        if not (0.0 < allocation <= 100.0):
+            raise ValueError(
+                f"PAIRS: 'equity_allocation_pct' de {symbol!r} fuera de (0, 100]: "
+                f"{allocation!r}"
+            )
+        return PairConfig(
+            symbol=symbol,
+            enabled=enabled,
+            model_path=model_path,
+            equity_allocation_pct=allocation,
+        )
 
 
 @dataclass(frozen=True)

@@ -55,14 +55,31 @@ async def prepare(req: OrderPrepareRequest) -> OrderPrepareResponse:
         await _audit(req.cycle_id, "order_rejected", {"reason": "cycle_already_has_order", "symbol": req.symbol})
         return _reject("cycle_already_has_order")
 
-    # 1b. Risk Guardian: ¿se puede abrir nueva posición?
+    # 1b. Gate de mundo (P3-1d): la orden debe pertenecer a un par configurado
+    # y habilitado — MISMA admisión que /predict, ahora en la última línea de
+    # defensa antes de MT5. La asignación de equity del par viaja con su config.
+    from core.container import build_registry_from_settings
+    pair_ctx = build_registry_from_settings().get(req.symbol)
+    if pair_ctx is None:
+        await _audit(req.cycle_id, "order_rejected", {"reason": "pair_not_configured", "symbol": req.symbol})
+        return _reject("pair_not_configured")
+    if not pair_ctx.config.enabled:
+        await _audit(req.cycle_id, "order_rejected", {"reason": "pair_disabled", "symbol": req.symbol})
+        return _reject("pair_disabled")
+
+    # 1c. Risk Guardian: ¿se puede abrir nueva posición en ESTE par?
     from services.risk_guardian import check_risk
     from services.mt5_client import get_account, get_positions
     try:
         acct = await get_account()
         positions_data = await get_positions()
-        open_count = len(positions_data.get("open", []))
-        can_open, reason = check_risk(acct["equity"], open_count)
+        # P3-1d: el cupo de posiciones es POR PAR — solo cuentan las de este
+        # mundo; un par jamás consume la capacidad de otro.
+        open_count = sum(
+            1 for p in positions_data.get("open", [])
+            if isinstance(p, dict) and p.get("symbol") == req.symbol
+        )
+        can_open, reason = check_risk(acct["equity"], open_count, symbol=req.symbol)
         if not can_open:
             await _audit(req.cycle_id, "order_rejected", {"reason": f"risk_guardian_blocked:{reason}", "symbol": req.symbol})
             return _reject(f"risk_guardian_blocked: {reason}")
@@ -81,6 +98,17 @@ async def prepare(req: OrderPrepareRequest) -> OrderPrepareResponse:
     except OrderValidationError as exc:
         await _audit(req.cycle_id, "order_rejected", {"reason": exc.reason, "symbol": req.symbol})
         return _reject(exc.reason)
+
+    # 6b. Presupuesto del par (P3-1d): techo de size = max_volume × asignación,
+    # redondeado ABAJO a precisión de lote (no se opera 0.165). Con EURUSD al
+    # 100% el techo es el global de siempre — sin cambio de comportamiento.
+    ceiling = (
+        int(settings.max_volume * pair_ctx.config.equity_allocation_pct / 100.0 * 100 + 1e-9) / 100
+    )
+    if req.volume > ceiling:
+        reason = f"volume_exceeds_pair_allocation(max={ceiling:.2f})"
+        await _audit(req.cycle_id, "order_rejected", {"reason": reason, "symbol": req.symbol})
+        return _reject(reason)
 
     # 7. Registrar en DB como pending
     order_id = await pool.fetchval(

@@ -111,7 +111,15 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("[JOURNAL] init_journal_table falló: %s", exc)
 
-    # Inicializar Risk Guardian con equity actual
+    # P3-1d: UN guardián POR PAR habilitado — se crea ANTES del baseline del
+    # día (un par sin guardián = sin protección diaria). Fuera del try: una
+    # PAIRS inválida debe impedir el arranque, no dejar guardianes a medias.
+    from core.container import build_registry_from_settings
+    from services.risk_guardian import get_risk_guardian
+    for _ctx in build_registry_from_settings().enabled():
+        get_risk_guardian(_ctx.config.symbol)
+
+    # Inicializar Risk Guardian con equity actual (sembrará a TODOS)
     try:
         async with httpx.AsyncClient(timeout=5.0) as c:
             r = await c.get(settings.mt5_http_url + "/api/v1/account/info")
