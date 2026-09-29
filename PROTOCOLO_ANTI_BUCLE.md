@@ -3,7 +3,7 @@
 Antes de cualquier cambio en el sistema de trading:
 
 0. El fichero `CLAUDE.md` es de obligado cumplimento. También hay que revisar el codegraph para entender la estructura del proyecto.
-1. `pytest fastapi/tests/ -q` → debe pasar (actual: 44 passed).
+1. `pytest fastapi/tests/ -q` → debe pasar (actual: 530 passed).
 2. `git status --short` → solo archivos relacionados con el cambio.
 3. `README.md` actualizado con evidencia (fecha, resultado test, archivo editado).
 4. Toda resoulción de errores y/o fallos en la lógica debe estar debidamente indicada en el apartado troubleshotting del fichero `README.md`.
@@ -24,5 +24,8 @@ Estado actual (2026-09-29):
 - Riesgo: guardián por par con `daily_loss_pct` del spec PAIRS (canario GBPUSD=2%, default 5%); `max_drawdown_block_pct` (default `None`=solo alerta) bloquea DD de cuenta si se configura (canario: 15); exposición agregada + `AccountRiskState` persistente; cierres selectivos por ledger de propiedad.
 - Artefactos por par: bundle y drift baseline en `ml/<SYMBOL>/` (EURUSD legado en raíz de `ml/`); snapshots de retrain en parquet con rango+hash.
 - E2E: 8 passed. Suite completa: **530 passed** (host + contenedor, exit 0).
-- Pendientes conocidos: EA v13.2 a compilar en MetaEditor (guard backend activo); GCS ADC sin credenciales (backup local OK, solo ERROR en log).
+- `RETRAIN_AUTO_APPROVE=true` en `.env` (desplegado 2026-09-29; contenedor recreado, verificado con `printenv`). Efecto: el siguiente cierre EURUSD (filled_count=11 ≥ umbral 5) lanza retrain vía `trade_count`; el calendario (168h) no se dispara antes (último intento <24h). La promoción sigue protegida por el gate walk-forward. El default en `config.py` permanece `False` (la inversión es explícita en despliegue).
+- EA v13.2 **compilado y añadido a MT5** (Félix, 2026-09-29). Observado en logs: solo hay una instancia emitiendo `/predict` (EURUSD, cada 5 min) — aún no se ven polls desde el gráfico GBPUSD (no bloquea: GBPUSD está `enabled=false` → world-gate HOLD aunque llegue).
+- Decisión (Félix, 2026-09-29): **paper architecture B NO aplica** post-demo-correction. GCS ADC **diferido al final** (backup local OK, solo ERROR en log).
+- Pendientes conocidos: activación de GBPUSD pendiente de un entrenamiento que supere el gate (nunca tocando umbrales); sin bundle GBPUSD, ese par no puede operar.
 - Tener siempre en cuenta el spread actual de la operación para establecer los SL/TP.
