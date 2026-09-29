@@ -107,3 +107,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_model_registry_one_active
 
 CREATE INDEX IF NOT EXISTS idx_model_registry_promoted_at
     ON model_registry(promoted_at DESC);
+
+-- P3-2: experimentos de entrenamiento — cada retrain deja una fila consultable
+-- (disparador, snapshot de datos, decisión del gate, bundle promovido o error).
+-- Antes solo existían eventos sueltos en audit_log sin fila por corrida.
+CREATE TABLE IF NOT EXISTS training_experiments (
+    id               BIGSERIAL PRIMARY KEY,
+    triggered_by     TEXT NOT NULL CHECK (triggered_by IN ('manual', 'forced', 'approved', 'trade_count', 'scheduled')),
+    status           TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'promoted', 'rejected', 'failed')),
+    snapshot_path    TEXT,
+    snapshot_sha256  TEXT,
+    started_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    finished_at      TIMESTAMPTZ,
+    gate_reason      TEXT,
+    gate_metrics     JSONB,
+    model_sha256     TEXT,
+    error            TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_training_experiments_started
+    ON training_experiments(started_at DESC);

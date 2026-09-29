@@ -95,7 +95,7 @@ class TestApproveRetrainService:
         result = await approve_retrain()
 
         assert result["status"] == "approved"
-        spawn.assert_called_once()
+        spawn.assert_called_once_with("approved")
 
     @pytest.mark.asyncio
     async def test_already_running(self, monkeypatch):
@@ -119,24 +119,29 @@ class TestApproveRetrainService:
         result = await force_retrain()
 
         assert result["status"] == "triggered"
-        spawn.assert_called_once()
+        spawn.assert_called_once_with("forced")
 
 
 class TestSpawnRetrainTask:
     @pytest.mark.asyncio
     async def test_keeps_reference_and_reuses_live_task(self, monkeypatch):
-        async def slow():
+        seen: list[str] = []
+
+        async def slow(trigger="manual"):
+            seen.append(trigger)
             await asyncio.sleep(30)
 
         monkeypatch.setattr(ar, "_trigger_retrain", slow)
         monkeypatch.setattr(ar, "send_alert", MagicMock())
 
-        t1 = ar._spawn_retrain_task()
+        t1 = ar._spawn_retrain_task("scheduled")
         t2 = ar._spawn_retrain_task()
+        await asyncio.sleep(0)   # deja arrancar el task → slow() registra el trigger
 
         assert t1 is not None
         assert t1 is t2, "no debe duplicar tasks vivos"
         assert ar._RETRAIN_TASK is t1, "la referencia debe conservarse"
+        assert seen == ["scheduled"], "el trigger debe propagarse a _trigger_retrain"
 
         t1.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -144,7 +149,7 @@ class TestSpawnRetrainTask:
 
     @pytest.mark.asyncio
     async def test_alerts_on_failure(self, monkeypatch):
-        async def boom():
+        async def boom(trigger="manual"):
             raise RuntimeError("retrain exploded")
 
         monkeypatch.setattr(ar, "_trigger_retrain", boom)

@@ -389,6 +389,20 @@ class TestDoRetrainPromotion:
                             AsyncMock(return_value=_candles(candles)))
         monkeypatch.setattr(ar, "_load_persisted_outcomes", AsyncMock(return_value=[]))
         monkeypatch.setattr(ar, "_log_retrain_event", AsyncMock())
+        # P3-2a: snapshot + experimentos (sin BD real ni escritura en repo/ml)
+        from services.data_snapshot import SnapshotInfo
+        monkeypatch.setattr(
+            "services.data_snapshot.save_snapshot",
+            MagicMock(return_value=SnapshotInfo(
+                path=str(tmp_path / "snapshots" / "20260101T000000Z__deadbeef0000__retrain.csv.gz"),
+                sha256="d" * 64, rows=candles, columns=24,
+            )),
+        )
+        monkeypatch.setattr("services.data_snapshot.prune_snapshots", MagicMock(return_value=[]))
+        monkeypatch.setattr(
+            "services.experiment_tracker.start_experiment", AsyncMock(return_value=42)
+        )
+        monkeypatch.setattr("services.experiment_tracker.finish_experiment", AsyncMock())
         record_promo = AsyncMock()
         reload_mock = MagicMock()
         monkeypatch.setattr("services.model_registry.record_promotion", record_promo)
@@ -490,3 +504,71 @@ class TestDoRetrainPromotion:
         assert ar._log_retrain_event.await_args.args[0] == "retrain_rejected"
         reason = ar._log_retrain_event.await_args.args[1]["reason"]
         assert reason.startswith("failed:")
+
+
+class TestExperimentLifecycle:
+    """P3-2a: cada corrida deja UNA fila consultable en training_experiments."""
+
+    @staticmethod
+    def _fake_metrics(*a, **k):
+        return TestDoRetrainPromotion._fake_metrics(*a, **k)
+
+    @pytest.mark.asyncio
+    async def test_promoted_records_experiment(self, tmp_path, monkeypatch):
+        ar, *_ = TestDoRetrainPromotion._patch_common(monkeypatch, tmp_path)
+        monkeypatch.setattr(ar, "_evaluate_model", self._fake_metrics)
+
+        await ar._do_retrain(trigger="forced")
+
+        start = ar.experiment_tracker.start_experiment
+        finish = ar.experiment_tracker.finish_experiment
+        start.assert_awaited_once()
+        assert start.await_args.args[0] == "forced"            # disparador propagado
+        assert start.await_args.args[2] == "d" * 64            # sha256 del snapshot
+        finish.assert_awaited_once()
+        assert finish.await_args.args == (42, "promoted")
+        kwargs = finish.await_args.kwargs
+        assert kwargs["gate_reason"]                            # por qué lo aprobó
+        assert kwargs["gate_metrics"]["n_folds"] == 4
+        assert kwargs["model_sha256"] and len(kwargs["model_sha256"]) == 64
+
+    @pytest.mark.asyncio
+    async def test_rejected_records_experiment(self, tmp_path, monkeypatch):
+        import shutil
+
+        real_zip = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "ml", "ppo_trading_bot_v3.zip")
+        )
+        tmp_model = tmp_path / "ppo_trading_bot_v3.zip"
+        shutil.copy(real_zip, tmp_model)
+
+        ar, *_ = TestDoRetrainPromotion._patch_common(
+            monkeypatch, tmp_path, model_path=str(tmp_model)
+        )
+        monkeypatch.setattr(ar, "_evaluate_model", self._fake_metrics)
+
+        await ar._do_retrain()
+
+        finish = ar.experiment_tracker.finish_experiment
+        finish.assert_awaited_once()
+        assert finish.await_args.args == (42, "rejected")
+        assert finish.await_args.kwargs["gate_reason"].startswith("failed:")
+        assert finish.await_args.kwargs.get("model_sha256") is None
+
+    @pytest.mark.asyncio
+    async def test_pipeline_failure_marks_experiment_failed(self, tmp_path, monkeypatch):
+        ar, *_ = TestDoRetrainPromotion._patch_common(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            ar, "_load_or_create_model",
+            MagicMock(side_effect=RuntimeError("boom-train")),
+        )
+
+        with pytest.raises(RuntimeError, match="boom-train"):
+            await ar._do_retrain()
+
+        # La excepción se re-propaga (no se traga) Y el experimento queda cerrado.
+        finish = ar.experiment_tracker.finish_experiment
+        finish.assert_awaited_once()
+        assert finish.await_args.args == (42, "failed")
+        assert "boom-train" in finish.await_args.kwargs["error"]
+        ar.experiment_tracker.start_experiment.assert_awaited_once()

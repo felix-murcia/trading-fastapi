@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 
 from config import settings
+from services import data_snapshot, experiment_tracker
 from services.alerting import AlertLevel, send_alert
 from services.walk_forward import (
     build_walk_forward_split,
@@ -299,10 +300,10 @@ async def record_trade_filled(
                 "Usar POST /api/v1/ai/retrain/approve para aprobar el retrain pendiente."
             )
             return
-        _spawn_retrain_task()
+        _spawn_retrain_task("trade_count")
 
 
-async def _trigger_retrain() -> None:
+async def _trigger_retrain(trigger: str = "manual") -> None:
     """
     Dispara el retrain en background.
     Solo una instancia a la vez (Lock).
@@ -313,7 +314,7 @@ async def _trigger_retrain() -> None:
         state.retrain_in_progress = True
         await _save_retrain_state(state)
         try:
-            await _do_retrain()
+            await _do_retrain(trigger=trigger)
         finally:
             state.retrain_in_progress = False
             await _save_retrain_state(state)
@@ -322,7 +323,7 @@ async def _trigger_retrain() -> None:
 _RETRAIN_TASK: asyncio.Task | None = None
 
 
-def _spawn_retrain_task() -> asyncio.Task | None:
+def _spawn_retrain_task(trigger: str = "manual") -> asyncio.Task | None:
     """Lanza _trigger_retrain en background con referencia y manejo de fallo.
 
     Sin referencia, el task puede recolectarse y sus excepciones mueren en
@@ -335,7 +336,7 @@ def _spawn_retrain_task() -> asyncio.Task | None:
         logger.warning("[RETRAIN] Ya hay un retrain en curso — se reutiliza el task vivo")
         return _RETRAIN_TASK
 
-    task = asyncio.create_task(_trigger_retrain())
+    task = asyncio.create_task(_trigger_retrain(trigger))
     _RETRAIN_TASK = task
 
     def _on_done(t: asyncio.Task) -> None:
@@ -524,25 +525,57 @@ def _load_or_create_model(model_path: str, train_env, cfg) -> "PPO":
     return model
 
 
-async def _do_retrain() -> None:
-    """
-    Ejecuta el retrain efectivo.
-    1. Recolecta velas históricas
-    2. Construye dataset de training
-    3. Entrena modelo PPO v3 con ForexTradingEnvV2 (3 pips spread)
-    4. Reemplaza ppo_trading_bot_v3.zip
-    5. Loguea resultado
-    """
-    from services.model_backup import backup_model as upload_model
+async def _do_retrain(trigger: str = "manual") -> None:
+    """P3-2a: orquesta snapshot + experimento alrededor del pipeline de retrain.
 
+    1. Recolecta velas históricas y congela el snapshot del df que van a
+       consumir train y gate (retrain reproducible)
+    2. Abre la fila del experimento en training_experiments (traza auditable
+       por corrida: disparador + snapshot)
+    3. Ejecuta _do_retrain_core (entreno → gate walk-forward → promoción),
+       que cierra la fila en sus puntos de decisión (promoted/rejected)
+    4. Ante cualquier excepción del pipeline cierra la fila como failed
+       (UPDATE condicional sobre status='running': no pisa un cierre ya hecho)
+
+    Un fallo ANTES del snapshot (fetch MT5, escritura) no abre fila — no hay
+    experimento sin datos — y queda alertado por _spawn_retrain_task._on_done.
+    """
     cfg = RetrainConfig
-    logger.warning("[RETRAIN] ===== INICIANDO RETRAIN =====")
+    logger.warning("[RETRAIN] ===== INICIANDO RETRAIN (trigger=%s) =====", trigger)
 
     candles = await _fetch_historical_candles(symbol="EURUSD", count=cfg.lookback_candles)
     if len(candles) < 100:
         raise RuntimeError(f"[RETRAIN] No hay suficientes velas: {len(candles)}")
     df = _build_training_dataframe(candles)
 
+    # P3-2a: snapshot del df exacto que consume train+gate → reproducibilidad.
+    snap = data_snapshot.save_snapshot(df, purpose="retrain")
+    data_snapshot.prune_snapshots()
+    exp_id = await experiment_tracker.start_experiment(trigger, snap.path, snap.sha256)
+
+    try:
+        await _do_retrain_core(df, exp_id)
+    except BaseException as exc:
+        try:
+            await experiment_tracker.finish_experiment(
+                exp_id, "failed", error=f"{type(exc).__name__}: {exc}"
+            )
+        except BaseException:
+            # Preserva la excepción original del pipeline; el fallo de cierre
+            # queda logueado (la fila 'running' hinchada también es visible).
+            logger.exception("[EXPERIMENT] #%s: fallo al cerrar como failed", exp_id)
+        raise
+
+
+async def _do_retrain_core(df: pd.DataFrame, exp_id: int) -> None:
+    """Pipeline de retrain sobre un df ya congelado como snapshot.
+
+    Terminaliza el experimento `exp_id` en los puntos de decisión del gate:
+    'rejected' al rechazar el candidato, 'promoted' tras record_promotion.
+    """
+    from services.model_backup import backup_model as upload_model
+
+    cfg = RetrainConfig
     split = build_walk_forward_split(
         len(df),
         window_size=cfg.retrain_window_size,
@@ -653,6 +686,11 @@ async def _do_retrain() -> None:
             "[RETRAIN] Candidato rechazado (%s): modelo activo conservado",
             decision.reason,
         )
+        await experiment_tracker.finish_experiment(
+            exp_id, "rejected",
+            gate_reason=decision.reason,
+            gate_metrics=report.to_dict(),
+        )
         await _log_retrain_event("retrain_rejected", {
             "reason": decision.reason,
             "gate": decision.details,
@@ -696,6 +734,16 @@ async def _do_retrain() -> None:
     )
     from routers.ai import reload_inference_artifacts
     reload_inference_artifacts()
+
+    # P3-2a: la promoción es el punto de decisión del experimento — se cierra
+    # aquí, antes de los pasos posteriores (state/backup/log): si esos fallan,
+    # el wrapper intenta 'failed' pero el UPDATE condicional no lo pisa.
+    await experiment_tracker.finish_experiment(
+        exp_id, "promoted",
+        gate_reason=decision.reason,
+        gate_metrics=report.to_dict(),
+        model_sha256=manifest["model_sha256"],
+    )
 
     state = await _ensure_retrain_state()
     state.last_retrain_time = time.time()
@@ -792,7 +840,7 @@ async def force_retrain() -> dict:
     if state.retrain_in_progress:
         return {"status": "already_running"}
 
-    _spawn_retrain_task()
+    _spawn_retrain_task("forced")
     return {"status": "triggered", "filled_count": state.filled_count}
 
 
@@ -811,5 +859,5 @@ async def approve_retrain() -> dict:
             "filled_count": state.filled_count,
             "min_trades_for_retrain": RetrainConfig.min_trades_for_retrain,
         }
-    _spawn_retrain_task()
+    _spawn_retrain_task("approved")
     return {"status": "approved", "filled_count": state.filled_count}
