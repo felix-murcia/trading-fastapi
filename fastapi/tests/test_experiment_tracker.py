@@ -25,7 +25,7 @@ class TestStartExperiment:
         from services import experiment_tracker
 
         exp_id = await experiment_tracker.start_experiment(
-            "scheduled", "/snap/a.csv.gz", "a" * 64
+            "scheduled", "/snap/a.csv.gz", "a" * 64, symbol="EURUSD"
         )
 
         assert exp_id == 7
@@ -33,7 +33,7 @@ class TestStartExperiment:
         assert "INSERT INTO training_experiments" in sql
         assert "RETURNING id" in sql
         assert pool.fetchval.await_args.args[1:] == (
-            "scheduled", "/snap/a.csv.gz", "a" * 64,
+            "scheduled", "EURUSD", "/snap/a.csv.gz", "a" * 64,
         )
 
     @pytest.mark.asyncio
@@ -41,7 +41,7 @@ class TestStartExperiment:
         from services import experiment_tracker
 
         with pytest.raises(ValueError, match="triggered_by"):
-            await experiment_tracker.start_experiment("random_trigger")
+            await experiment_tracker.start_experiment("random_trigger", symbol="EURUSD")
 
         pool.fetchval.assert_not_awaited()
 
@@ -49,9 +49,10 @@ class TestStartExperiment:
     async def test_snapshot_optional(self, pool):
         from services import experiment_tracker
 
-        await experiment_tracker.start_experiment("manual")
+        # symbol es OBLIGATORIO (P3-1c): todo experimento declara su mundo.
+        await experiment_tracker.start_experiment("manual", symbol="EURUSD")
 
-        assert pool.fetchval.await_args.args[1:] == ("manual", None, None)
+        assert pool.fetchval.await_args.args[1:] == ("manual", "EURUSD", None, None)
 
 
 class TestFinishExperiment:

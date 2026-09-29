@@ -236,34 +236,35 @@ class TestRestore:
 
 class TestScheduled:
     @pytest.mark.asyncio
-    async def test_run_scheduled_backup_delegates(self, monkeypatch):
+    async def test_run_scheduled_backup_delegates_per_enabled_pair(self, monkeypatch):
+        """Cada par habilitado recibe SU backup (P3-1c: un mundo por iteración)."""
         called = {}
 
-        async def fake_backup(path=None):
-            called["path"] = path
-            return {"status": "success"}
+        async def fake_backup(*, symbol):
+            called[symbol] = called.get(symbol, 0) + 1
+            return {"symbol": symbol, "status": "success"}
 
         monkeypatch.setattr(mb, "backup_model", fake_backup)
-        monkeypatch.setattr(mb, "default_model_path", lambda: "/x/ppo_trading_bot_v3.zip")
 
         result = await mb.run_scheduled_backup()
 
-        assert result == {"status": "success"}
-        assert called["path"] == "/x/ppo_trading_bot_v3.zip"
+        # Config por defecto: un único par habilitado (EURUSD, legado)
+        assert called == {"EURUSD": 1}
+        assert result == [{"symbol": "EURUSD", "status": "success"}]
 
     @pytest.mark.asyncio
     async def test_run_scheduled_backup_alerts_on_crash(self, monkeypatch):
         monkeypatch.setattr(mb, "send_alert", MagicMock())
 
-        async def boom(path=None):
+        async def boom(*, symbol):
             raise RuntimeError("disk full")
 
         monkeypatch.setattr(mb, "backup_model", boom)
 
         result = await mb.run_scheduled_backup()
 
-        assert result["status"] == "error"
-        assert "disk full" in result["error"]
+        assert result[0]["status"] == "error"
+        assert "disk full" in result[0]["error"]
         mb.send_alert.assert_called_once()   # el loop sobrevive, el fallo es visible
 
     @pytest.mark.asyncio

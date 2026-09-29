@@ -106,7 +106,7 @@ class TestRecordPromotion:
         monkeypatch.setattr("db.connection.get_pool", lambda: pool)
 
         gate = {"ok": True, "reason": "walk_forward_improved"}
-        await mr.record_promotion(_manifest(), gate)
+        await mr.record_promotion(_manifest(), gate, symbol="EURUSD")
 
         # Orden garantizado DENTRO de la transacción: desactivar → insertar.
         # (El CTE de PostgreSQL no garantizaba ese orden → violó el índice
@@ -114,19 +114,24 @@ class TestRecordPromotion:
         kinds = [c if isinstance(c, str) else c[0] for c in pool.calls]
         assert kinds == ["tx_begin", "execute", "execute", "tx_commit"]
 
-        _, update_sql, _ = pool.calls[1]
-        assert update_sql == "UPDATE model_registry SET is_active = FALSE WHERE is_active"
+        # P3-1c: el UPDATE solo desactiva la fila activa de ESE par
+        _, update_sql, update_params = pool.calls[1]
+        assert update_sql == (
+            "UPDATE model_registry SET is_active = FALSE WHERE is_active AND symbol = $1"
+        )
+        assert update_params == ["EURUSD"]
 
         _, insert_sql, params = pool.calls[2]
         assert "INSERT INTO model_registry" in insert_sql
         assert insert_sql.count("INSERT") == 1
 
-        assert params[0] == "a" * 64
-        assert params[1] == "b" * 64
-        assert params[2] == "auto_retrain_normalized"
-        assert json.loads(params[3]) == [20, 24]
-        assert json.loads(params[4])["gate"]["reason"] == "walk_forward_improved"
-        assert params[5] == "walk_forward_improved"
+        assert params[0] == "EURUSD"     # el mundo declarado viaja en la fila
+        assert params[1] == "a" * 64
+        assert params[2] == "b" * 64
+        assert params[3] == "auto_retrain_normalized"
+        assert json.loads(params[4]) == [20, 24]
+        assert json.loads(params[5])["gate"]["reason"] == "walk_forward_improved"
+        assert params[6] == "walk_forward_improved"
 
     @pytest.mark.asyncio
     async def test_failure_propagates_and_rolls_back(self, monkeypatch):
@@ -136,7 +141,7 @@ class TestRecordPromotion:
         monkeypatch.setattr("db.connection.get_pool", lambda: pool)
 
         with pytest.raises(RuntimeError, match="db caída"):
-            await mr.record_promotion(_manifest(), {"reason": "x"})
+            await mr.record_promotion(_manifest(), {"reason": "x"}, symbol="EURUSD")
 
         # La transacción se revierte entera: el UPDATE previo no queda suelto.
         kinds = [c if isinstance(c, str) else c[0] for c in pool.calls]
@@ -258,11 +263,15 @@ class TestModelStatusEndpoint:
         assert response.json()["in_sync"] is False
 
 
-def test_schema_declares_single_active_bundle():
+def test_schema_declares_single_active_bundle_per_symbol():
     schema_path = os.path.join(os.path.dirname(__file__), "..", "db", "schema.sql")
     with open(schema_path, encoding="utf-8") as f:
         schema = f.read()
     assert "CREATE TABLE IF NOT EXISTS model_registry" in schema
-    # Índice único parcial: solo una fila con is_active=TRUE (rollback informado)
-    assert "ON model_registry(is_active)" in schema
+    assert "symbol" in schema    # P3-1c: la fila declara su mundo
+    # Índice único parcial POR PAR: una fila activa por mundo (rollback informado)
+    assert "idx_model_registry_one_active_per_symbol" in schema
+    assert "ON model_registry(symbol)" in schema
     assert "WHERE is_active" in schema
+    # El índice global (un único activo ENTRE pares) queda eliminado
+    assert "DROP INDEX IF EXISTS idx_model_registry_one_active" in schema

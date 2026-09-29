@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 
 from config import settings
+from core.pair import default_model_path
 from core.rules import is_winning_close
 from services import data_snapshot, drift_monitor, experiment_tracker
 from services.alerting import AlertLevel, send_alert
@@ -31,12 +32,12 @@ from services.walk_forward import (
 
 logger = logging.getLogger(__name__)
 
-MODEL_PATH = "/app/ml/ppo_trading_bot_v3.zip"   # ← EA usa v3, no v2
 # P3-1b: el pipeline de retrain entrena HOY un único mundo. Fuente única del
-# símbolo (fetch de velas + hot-reload del bundle tras promover); P3-1c lo
-# parametriza por par (columnas symbol en model_registry/training_experiments
-# y retrain_state por símbolo).
+# símbolo (fetch de velas + hot-reload del bundle tras promover).
 TRAINING_SYMBOL = "EURUSD"
+# P3-1c: el bundle que escribe el pipeline es SIEMPRE el de SU mundo — la ruta
+# se deriva de core.pair (convención única de rutas, nada hardcodeado).
+MODEL_PATH = default_model_path(TRAINING_SYMBOL)
 RETRAIN_LOCK = asyncio.Lock()
 SCHEDULE_CHECK_S = 3600   # P3-2d: el calendario se revisa cada hora
 
@@ -97,48 +98,61 @@ def _parse_bool(value, default: bool = False) -> bool:
     return bool(value)
 
 
-def _retrain_state_row_key(key: str) -> str:
-    return f"retrain_state.{key}"
+def _retrain_state_row_key(key: str, symbol: str = TRAINING_SYMBOL) -> str:
+    """P3-1c: namespace de claves POR PAR — `retrain_state.<SYMBOL>.<campo>`.
+
+    Los contadores de un mundo nunca alimentan el disparo de otro.
+    """
+    return f"retrain_state.{symbol}.{key}"
 
 
-async def _load_retrain_state() -> RetrainState:
+async def _load_retrain_state(symbol: str = TRAINING_SYMBOL) -> RetrainState:
     from db.connection import get_pool
 
     pool = get_pool()
+    keys = [
+        _retrain_state_row_key(k, symbol)
+        for k in ("filled_count", "last_retrain_time", "scheduled_due", "schedule_anchor")
+    ]
     rows = await pool.fetch(
         "SELECT key, value FROM retrain_state WHERE key = ANY($1::text[])",
-        ["retrain_state.filled_count", "retrain_state.last_retrain_time",
-         "retrain_state.scheduled_due", "retrain_state.schedule_anchor"],
+        keys,
     )
     payload = {row["key"]: row["value"] for row in rows}
     state = RetrainState(
-        filled_count=int(payload.get(_retrain_state_row_key("filled_count"), 0)),
-        last_retrain_time=float(payload.get(_retrain_state_row_key("last_retrain_time"), 0.0)),
+        filled_count=int(payload.get(_retrain_state_row_key("filled_count", symbol), 0)),
+        last_retrain_time=float(
+            payload.get(_retrain_state_row_key("last_retrain_time", symbol), 0.0)
+        ),
         outcomes=[],
         retrain_in_progress=False,
-        scheduled_due=_parse_bool(payload.get(_retrain_state_row_key("scheduled_due"))),
+        scheduled_due=_parse_bool(
+            payload.get(_retrain_state_row_key("scheduled_due", symbol))
+        ),
         schedule_anchor=float(
-            payload.get(_retrain_state_row_key("schedule_anchor"), 0.0) or 0.0
+            payload.get(_retrain_state_row_key("schedule_anchor", symbol), 0.0) or 0.0
         ),
     )
     if state.filled_count == 0 and state.last_retrain_time == 0.0:
         # Bootstrap solo si NUNCA hubo retrain: filled_count = cierres desde el inicio.
         # Si last_retrain_time > 0, filled_count=0 significa "contador reiniciado tras
         # un retrain promovido" (nuevo ciclo) y NO debe recomputarse desde la BD.
-        state.outcomes = await _load_persisted_outcomes()
+        state.outcomes = await _load_persisted_outcomes(symbol)
         state.filled_count = len(state.outcomes)
     return state
 
 
-async def _save_retrain_state(state: RetrainState) -> None:
+async def _save_retrain_state(
+    state: RetrainState, symbol: str = TRAINING_SYMBOL
+) -> None:
     from db.connection import get_pool
 
     pool = get_pool()
     rows = [
-        (_retrain_state_row_key("filled_count"), str(state.filled_count)),
-        (_retrain_state_row_key("last_retrain_time"), str(state.last_retrain_time)),
-        (_retrain_state_row_key("scheduled_due"), json.dumps(bool(state.scheduled_due))),
-        (_retrain_state_row_key("schedule_anchor"), json.dumps(float(state.schedule_anchor))),
+        (_retrain_state_row_key("filled_count", symbol), str(state.filled_count)),
+        (_retrain_state_row_key("last_retrain_time", symbol), str(state.last_retrain_time)),
+        (_retrain_state_row_key("scheduled_due", symbol), json.dumps(bool(state.scheduled_due))),
+        (_retrain_state_row_key("schedule_anchor", symbol), json.dumps(float(state.schedule_anchor))),
     ]
     for key, value in rows:
         await pool.execute(
@@ -147,26 +161,30 @@ async def _save_retrain_state(state: RetrainState) -> None:
         )
 
 
-_state = RetrainState()
-_initialized = False
+# P3-1c: caché de estado POR PAR — cada mundo tiene su RetrainState en memoria.
+_states: dict[str, RetrainState] = {}
 _initialization_lock = asyncio.Lock()
 
 
-async def _ensure_retrain_state() -> RetrainState:
-    global _state, _initialized
+async def _ensure_retrain_state(symbol: str = TRAINING_SYMBOL) -> RetrainState:
     async with _initialization_lock:
-        if not _initialized:
-            _state = await _load_retrain_state()
-            _initialized = True
-    return _state
+        if symbol not in _states:
+            _states[symbol] = await _load_retrain_state(symbol)
+    return _states[symbol]
 
 
-def get_state() -> RetrainState:
-    return _state
+def get_state(symbol: str = TRAINING_SYMBOL) -> RetrainState:
+    return _states.get(symbol) or RetrainState()
 
 
-async def _load_persisted_outcomes() -> list[TradeOutcome]:
-    """Load valid EA outcomes so feedback survives API/container restarts."""
+async def _load_persisted_outcomes(
+    symbol: str = TRAINING_SYMBOL,
+) -> list[TradeOutcome]:
+    """Load valid EA outcomes so feedback survives API/container restarts.
+
+    P3-1c: solo los cierres de ESTE par — el bootstrap del contador de un
+    mundo nunca cuenta trades de otro.
+    """
     from db.connection import get_pool
 
     pool = get_pool()
@@ -175,10 +193,12 @@ async def _load_persisted_outcomes() -> list[TradeOutcome]:
         SELECT symbol, entry_time, exit_time, pnl, pnl_pct, direction,
                sl_hit, tp_hit, exit_reason
         FROM trade_outcomes
-        WHERE entry_time > TIMESTAMPTZ '2000-01-01'
+        WHERE symbol = $1
+          AND entry_time > TIMESTAMPTZ '2000-01-01'
           AND exit_time > entry_time
         ORDER BY exit_time
-        """
+        """,
+        symbol,
     )
     outcomes = []
     for row in rows:
@@ -303,10 +323,10 @@ async def record_trade_filled(
         tp_hit=tp_hit,
         exit_reason=exit_reason,
     )
-    state = await _ensure_retrain_state()
+    state = await _ensure_retrain_state(symbol)
     state.outcomes.append(outcome)
     state.filled_count += 1
-    await _save_retrain_state(state)
+    await _save_retrain_state(state, symbol)
 
     logger.info(
         "[RETRAIN] Trade #%d cerrado: %s %s pnl=%.2f (%s) — %d/%d trades para retrain",
@@ -321,6 +341,17 @@ async def record_trade_filled(
 
     # Trigger retrain si corresponde (requiere aprobación humana)
     if state.filled_count >= RetrainConfig.min_trades_for_retrain:
+        if symbol != TRAINING_SYMBOL:
+            # P3-1c: el umbral es POR PAR, pero solo existe el pipeline de
+            # retrain de TRAINING_SYMBOL (P3-3 añadirá el de cada par). El
+            # contador de este mundo queda visible y sigue acumulando; lo que
+            # NO hace es disparar el entrenamiento de otro.
+            logger.warning(
+                "[RETRAIN] Umbral alcanzado para %s (filled=%d), pero solo existe "
+                "pipeline de retrain de %s — no se dispara (P3-3)",
+                symbol, state.filled_count, TRAINING_SYMBOL,
+            )
+            return
         logger.warning(
             "[RETRAIN] Trigger automático: filled_count=%d >= min_trades=%d — requiere aprobación humana",
             state.filled_count,
@@ -584,7 +615,9 @@ async def _do_retrain(trigger: str = "manual") -> None:
     # P3-2a: snapshot del df exacto que consume train+gate → reproducibilidad.
     snap = data_snapshot.save_snapshot(df, purpose="retrain")
     data_snapshot.prune_snapshots()
-    exp_id = await experiment_tracker.start_experiment(trigger, snap.path, snap.sha256)
+    exp_id = await experiment_tracker.start_experiment(
+        trigger, snap.path, snap.sha256, symbol=TRAINING_SYMBOL
+    )
 
     try:
         await _do_retrain_core(df, exp_id)
@@ -774,6 +807,7 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int) -> None:
         manifest,
         {"ok": decision.ok, "reason": decision.reason,
          "checks": decision.details.get("checks")},
+        symbol=TRAINING_SYMBOL,
     )
     # P3-1b: hot-reload vía ModelStorePort — el servicio ya no importa del
     # router (el adapter resuelve `routers.ai` en el momento de la llamada,
@@ -798,7 +832,7 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int) -> None:
     await _save_retrain_state(state)
 
     # 6. Backup a GCS
-    backup_url = await upload_model(MODEL_PATH)
+    backup_url = await upload_model(symbol=TRAINING_SYMBOL)
     logger.warning(
         "[RETRAIN] ===== RETRAIN COMPLETADO ===== model=%s backup=%s sum_reward=%.3f gate=%s",
         MODEL_PATH,

@@ -163,16 +163,20 @@ def assert_obs_shape(manifest: dict, obs_shape) -> None:
         )
 
 
-async def record_promotion(manifest: dict, gate: dict) -> None:
+async def record_promotion(manifest: dict, gate: dict, *, symbol: str) -> None:
     """P1-2: registra la promoción en la tabla model_registry (historial vivo).
+
+    `symbol` es OBLIGOTORIO (P3-1c): cada promoción declara el mundo al que
+    pertenece — la unicidad de activo es POR PAR (`idx_model_registry_one_active_per_symbol`),
+    así que el UPDATE solo desactiva la fila activa de ESE par.
 
     Desactiva la fila activa anterior e inserta la nueva dentro de UNA
     transacción sobre la MISMA conexión, con orden garantizado (UPDATE →
-    INSERT): o queda exactamente un bundle activo o la operación entera
-    falla — sin ventana con 0 o 2 activos.
+    INSERT): o queda exactamente un bundle activo para ese par o la operación
+    entera falla — sin ventana con 0 o 2 activos del mismo par.
 
     Nota P2-2: la versión con CTE (`WITH deactivated AS (UPDATE …) INSERT …`)
-    falló en vivo el 2026-09-28 con `idx_model_registry_one_active`. Las
+    falló en vivo el 2026-09-28 con el índice de unicidad. Las
     sub-sentencias de un CTE de PostgreSQL no ven sus mutuos efectos y su
     orden es indefinido: el INSERT comprobó la unicidad antes de que el
     UPDATE se aplicara. Con la tabla vacía (primera promoción) no se
@@ -184,14 +188,16 @@ async def record_promotion(manifest: dict, gate: dict) -> None:
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute(
-                "UPDATE model_registry SET is_active = FALSE WHERE is_active"
+                "UPDATE model_registry SET is_active = FALSE WHERE is_active AND symbol = $1",
+                symbol,
             )
             await conn.execute(
                 """
                 INSERT INTO model_registry
-                    (model_sha256, vec_norm_sha256, source, obs_shape, extra, gate_reason, is_active)
-                VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, TRUE)
+                    (symbol, model_sha256, vec_norm_sha256, source, obs_shape, extra, gate_reason, is_active)
+                VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, TRUE)
                 """,
+                symbol,
                 manifest["model_sha256"],
                 manifest.get("vec_norm_sha256"),
                 manifest["source"],
@@ -204,6 +210,6 @@ async def record_promotion(manifest: dict, gate: dict) -> None:
                 gate.get("reason"),
             )
     logger.info(
-        "[MODEL-REGISTRY] Promoción registrada: sha=%s… reason=%s",
-        manifest["model_sha256"][:12], gate.get("reason"),
+        "[MODEL-REGISTRY] Promoción registrada: symbol=%s sha=%s… reason=%s",
+        symbol, manifest["model_sha256"][:12], gate.get("reason"),
     )

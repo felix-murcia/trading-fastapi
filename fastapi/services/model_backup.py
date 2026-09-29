@@ -23,6 +23,7 @@ import shutil
 from datetime import datetime, timezone
 
 from config import settings
+from core.pair import LEGACY_SYMBOL, default_model_path as _core_model_path
 from services.alerting import AlertLevel, send_alert
 from services.model_registry import load_manifest, manifest_path_for, sha256_of
 
@@ -34,13 +35,21 @@ LOCAL_KEEP = 10        # retención local: últimos N bundles distintos (por mti
 GCS_BACKUP_DELAY_S = 60  # primera pasada programada: arranque tranquilo
 
 
-def default_model_path() -> str:
-    """Ruta del bundle activo: PPO_OUTPUT_DIR/ppo_trading_bot_v3.zip (v3, no v2)."""
-    return os.path.join(os.getenv("PPO_OUTPUT_DIR", "/app/ml"), "ppo_trading_bot_v3.zip")
+def default_model_path(symbol: str = LEGACY_SYMBOL) -> str:
+    """Ruta del bundle activo — delega en core.pair (convención ÚNICA, P3-1c)."""
+    return _core_model_path(symbol)
 
 
-def backups_dir() -> str:
-    return os.path.join(os.getenv("PPO_OUTPUT_DIR", "/app/ml"), "backups")
+def backups_dir(symbol: str = LEGACY_SYMBOL) -> str:
+    """Namespace de backups por par (P3-1c).
+
+    EURUSD conserva la raíz legada `ml/backups/`; cada otro par vive en
+    `ml/backups/<SYMBOL>/` — restaurar un mundo nunca ve los bundles de otro.
+    """
+    base = os.path.join(os.getenv("PPO_OUTPUT_DIR", "/app/ml"), "backups")
+    if symbol == LEGACY_SYMBOL:
+        return base
+    return os.path.join(base, symbol)
 
 
 def _get_gcs_client():
@@ -78,14 +87,20 @@ def _bundle_files(model_path: str) -> dict[str, str]:
     return files
 
 
-def _prune_local(keep: int = LOCAL_KEEP) -> list[str]:
-    """Conserva los `keep` backups locales más recientes (mtime). Devuelve borrados."""
-    base = backups_dir()
+def _prune_local(symbol: str = LEGACY_SYMBOL, keep: int = LOCAL_KEEP) -> list[str]:
+    """Conserva los `keep` backups locales más recientes (mtime). Devuelve borrados.
+
+    P3-1c: solo purga directorios con `backup.json` (un backup real). Los
+    namespaces de otros pares que conviven en la raíz legada carecen de ese
+    marcador a su nivel — purgarlos nunca es correcto.
+    """
+    base = backups_dir(symbol)
     if not os.path.isdir(base):
         return []
     dirs = [
         os.path.join(base, n) for n in os.listdir(base)
         if os.path.isdir(os.path.join(base, n))
+        and os.path.isfile(os.path.join(base, n, "backup.json"))
     ]
     dirs.sort(key=os.path.getmtime, reverse=True)
     removed = []
@@ -98,12 +113,12 @@ def _prune_local(keep: int = LOCAL_KEEP) -> list[str]:
     return removed
 
 
-def _local_backup(files: dict[str, str], model_sha256: str) -> dict:
-    """Copia el bundle a backups/<sha12>/ y VERIFICA cada copia por sha256.
+def _local_backup(files: dict[str, str], model_sha256: str, symbol: str) -> dict:
+    """Copia el bundle a <backups_dir(symbol)>/<sha12>/ y VERIFICA por sha256.
 
     sha-keyed: respaldar el mismo modelo dos veces es idempotente.
     """
-    dest = os.path.join(backups_dir(), model_sha256[:12])
+    dest = os.path.join(backups_dir(symbol), model_sha256[:12])
     fresh = not os.path.isdir(dest)
     os.makedirs(dest, exist_ok=True)
     for name, src in files.items():
@@ -115,23 +130,26 @@ def _local_backup(files: dict[str, str], model_sha256: str) -> dict:
         os.replace(tmp, os.path.join(dest, name))
     meta = {
         "model_sha256": model_sha256,
+        "symbol": symbol,
         "files": {n: {"sha256": sha256_of(p), "size": os.path.getsize(p)}
                   for n, p in files.items()},
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     with open(os.path.join(dest, "backup.json"), "w") as f:
         json.dump(meta, f, indent=2)
-    _prune_local()
+    _prune_local(symbol)
     return {"path": dest, "fresh": fresh, "verified": True}
 
 
-async def _gcs_backup(files: dict[str, str], model_sha256: str) -> dict:
-    """Sube el bundle a gs://<bucket>/ppo_models/<sha12>/ y verifica size+md5.
+async def _gcs_backup(files: dict[str, str], model_sha256: str, symbol: str) -> dict:
+    """Sube el bundle a gs://<bucket>/ppo_models/<SYMBOL>/<sha12>/ y verifica size+md5.
 
-    Cualquier fallo (sin ADC, sin paquete, red, mismatch) vuelve como
-    `{"error": ...}`: el caller lo alerta — nunca en silencio.
+    P3-1c: el prefix incluye el par — el restore de un mundo nunca descubre
+    (ni restaura) el bundle de otro. Cualquier fallo (sin ADC, sin paquete,
+    red, mismatch) vuelve como `{"error": ...}`: el caller lo alerta — nunca
+    en silencio.
     """
-    prefix = f"{GCS_PREFIX}/{model_sha256[:12]}"
+    prefix = f"{GCS_PREFIX}/{symbol}/{model_sha256[:12]}"
     try:
         client = _get_gcs_client()
         bucket = client.bucket(MODEL_BUCKET)
@@ -154,8 +172,13 @@ async def _gcs_backup(files: dict[str, str], model_sha256: str) -> dict:
         return {"error": f"{type(exc).__name__}: {exc}"}
 
 
-async def backup_model(model_path: str | None = None) -> dict:
+async def backup_model(
+    model_path: str | None = None, *, symbol: str = LEGACY_SYMBOL
+) -> dict:
     """Backup del bundle: local verificado (siempre) + GCS (si habilitado).
+
+    `symbol` declara el mundo (P3-1c): de él derivan la ruta del bundle
+    (si no se pasa explícita) y el namespace de almacenamiento local y GCS.
 
     Returns dict con `status`:
     - `success`               local + GCS verificados
@@ -163,7 +186,7 @@ async def backup_model(model_path: str | None = None) -> dict:
     - `skipped`               no hay modelo local
     - `error`                 incoherente o fallo local (alertado)
     """
-    model_path = model_path or default_model_path()
+    model_path = model_path or default_model_path(symbol)
     if not os.path.exists(model_path):
         return {"status": "skipped", "reason": "no local model", "model_path": model_path}
 
@@ -176,10 +199,10 @@ async def backup_model(model_path: str | None = None) -> dict:
         return {"status": "error", "error": str(exc), "model_path": model_path}
 
     model_sha = sha256_of(model_path)
-    result: dict = {"model_path": model_path, "model_sha256": model_sha}
+    result: dict = {"symbol": symbol, "model_path": model_path, "model_sha256": model_sha}
 
     try:
-        result["local"] = _local_backup(files, model_sha)
+        result["local"] = _local_backup(files, model_sha, symbol)
     except Exception as exc:
         msg = f"Backup local falló: {type(exc).__name__}: {exc}"
         logger.error("[MODEL-BACKUP] %s", msg)
@@ -191,37 +214,40 @@ async def backup_model(model_path: str | None = None) -> dict:
     if not settings.model_backup_enabled:
         result["status"] = "local_success_gcs_disabled"
     else:
-        gcs = await _gcs_backup(files, model_sha)
+        gcs = await _gcs_backup(files, model_sha, symbol)
         result["gcs"] = gcs
         if gcs.get("error"):
             send_alert(
                 AlertLevel.ERROR, "model_backup",
                 f"Backup GCS falló ({gcs['error']}) — local verificado OK",
-                context={"bucket": MODEL_BUCKET, "model_sha256": model_sha[:12]},
+                context={"bucket": MODEL_BUCKET, "model_sha256": model_sha[:12],
+                         "symbol": symbol},
             )
             result["status"] = "local_ok_gcs_failed"
         else:
             result["status"] = "success"
 
     logger.warning(
-        "[MODEL-BACKUP] %s sha=%s local=%s",
-        result["status"], model_sha[:12], result["local"]["path"],
+        "[MODEL-BACKUP] %s symbol=%s sha=%s local=%s",
+        result["status"], symbol, model_sha[:12], result["local"]["path"],
     )
     return result
 
 
-async def restore_latest_model() -> dict:
-    """Restaura el BUNDLE más reciente (local verificado primero; si no, GCS).
+async def restore_latest_model(symbol: str = LEGACY_SYMBOL) -> dict:
+    """Restaura el BUNDLE más reciente de ESTE par (local verificado primero; si no, GCS).
 
-    Verificación por sha256/md5 ANTES de tocar el destino: nunca restaura
-    bytes corruptos. Si ya existe modelo activo, no hace nada.
+    P3-1c: el alcance es el namespace del par — jamás restaura bytes de otro
+    mundo sobre este bundle. Verificación por sha256/md5 ANTES de tocar el
+    destino: nunca restaura bytes corruptos. Si ya existe modelo activo, no
+    hace nada.
     """
-    dest_model = default_model_path()
+    dest_model = default_model_path(symbol)
     if os.path.exists(dest_model):
         return {"status": "skipped", "reason": "local model already exists"}
 
-    # ── Local: backups/<sha12>/ más reciente por mtime ─────────────────────
-    base = backups_dir()
+    # ── Local: <backups_dir(symbol)>/<sha12>/ más reciente por mtime ───────
+    base = backups_dir(symbol)
     candidates = [
         os.path.join(base, n) for n in (os.listdir(base) if os.path.isdir(base) else [])
         if os.path.isdir(os.path.join(base, n))
@@ -259,11 +285,11 @@ async def restore_latest_model() -> dict:
         return {"status": "restored", "source": d, "files": restored,
                 "model_sha256": meta.get("model_sha256")}
 
-    # ── GCS: mejor esfuerzo (bucket con sha12 más reciente por updated) ────
+    # ── GCS: mejor esfuerzo — solo el namespace de ESTE par ───────────────
     try:
         client = _get_gcs_client()
         bucket = client.bucket(MODEL_BUCKET)
-        blobs = list(bucket.list_blobs(prefix=f"{GCS_PREFIX}/"))
+        blobs = list(bucket.list_blobs(prefix=f"{GCS_PREFIX}/{symbol}/"))
         if not blobs:
             return {"status": "error", "reason": "no backups found (ni local ni GCS)"}
         blobs.sort(key=lambda b: b.updated, reverse=True)
@@ -289,16 +315,39 @@ async def restore_latest_model() -> dict:
         return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
 
 
-async def run_scheduled_backup() -> dict:
-    """Una pasada del backup programado. El fallo se alerta; el loop sobrevive."""
+async def run_scheduled_backup() -> list[dict]:
+    """Una pasada del backup programado de CADA par habilitado (P3-1c).
+
+    Un fallo en un par se alerta y no impide respaldar a los demás; el loop
+    sobrevive. Devuelve un resultado por par.
+    """
+    from core.container import build_registry_from_settings
+
     try:
-        return await backup_model(default_model_path())
+        enabled = build_registry_from_settings().enabled()
     except Exception as exc:
         send_alert(
             AlertLevel.ERROR, "model_backup",
-            f"Backup programado falló: {type(exc).__name__}: {exc}", exc=exc,
+            f"Backup programado: registry inaccesible — {type(exc).__name__}: {exc}", exc=exc,
         )
-        return {"status": "error", "error": str(exc)}
+        return [{"status": "error", "error": str(exc)}]
+
+    if not enabled:
+        logger.error("[MODEL-BACKUP] Sin pares habilitados: nada que respaldar")
+        return []
+
+    results: list[dict] = []
+    for ctx in enabled:
+        symbol = ctx.config.symbol
+        try:
+            results.append(await backup_model(symbol=symbol))
+        except Exception as exc:
+            send_alert(
+                AlertLevel.ERROR, "model_backup",
+                f"Backup programado de {symbol} falló: {type(exc).__name__}: {exc}", exc=exc,
+            )
+            results.append({"symbol": symbol, "status": "error", "error": str(exc)})
+    return results
 
 
 async def _model_backup_loop() -> None:
@@ -306,9 +355,12 @@ async def _model_backup_loop() -> None:
     interval = max(1, settings.model_backup_interval_hours) * 3600
     await asyncio.sleep(GCS_BACKUP_DELAY_S)
     while True:
-        result = await run_scheduled_backup()
+        results = await run_scheduled_backup()
+        statuses = ", ".join(
+            f"{r.get('symbol', '?')}={r.get('status')}" for r in results
+        ) or "sin resultados"
         logger.warning(
             "[MODEL-BACKUP] programado → %s (próximo en %dh)",
-            result.get("status"), settings.model_backup_interval_hours,
+            statuses, settings.model_backup_interval_hours,
         )
         await asyncio.sleep(interval)

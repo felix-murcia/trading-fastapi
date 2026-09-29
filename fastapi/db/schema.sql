@@ -90,6 +90,8 @@ CREATE INDEX IF NOT EXISTS idx_trade_outcomes_exit_time ON trade_outcomes(exit_t
 -- P1-2: historial de bundles promovidos — qué modelo corre, por qué, cuándo
 CREATE TABLE IF NOT EXISTS model_registry (
     id              BIGSERIAL PRIMARY KEY,
+    -- P3-1c: mundo al que pertenece el bundle (cada par certifica el suyo)
+    symbol          TEXT        NOT NULL DEFAULT 'EURUSD',
     model_sha256    TEXT        NOT NULL,
     vec_norm_sha256 TEXT,
     source          TEXT        NOT NULL,
@@ -100,9 +102,13 @@ CREATE TABLE IF NOT EXISTS model_registry (
     is_active       BOOLEAN     NOT NULL DEFAULT TRUE
 );
 
--- Un único bundle activo a la vez (rollback informado)
-CREATE UNIQUE INDEX IF NOT EXISTS idx_model_registry_one_active
-    ON model_registry(is_active)
+-- Índice global previo a P3-1c: un único activo ENTRE todos los pares.
+-- Se elimina a favor del índice por par (los mundos son independientes).
+DROP INDEX IF EXISTS idx_model_registry_one_active;
+
+-- Un único bundle activo POR PAR (P3-1c): la unicidad es por mundo.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_model_registry_one_active_per_symbol
+    ON model_registry(symbol)
     WHERE is_active;
 
 CREATE INDEX IF NOT EXISTS idx_model_registry_promoted_at
@@ -113,6 +119,8 @@ CREATE INDEX IF NOT EXISTS idx_model_registry_promoted_at
 -- Antes solo existían eventos sueltos en audit_log sin fila por corrida.
 CREATE TABLE IF NOT EXISTS training_experiments (
     id               BIGSERIAL PRIMARY KEY,
+    -- P3-1c: mundo entrenado por este experimento
+    symbol           TEXT NOT NULL DEFAULT 'EURUSD',
     triggered_by     TEXT NOT NULL CHECK (triggered_by IN ('manual', 'forced', 'approved', 'trade_count', 'scheduled')),
     status           TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'promoted', 'rejected', 'failed')),
     snapshot_path    TEXT,
@@ -127,3 +135,14 @@ CREATE TABLE IF NOT EXISTS training_experiments (
 
 CREATE INDEX IF NOT EXISTS idx_training_experiments_started
     ON training_experiments(started_at DESC);
+
+-- P3-1c: máquina de estado del retrain, como clave-valor. Cada par tiene SU
+-- namespace de claves: `retrain_state.<SYMBOL>.<campo>` (filled_count,
+-- last_retrain_time, scheduled_due, schedule_anchor) — los contadores de un
+-- par nunca alimentan el disparo de otro.
+CREATE TABLE IF NOT EXISTS retrain_state (
+    id         SERIAL PRIMARY KEY,
+    key        TEXT        NOT NULL UNIQUE,
+    value      JSONB       NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

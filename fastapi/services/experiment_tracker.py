@@ -21,11 +21,14 @@ async def start_experiment(
     triggered_by: str,
     snapshot_path: str | None = None,
     snapshot_sha256: str | None = None,
+    *,
+    symbol: str,
 ) -> int:
     """Abre la fila del experimento (status='running') y devuelve su id.
 
-    Falla ruidosamente (propaga) si la inserción no es posible: sin registro
-    no hay experimento auditable, y el retrain no debe avanzar a ciegas.
+    `symbol` es OBLIGATORIO (P3-1c): el experimento pertenece al mundo que
+    entrena. Falla ruidosamente (propaga) si la inserción no es posible: sin
+    registro no hay experimento auditable, y el retrain no debe avanzar a ciegas.
     """
     if triggered_by not in TRIGGERED_BY:
         raise ValueError(
@@ -37,15 +40,15 @@ async def start_experiment(
     pool = get_pool()
     exp_id = await pool.fetchval(
         """
-        INSERT INTO training_experiments(triggered_by, status, snapshot_path, snapshot_sha256)
-        VALUES($1, 'running', $2, $3)
+        INSERT INTO training_experiments(triggered_by, symbol, status, snapshot_path, snapshot_sha256)
+        VALUES($1, $2, 'running', $3, $4)
         RETURNING id
         """,
-        triggered_by, snapshot_path, snapshot_sha256,
+        triggered_by, symbol, snapshot_path, snapshot_sha256,
     )
     logger.warning(
-        "[EXPERIMENT] #%s iniciado (trigger=%s snapshot=%s)",
-        exp_id, triggered_by, snapshot_path or "-",
+        "[EXPERIMENT] #%s iniciado (symbol=%s trigger=%s snapshot=%s)",
+        exp_id, symbol, triggered_by, snapshot_path or "-",
     )
     return int(exp_id)
 

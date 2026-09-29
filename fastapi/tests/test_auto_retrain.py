@@ -101,7 +101,8 @@ class TestGetState:
 @pytest.mark.asyncio
 async def test_load_persisted_outcomes_excludes_invalid_entry_times(monkeypatch):
     class FakePool:
-        async def fetch(self, query):
+        async def fetch(self, query, params=None):
+            assert params == "EURUSD"   # P3-1c: bootstrap cuenta SOLO este par
             return [
                 {
                     "symbol": "EURUSD",
@@ -269,8 +270,8 @@ class TestRetrainStateBootstrap:
         class FakePool:
             async def fetch(self, query, params):
                 return [
-                    {"key": "retrain_state.filled_count", "value": "0"},
-                    {"key": "retrain_state.last_retrain_time", "value": "1725450000"},
+                    {"key": "retrain_state.EURUSD.filled_count", "value": "0"},
+                    {"key": "retrain_state.EURUSD.last_retrain_time", "value": "1725450000"},
                 ]
 
         monkeypatch.setattr("db.connection.get_pool", lambda: FakePool())
@@ -288,7 +289,7 @@ class TestRetrainStateBootstrap:
 
         class FakePool:
             async def fetch(self, query, params):
-                return [{"key": "retrain_state.filled_count", "value": "0"}]
+                return [{"key": "retrain_state.EURUSD.filled_count", "value": "0"}]
 
         monkeypatch.setattr("db.connection.get_pool", lambda: FakePool())
         monkeypatch.setattr(

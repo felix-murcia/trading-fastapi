@@ -20,6 +20,10 @@ from core.ports import ExecutionPort, LLMPort, MarketDataPort
 
 _LEGACY_MODEL_FILENAME = "ppo_trading_bot_v3.zip"
 
+# Único mundo que existía antes de P3-1: conserva las rutas legadas en raíz
+# (bundle y backups en la raíz de ml/). Los demás viven en su namespace.
+LEGACY_SYMBOL = "EURUSD"
+
 
 def default_model_path(symbol: str) -> str:
     """Bundle propio por par (decisión P3-1: modelo por par).
@@ -29,7 +33,7 @@ def default_model_path(symbol: str) -> str:
     núcleo y router nunca divergen.
     """
     model_dir = os.getenv("PPO_OUTPUT_DIR", "/app/ml")
-    if symbol == "EURUSD":
+    if symbol == LEGACY_SYMBOL:
         return os.path.join(model_dir, _LEGACY_MODEL_FILENAME)
     return os.path.join(model_dir, symbol, _LEGACY_MODEL_FILENAME)
 

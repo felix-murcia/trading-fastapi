@@ -161,20 +161,21 @@ class TestStatePersistence:
         await ar._save_retrain_state(state)
 
         keys = dict(written)
-        assert "retrain_state.scheduled_due" in keys
-        assert "retrain_state.schedule_anchor" in keys
-        assert json.loads(keys["retrain_state.scheduled_due"]) is True
-        assert json.loads(keys["retrain_state.schedule_anchor"]) == 1725450000.5
+        # P3-1c: las claves viven en el namespace del par (EURUSD, legado)
+        assert "retrain_state.EURUSD.scheduled_due" in keys
+        assert "retrain_state.EURUSD.schedule_anchor" in keys
+        assert json.loads(keys["retrain_state.EURUSD.scheduled_due"]) is True
+        assert json.loads(keys["retrain_state.EURUSD.schedule_anchor"]) == 1725450000.5
 
     @pytest.mark.asyncio
     async def test_load_parses_schedule_keys(self, monkeypatch):
         class FakePool:
             async def fetch(self, query, params):
                 return [
-                    {"key": "retrain_state.filled_count", "value": 3},
-                    {"key": "retrain_state.last_retrain_time", "value": 0},
-                    {"key": "retrain_state.scheduled_due", "value": True},
-                    {"key": "retrain_state.schedule_anchor", "value": 1725450000},
+                    {"key": "retrain_state.EURUSD.filled_count", "value": 3},
+                    {"key": "retrain_state.EURUSD.last_retrain_time", "value": 0},
+                    {"key": "retrain_state.EURUSD.scheduled_due", "value": True},
+                    {"key": "retrain_state.EURUSD.schedule_anchor", "value": 1725450000},
                 ]
 
         monkeypatch.setattr("db.connection.get_pool", lambda: FakePool())
