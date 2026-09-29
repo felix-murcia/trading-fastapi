@@ -193,13 +193,17 @@ class TestModelStoreAdapter:
 
 
 class TestRegistryBinding:
-    def test_get_registry_builds_enabled_eurUSD_world(self, monkeypatch):
+    def test_get_registry_builds_only_enabled_worlds(self, monkeypatch):
         from routers import ai
         monkeypatch.setattr(ai, "_REGISTRY", None)
         registry = ai._get_registry()
         assert registry.get("EURUSD") is not None
         assert registry.get("EURUSD").config.enabled is True
-        assert registry.get("GBPUSD") is None
+        # P3-3: GBPUSD está LISTADO (canario, enabled=false) — listar un par
+        # nunca lo activa: el mundo existe, pero apagado.
+        gbp = registry.get("GBPUSD")
+        assert gbp is not None
+        assert gbp.config.enabled is False
 
 
 def _manifest():

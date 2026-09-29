@@ -27,7 +27,7 @@ from datetime import date, datetime, timezone
 from typing import Optional
 
 from config import settings
-from core.pair import LEGACY_SYMBOL
+from core.pair import LEGACY_SYMBOL, PairConfig
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +138,17 @@ class RiskGuardian:
             )
             if dd_pct >= 10.0:  # 10% drawdown
                 self._alert("DRAWDOWN", current_equity, dd_pct)
+            # P3-3: bloqueo por DD de cuenta CONFIG-DRIVEN (canario = 15%).
+            # None (default) = comportamiento previo: solo alerta a 10%,
+            # nunca bloquea. El DD es de la cuenta (un equity) → el bloqueo
+            # afecta a todos los pares: es la MISMA dinero.
+            block_pct = settings.max_drawdown_block_pct
+            if block_pct is not None and dd_pct >= block_pct:
+                logger.error(
+                    "[RISK-GUARDIAN] 🚨 MAX-DD BLOCK — equity=%.2f, dd=%.1f%% >= %.1f%%",
+                    current_equity, dd_pct, block_pct,
+                )
+                return f"MAX DRAWDOWN {dd_pct:.1f}% >= {block_pct:.1f}% — blocking new orders"
 
         return None
 
@@ -200,6 +211,19 @@ _GUARDIANS: dict[str, RiskGuardian] = {}
 _ACCOUNT = AccountRiskState()  # baseline de la cuenta: UNO, compartido
 
 
+def _daily_loss_pct_for(symbol: str) -> float:
+    """Límite de pérdida diaria configurado para `symbol` en PAIRS (P3-3).
+
+    El canario GBPUSD lo fija a 2 (spec de config); símbolo sin entrada →
+    5.0 (mismo default que RiskState). La validación del spec es de
+    PairConfig.from_spec — una sola fuente de reglas, cero duplicación.
+    """
+    for spec in settings.pairs:
+        if isinstance(spec, dict) and spec.get("symbol") == symbol:
+            return PairConfig.from_spec(spec).daily_loss_pct
+    return 5.0
+
+
 def get_account_state() -> AccountRiskState:
     """La cuenta es una: la fuente de verdad que persiste risk_state_store."""
     return _ACCOUNT
@@ -223,9 +247,16 @@ def get_risk_guardian(symbol: str = LEGACY_SYMBOL) -> RiskGuardian:
     """
     guardian = _GUARDIANS.get(symbol)
     if guardian is None:
-        guardian = RiskGuardian(account=_ACCOUNT)
+        # P3-3: el límite diario sale del spec del par en PAIRS (canario=2%).
+        guardian = RiskGuardian(
+            daily_loss_pct=_daily_loss_pct_for(symbol),
+            account=_ACCOUNT,
+        )
         _GUARDIANS[symbol] = guardian
-        logger.warning("[RISK-GUARDIAN] Guardián creado para %s", symbol)
+        logger.warning(
+            "[RISK-GUARDIAN] Guardián creado para %s (daily_loss=%.1f%%)",
+            symbol, guardian.state.daily_loss_limit_pct,
+        )
     return guardian
 
 

@@ -385,7 +385,9 @@ class TestDoRetrainPromotion:
         from services import auto_retrain as ar
 
         path = model_path or str(tmp_path / "ppo_trading_bot_v3.zip")
-        monkeypatch.setattr(ar, "MODEL_PATH", path)
+        # P3-3: la ruta se calcula por símbolo — se parchea la resolución
+        # (default_model_path), no un global que el pipeline ya no lee.
+        monkeypatch.setattr(ar, "default_model_path", lambda _sym: path)
         monkeypatch.setattr(ar, "_fetch_historical_candles",
                             AsyncMock(return_value=_candles(candles)))
         monkeypatch.setattr(ar, "_load_persisted_outcomes", AsyncMock(return_value=[]))
@@ -428,9 +430,13 @@ class TestDoRetrainPromotion:
 
     @staticmethod
     def _fake_metrics(*a, **k):
-        """Métricas deterministas con curvas (Sharpe finito, reward > 0)."""
+        """Métricas deterministas con curvas (Sharpe finito, reward > 0).
+
+        openings=50×4 pliegues = 200 aperturas: el gate canario (P3-3) exige
+        ≥200 cuando no hay baseline — 3 por pliego quedaría corto.
+        """
         return {
-            "openings": 3, "trades": 2, "wins": 1, "losses": 1,
+            "openings": 50, "trades": 2, "wins": 1, "losses": 1,
             "win_rate": 0.5, "reward": 1.5, "balance": 1002.0,
             "equity_curve": [1000.0, 1005.0, 998.0, 1010.0],
             "step_rewards": [1.0, -0.5, 1.0],
@@ -443,7 +449,8 @@ class TestDoRetrainPromotion:
         ar, state, model_path, record_promo, reload_mock = self._patch_common(
             monkeypatch, tmp_path
         )
-        # Sin baseline (primer modelo): gate exige solo validez (P1-1).
+        # Sin baseline (primer modelo del par): gate canario (P3-3) —
+        # ≥200 aperturas agregadas + sharpe≥1 en ≥4 pliegues.
         monkeypatch.setattr(ar, "_evaluate_model", self._fake_metrics)
 
         await ar._do_retrain()
@@ -478,6 +485,31 @@ class TestDoRetrainPromotion:
         # siguiente retrain (antes: filled_count nunca se reseteaba → storm).
         assert state.filled_count == 0
         assert state.last_retrain_time > 1.0
+
+    @pytest.mark.asyncio
+    async def test_promotion_targets_requested_symbol(self, tmp_path, monkeypatch):
+        """P3-3: la corrida de GBPUSD entrena con SU lookback, escribe el
+        bundle donde dice la convención de rutas, registra la promoción en
+        SU mundo y recarga SU caché de inferencia."""
+        ar, state, model_path, record_promo, reload_mock = self._patch_common(
+            monkeypatch, tmp_path
+        )
+        monkeypatch.setattr(ar, "_evaluate_model", self._fake_metrics)
+
+        await ar._do_retrain(symbol="GBPUSD")
+
+        # Fetch por símbolo con el lookback del canario (30000 H1)
+        assert ar._fetch_historical_candles.await_args.kwargs == {
+            "symbol": "GBPUSD", "count": 30000,
+        }
+        # Experimento, promoción, recarga y auditoría: todos en SU mundo
+        assert ar.experiment_tracker.start_experiment.await_args.kwargs["symbol"] == "GBPUSD"
+        assert record_promo.await_args.kwargs["symbol"] == "GBPUSD"
+        reload_mock.assert_called_once_with("GBPUSD")
+        assert ar._log_retrain_event.await_args.kwargs["symbol"] == "GBPUSD"
+        # El bundle se escribe en la ruta resuelta para el símbolo (tmp aquí)
+        assert os.path.exists(model_path)
+        assert state.filled_count == 0          # SU contador es el que se resetea
         assert state.outcomes == []
 
     @pytest.mark.asyncio

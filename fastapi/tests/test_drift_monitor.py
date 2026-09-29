@@ -291,3 +291,18 @@ def test_loop_wired_in_lifespan():
     with open(os.path.join(os.path.dirname(dm.__file__), "..", "main.py")) as f:
         src = f.read()
     assert "_bg_tasks.add(asyncio.create_task(_drift_monitor_loop()))" in src
+
+
+def test_baseline_is_per_symbol(tmp_path, monkeypatch):
+    """P3-3: baseline por par — la promoción de GBPUSD jamás pisa el de EURUSD."""
+    monkeypatch.setenv("PPO_OUTPUT_DIR", str(tmp_path))
+    df = _engineered()
+
+    eu = dm.save_baseline(df, symbol="EURUSD")
+    gb = dm.save_baseline(df, symbol="GBPUSD")
+
+    assert eu["path"] != gb["path"]
+    assert os.path.dirname(eu["path"]) == str(tmp_path)             # legado en raíz
+    assert os.path.dirname(gb["path"]) == str(tmp_path / "GBPUSD")  # namespace propio
+    assert dm.load_baseline("EURUSD") is not None
+    assert dm.load_baseline("GBPUSD") is not None

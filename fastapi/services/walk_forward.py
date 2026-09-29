@@ -304,8 +304,22 @@ def evaluate_walk_forward(
     )
 
 
+# P3-3: umbrales ABSOLUTOS del primer modelo de un par (sin baseline que
+# comparar). Antes "first_model_validated" solo exigía aperturas del
+# caller (min_openings=1) y métricas finitas: un primer modelo casi vacío
+# pasaba. El canario exige masa estadística real + calidad por pliego.
+CANARY_MIN_OPENINGS = 200        # aperturas agregadas en los pliegues OOS
+CANARY_SHARPE_MIN = 1.0          # sharpe mínimo por pliego
+CANARY_MIN_FOLDS = 4             # pliegues que deben superar CANARY_SHARPE_MIN
+
+
 def gate_walk_forward(report: WalkForwardReport, min_openings: int) -> GateDecision:
-    """Gate multi-métrico sin solape: todas las reglas estrictas (empate = fallo)."""
+    """Gate multi-métrico sin solape: todas las reglas estrictas (empate = fallo).
+
+    Con baseline (modelo activo existente): comparativo estricto — sin
+    cambios. Sin baseline (primer modelo del par): umbrales canario
+    absolutos (P3-3) — la vía que valida GBPUSD u otros pares nuevos.
+    """
     cand = report.candidate
     details = {
         "candidate": cand,
@@ -322,6 +336,25 @@ def gate_walk_forward(report: WalkForwardReport, min_openings: int) -> GateDecis
         return GateDecision(False, "non_finite_metrics", details)
 
     if report.baseline is None:
+        if cand["total_openings"] < CANARY_MIN_OPENINGS:
+            details["canary"] = {"min_openings": CANARY_MIN_OPENINGS}
+            return GateDecision(False, "canary_insufficient_openings", details)
+        fold_sharpes = [f["candidate"]["sharpe"] for f in report.folds]
+        # max(1, …): un informe sin pliegues no puede validarse (0 < 1 → rechazo).
+        needed = max(1, min(CANARY_MIN_FOLDS, len(fold_sharpes)))
+        strong = sum(
+            1 for s in fold_sharpes
+            if np.isfinite(s) and s >= CANARY_SHARPE_MIN
+        )
+        details["canary"] = {
+            "min_openings": CANARY_MIN_OPENINGS,
+            "sharpe_min": CANARY_SHARPE_MIN,
+            "folds_strong": strong,
+            "folds_needed": needed,
+            "fold_sharpes": fold_sharpes,
+        }
+        if strong < needed:
+            return GateDecision(False, "canary_sharpe_below", details)
         return GateDecision(True, "first_model_validated", details)
 
     base = report.baseline

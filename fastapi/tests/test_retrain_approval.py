@@ -71,6 +71,21 @@ class TestApproveEndpoint:
         audit.assert_awaited_once()
         assert audit.await_args.args[0] == "retrain_approved"
 
+    def test_wires_symbol_query_param(self):
+        # P3-3: el símbolo del query viaja al servicio (mundo explícito)
+        result = {"status": "approved", "filled_count": 5}
+        stack, client = _client()
+        with stack, \
+                patch("routers.ai._approve_retrain", AsyncMock(return_value=result)) as svc, \
+                patch("routers.ai.log_to_audit", AsyncMock()) as audit, \
+                client:
+            response = client.post(
+                "/api/v1/ai/retrain/approve?symbol=GBPUSD", headers=TOKEN
+            )
+        assert response.status_code == 200
+        svc.assert_awaited_once_with(symbol="GBPUSD")
+        assert audit.await_args.args[1]["symbol"] == "GBPUSD"
+
 
 class TestApproveRetrainService:
     @pytest.mark.asyncio
@@ -95,7 +110,7 @@ class TestApproveRetrainService:
         result = await approve_retrain()
 
         assert result["status"] == "approved"
-        spawn.assert_called_once_with("approved")
+        spawn.assert_called_once_with("approved", symbol=ar.TRAINING_SYMBOL)
 
     @pytest.mark.asyncio
     async def test_already_running(self, monkeypatch):
@@ -119,29 +134,30 @@ class TestApproveRetrainService:
         result = await force_retrain()
 
         assert result["status"] == "triggered"
-        spawn.assert_called_once_with("forced")
+        spawn.assert_called_once_with("forced", symbol=ar.TRAINING_SYMBOL)
 
 
 class TestSpawnRetrainTask:
     @pytest.mark.asyncio
     async def test_keeps_reference_and_reuses_live_task(self, monkeypatch):
-        seen: list[str] = []
+        seen: list[tuple] = []
 
-        async def slow(trigger="manual"):
-            seen.append(trigger)
+        async def slow(trigger="manual", symbol=ar.TRAINING_SYMBOL):
+            seen.append((trigger, symbol))
             await asyncio.sleep(30)
 
         monkeypatch.setattr(ar, "_trigger_retrain", slow)
         monkeypatch.setattr(ar, "send_alert", MagicMock())
 
         t1 = ar._spawn_retrain_task("scheduled")
-        t2 = ar._spawn_retrain_task()
+        t2 = ar._spawn_retrain_task("manual", symbol="GBPUSD")
         await asyncio.sleep(0)   # deja arrancar el task → slow() registra el trigger
 
         assert t1 is not None
         assert t1 is t2, "no debe duplicar tasks vivos"
         assert ar._RETRAIN_TASK is t1, "la referencia debe conservarse"
-        assert seen == ["scheduled"], "el trigger debe propagarse a _trigger_retrain"
+        # P3-3: trigger + símbolo se propagan a _trigger_retrain
+        assert seen == [("scheduled", ar.TRAINING_SYMBOL)]
 
         t1.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -149,7 +165,7 @@ class TestSpawnRetrainTask:
 
     @pytest.mark.asyncio
     async def test_alerts_on_failure(self, monkeypatch):
-        async def boom(trigger="manual"):
+        async def boom(trigger="manual", symbol=ar.TRAINING_SYMBOL):
             raise RuntimeError("retrain exploded")
 
         monkeypatch.setattr(ar, "_trigger_retrain", boom)

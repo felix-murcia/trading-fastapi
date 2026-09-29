@@ -14,7 +14,7 @@ import os
 import time
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import ClassVar, Optional
 
 import numpy as np
 import pandas as pd
@@ -32,14 +32,34 @@ from services.walk_forward import (
 
 logger = logging.getLogger(__name__)
 
-# P3-1b: el pipeline de retrain entrena HOY un único mundo. Fuente única del
-# símbolo (fetch de velas + hot-reload del bundle tras promover).
+# P3-1b/P3-3: símbolo POR DEFECTO del pipeline de retrain. El pipeline está
+# parametrizado por símbolo (P3-3): cada par entrena su propio bundle; este
+# es el default de force/approve/scheduled cuando el caller no elige mundo.
 TRAINING_SYMBOL = "EURUSD"
-# P3-1c: el bundle que escribe el pipeline es SIEMPRE el de SU mundo — la ruta
-# se deriva de core.pair (convención única de rutas, nada hardcodeado).
+# P3-1c: el bundle que escribe cada corrida es SIEMPRE el de SU mundo — la
+# ruta se deriva de core.pair (convención única de rutas, nada hardcodeado).
 MODEL_PATH = default_model_path(TRAINING_SYMBOL)
-RETRAIN_LOCK = asyncio.Lock()
+RETRAIN_LOCK = asyncio.Lock()   # global: retrains de todos los pares serializados
 SCHEDULE_CHECK_S = 3600   # P3-2d: el calendario se revisa cada hora
+
+
+def _validate_symbol(symbol: str) -> str:
+    """`symbol` debe estar listado en PAIRS para tener pipeline de retrain.
+
+    Listado basta (habilitado o NO): entrenar el canario ANTES de activarlo
+    es el flujo P3-3. Símbolo desconocido → ValueError explícito — jamás se
+    inventa un mundo.
+    """
+    listed = {
+        spec.get("symbol") for spec in settings.pairs
+        if isinstance(spec, dict)
+    }
+    if symbol not in listed:
+        raise ValueError(
+            f"[RETRAIN] símbolo {symbol!r} no listado en PAIRS — sin pipeline "
+            f"de retrain (listar el par primero, aunque esté enabled=false)"
+        )
+    return symbol
 
 
 @dataclass
@@ -47,6 +67,12 @@ class RetrainConfig:
     trades_before_retrain: int = 10       # ← 50 era demasiado: 10 permite aprender rápido
     min_trades_for_retrain: int = 5      # ← mínimo razonable tras primer trade
     lookback_candles: int = 500           # Velas históricas a usar para retrain
+    # P3-3: lookback POR PAR — el entrenamiento INICIAL de un par nuevo
+    # necesita años de H1 (walk-forward con masa estadística para el gate
+    # canario: ≥200 aperturas OOS). Símbolos sin entrada → lookback_candles
+    # (EURUSD sigue en 500: su bundle ya existe y el gate es comparativo).
+    # ClassVar: atributo de CLASE (RetrainConfig se usa sin instanciar).
+    lookback_by_symbol: ClassVar[dict] = {"GBPUSD": 30000}
     retrain_window_size: int = 20         # Window size del entorno
     initial_balance: float = 1000.0
     commission: float = 0.0001            # 0.01% por trade (MT5 typical)
@@ -60,6 +86,11 @@ class RetrainConfig:
     walk_forward_train_frac: float = 0.70
     walk_forward_holdout_frac: float = 0.10  # holdout congelado: reporta, nunca decide
     walk_forward_min_fold_bars: int = 10  # pliegue más corto evaluable (si no, aborta)
+
+    @classmethod
+    def lookback_for(cls, symbol: str) -> int:
+        """Velas históricas a pedir para el retrain de `symbol` (P3-3)."""
+        return int(cls.lookback_by_symbol.get(symbol, cls.lookback_candles))
 
 
 @dataclass
@@ -349,66 +380,63 @@ async def record_trade_filled(
 
     # Trigger retrain si corresponde (requiere aprobación humana)
     if state.filled_count >= RetrainConfig.min_trades_for_retrain:
-        if symbol != TRAINING_SYMBOL:
-            # P3-1c: el umbral es POR PAR, pero solo existe el pipeline de
-            # retrain de TRAINING_SYMBOL (P3-3 añadirá el de cada par). El
-            # contador de este mundo queda visible y sigue acumulando; lo que
-            # NO hace es disparar el entrenamiento de otro.
-            logger.warning(
-                "[RETRAIN] Umbral alcanzado para %s (filled=%d), pero solo existe "
-                "pipeline de retrain de %s — no se dispara (P3-3)",
-                symbol, state.filled_count, TRAINING_SYMBOL,
-            )
-            return
         logger.warning(
-            "[RETRAIN] Trigger automático: filled_count=%d >= min_trades=%d — requiere aprobación humana",
-            state.filled_count,
-            RetrainConfig.min_trades_for_retrain,
+            "[RETRAIN] Trigger automático para %s: filled_count=%d >= min_trades=%d — requiere aprobación humana",
+            symbol, state.filled_count, RetrainConfig.min_trades_for_retrain,
         )
         if not settings.retrain_auto_approve:
             logger.warning(
                 "[RETRAIN] Auto-retrain bloqueado: retrain_auto_approve=false. "
-                "Usar POST /api/v1/ai/retrain/approve para aprobar el retrain pendiente."
+                "Usar POST /api/v1/ai/retrain/approve?symbol=%s para aprobar el retrain pendiente.",
+                symbol,
             )
             return
-        _spawn_retrain_task("trade_count")
+        _spawn_retrain_task("trade_count", symbol=symbol)
 
 
-async def _trigger_retrain(trigger: str = "manual") -> None:
+async def _trigger_retrain(trigger: str = "manual", symbol: str = TRAINING_SYMBOL) -> None:
     """
-    Dispara el retrain en background.
-    Solo una instancia a la vez (Lock).
+    Dispara el retrain de `symbol` en background.
+    Solo una instancia a la vez (Lock GLOBAL: pares serializados, sin
+    carrera entre entrenamientos concurrentes).
     """
-    logger.warning("[RETRAIN] ===== RETRAIN AUTOMÁTICO INICIADO =====")
+    logger.warning("[RETRAIN] ===== RETRAIN AUTOMÁTICO INICIADO (%s) =====", symbol)
     async with RETRAIN_LOCK:
-        state = await _ensure_retrain_state()
+        state = await _ensure_retrain_state(symbol)
         state.retrain_in_progress = True
         state.scheduled_due = False   # el intento consume el disparador del calendario
-        await _save_retrain_state(state)
+        await _save_retrain_state(state, symbol)
         try:
-            await _do_retrain(trigger=trigger)
+            await _do_retrain(trigger=trigger, symbol=symbol)
         finally:
             state.retrain_in_progress = False
-            await _save_retrain_state(state)
+            await _save_retrain_state(state, symbol)
 
 
 _RETRAIN_TASK: asyncio.Task | None = None
 
 
-def _spawn_retrain_task(trigger: str = "manual") -> asyncio.Task | None:
-    """Lanza _trigger_retrain en background con referencia y manejo de fallo.
+def _spawn_retrain_task(trigger: str = "manual", symbol: str = TRAINING_SYMBOL) -> asyncio.Task | None:
+    """Lanza _trigger_retrain(trigger, symbol) en background con referencia y
+    manejo de fallo.
 
     Sin referencia, el task puede recolectarse y sus excepciones mueren en
     silencio (violación de 'no silent failures'): aquí se conserva la
     referencia, no se duplica si ya hay uno vivo y se alerta en el
-    done-callback si termina con error.
+    done-callback si termina con error. Un solo task vivo = retrains de
+    distintos pares serializados; el trigger no rechazado sigue pendiente
+    en SU contador (umbral se re-evalúa en cada cierre / approve?symbol=).
     """
     global _RETRAIN_TASK
     if _RETRAIN_TASK is not None and not _RETRAIN_TASK.done():
-        logger.warning("[RETRAIN] Ya hay un retrain en curso — se reutiliza el task vivo")
+        logger.warning(
+            "[RETRAIN] Ya hay un retrain en curso — se reutiliza el task vivo "
+            "(el trigger '%s' de %s NO se encola: sigue pendiente en su contador)",
+            trigger, symbol,
+        )
         return _RETRAIN_TASK
 
-    task = asyncio.create_task(_trigger_retrain(trigger))
+    task = asyncio.create_task(_trigger_retrain(trigger, symbol=symbol))
     _RETRAIN_TASK = task
 
     def _on_done(t: asyncio.Task) -> None:
@@ -597,13 +625,14 @@ def _load_or_create_model(model_path: str, train_env, cfg) -> "PPO":
     return model
 
 
-async def _do_retrain(trigger: str = "manual") -> None:
+async def _do_retrain(trigger: str = "manual", symbol: str = TRAINING_SYMBOL) -> None:
     """P3-2a: orquesta snapshot + experimento alrededor del pipeline de retrain.
 
-    1. Recolecta velas históricas y congela el snapshot del df que van a
-       consumir train y gate (retrain reproducible)
+    0. Valida que `symbol` esté listado en PAIRS (P3-3: mundo explícito)
+    1. Recolecta velas históricas de ESE par (lookback_for(symbol)) y congela
+       el snapshot del df que van a consumir train y gate (retrain reproducible)
     2. Abre la fila del experimento en training_experiments (traza auditable
-       por corrida: disparador + snapshot)
+       por corrida: disparador + snapshot + symbol)
     3. Ejecuta _do_retrain_core (entreno → gate walk-forward → promoción),
        que cierra la fila en sus puntos de decisión (promoted/rejected)
     4. Ante cualquier excepción del pipeline cierra la fila como failed
@@ -612,23 +641,24 @@ async def _do_retrain(trigger: str = "manual") -> None:
     Un fallo ANTES del snapshot (fetch MT5, escritura) no abre fila — no hay
     experimento sin datos — y queda alertado por _spawn_retrain_task._on_done.
     """
+    _validate_symbol(symbol)
     cfg = RetrainConfig
-    logger.warning("[RETRAIN] ===== INICIANDO RETRAIN (trigger=%s) =====", trigger)
+    logger.warning("[RETRAIN] ===== INICIANDO RETRAIN (trigger=%s, symbol=%s) =====", trigger, symbol)
 
-    candles = await _fetch_historical_candles(symbol=TRAINING_SYMBOL, count=cfg.lookback_candles)
+    candles = await _fetch_historical_candles(symbol=symbol, count=cfg.lookback_for(symbol))
     if len(candles) < 100:
-        raise RuntimeError(f"[RETRAIN] No hay suficientes velas: {len(candles)}")
+        raise RuntimeError(f"[RETRAIN] No hay suficientes velas de {symbol}: {len(candles)}")
     df = _build_training_dataframe(candles)
 
     # P3-2a: snapshot del df exacto que consume train+gate → reproducibilidad.
     snap = data_snapshot.save_snapshot(df, purpose="retrain")
     data_snapshot.prune_snapshots()
     exp_id = await experiment_tracker.start_experiment(
-        trigger, snap.path, snap.sha256, symbol=TRAINING_SYMBOL
+        trigger, snap.path, snap.sha256, symbol=symbol
     )
 
     try:
-        await _do_retrain_core(df, exp_id)
+        await _do_retrain_core(df, exp_id, symbol)
     except BaseException as exc:
         try:
             await experiment_tracker.finish_experiment(
@@ -641,8 +671,11 @@ async def _do_retrain(trigger: str = "manual") -> None:
         raise
 
 
-async def _do_retrain_core(df: pd.DataFrame, exp_id: int) -> None:
+async def _do_retrain_core(df: pd.DataFrame, exp_id: int, symbol: str = TRAINING_SYMBOL) -> None:
     """Pipeline de retrain sobre un df ya congelado como snapshot.
+
+    Todo artefacto (bundle, manifest, baseline, hot-reload, backup) pertenece
+    al MUNDO de `symbol` (P3-3): la ruta sale de default_model_path(symbol).
 
     Terminaliza el experimento `exp_id` en los puntos de decisión del gate:
     'rejected' al rechazar el candidato, 'promoted' tras record_promotion.
@@ -650,6 +683,10 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int) -> None:
     from services.model_backup import backup_model as upload_model
 
     cfg = RetrainConfig
+    model_path = default_model_path(symbol)
+    # El namespace del par existe ANTES de cualquier escritura del bundle
+    # (norm/zip/manifest): SB3 crea padres, write_manifest no.
+    os.makedirs(os.path.dirname(model_path), exist_ok=True)
     split = build_walk_forward_split(
         len(df),
         window_size=cfg.retrain_window_size,
@@ -667,7 +704,7 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int) -> None:
         split.holdout.start,
     )
 
-    real_outcomes = await _load_persisted_outcomes()
+    real_outcomes = await _load_persisted_outcomes(symbol)
     n_real = len(real_outcomes)
     if n_real > 0:
         logger.warning(
@@ -706,10 +743,10 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int) -> None:
 
     from stable_baselines3 import PPO
 
-    train_env = _make_train_env(env_cfg, MODEL_PATH)
+    train_env = _make_train_env(env_cfg, model_path)
 
     # P2-1: carga continuable o política nueva si cambió el contrato de acción.
-    model = _load_or_create_model(MODEL_PATH, train_env, cfg)
+    model = _load_or_create_model(model_path, train_env, cfg)
 
     logger.info("[RETRAIN] Entrenando %d timesteps...", cfg.total_timesteps)
     model.learn(
@@ -722,9 +759,9 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int) -> None:
     # emparejada; el holdout NO participa en el gate.
     baseline_model = None
     baseline_rms = None
-    if os.path.exists(MODEL_PATH):
-        baseline_model = PPO.load(MODEL_PATH)
-        baseline_rms = _load_obs_rms(MODEL_PATH, env_cfg)
+    if os.path.exists(model_path):
+        baseline_model = PPO.load(model_path)
+        baseline_rms = _load_obs_rms(model_path, env_cfg)
 
     def _eval_segment(policy, segment_df, rms):
         return _evaluate_model(policy, segment_df, env_cfg, obs_rms=rms)
@@ -767,26 +804,26 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int) -> None:
         )
         # P3-2d: cada intento (aunque rechazado) ancla el calendario — sin esto
         # el programado reintentaría cada hora tras un rechazo (tormenta).
-        state = await _ensure_retrain_state()
+        state = await _ensure_retrain_state(symbol)
         state.last_retrain_time = time.time()
-        await _save_retrain_state(state)
+        await _save_retrain_state(state, symbol)
         await _log_retrain_event("retrain_rejected", {
             "reason": decision.reason,
             "gate": decision.details,
             "report": report.to_dict(),
-        })
+        }, symbol=symbol)
         return
 
     # Promoción del BUNDLE completo: stats + zip + manifest certifican el conjunto.
     # Si el proceso muere entre archivos, validate_bundle falla en el próximo arranque.
-    norm_path = os.path.splitext(MODEL_PATH)[0] + "_vec_norm.pkl"
+    norm_path = os.path.splitext(model_path)[0] + "_vec_norm.pkl"
     norm_tmp = norm_path + ".tmp"
     train_env.save(norm_tmp)
     os.replace(norm_tmp, norm_path)
 
-    candidate_path = MODEL_PATH.removesuffix(".zip") + ".candidate.zip"
+    candidate_path = model_path.removesuffix(".zip") + ".candidate.zip"
     model.save(candidate_path)
-    os.replace(candidate_path, MODEL_PATH)
+    os.replace(candidate_path, model_path)
 
     # P0-5: certificar el bundle promovido. Sin manifest válido el próximo
     # arranque fallará en validate_bundle (fail-fast: nunca sirve binarios sucios).
@@ -794,9 +831,11 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int) -> None:
     # P3-2c: baseline de drift congelado sobre el df de ENTRENO — la referencia
     # contra la que el monitor PSI compara las velas vivas. Si no hay baseline
     # utilizable, no se promueve (mejor no promover que promover a ciegas).
-    baseline_info = drift_monitor.save_baseline(train_df)
+    # P3-3: baseline POR PAR (junto a su bundle) — la promoción de un mundo
+    # nunca pisa la referencia de otro.
+    baseline_info = drift_monitor.save_baseline(train_df, symbol=symbol)
     manifest = build_manifest(
-        MODEL_PATH,
+        model_path,
         obs_shape=getattr(model.observation_space, "shape", ()),
         vec_norm_file=os.path.basename(norm_path),
         source="auto_retrain_normalized",
@@ -806,7 +845,7 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int) -> None:
             "drift_baseline": baseline_info,
         },
     )
-    write_manifest(MODEL_PATH, manifest)
+    write_manifest(model_path, manifest)
 
     # P1-2: historial de promociones (model_registry) + hot-reload del bundle en
     # memoria. Sin la recarga, la promoción no surte efecto hasta reiniciar
@@ -815,13 +854,13 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int) -> None:
         manifest,
         {"ok": decision.ok, "reason": decision.reason,
          "checks": decision.details.get("checks")},
-        symbol=TRAINING_SYMBOL,
+        symbol=symbol,
     )
     # P3-1b: hot-reload vía ModelStorePort — el servicio ya no importa del
     # router (el adapter resuelve `routers.ai` en el momento de la llamada,
     # así que el patch de los tests sigue viéndose).
     from core.adapters import AiModelStoreAdapter
-    AiModelStoreAdapter().reload(TRAINING_SYMBOL)
+    AiModelStoreAdapter().reload(symbol)
 
     # P3-2a: la promoción es el punto de decisión del experimento — se cierra
     # aquí, antes de los pasos posteriores (state/backup/log): si esos fallan,
@@ -833,17 +872,17 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int) -> None:
         model_sha256=manifest["model_sha256"],
     )
 
-    state = await _ensure_retrain_state()
+    state = await _ensure_retrain_state(symbol)
     state.last_retrain_time = time.time()
     state.filled_count = 0          # nuevo ciclo: los próximos N cierres cuentan
     state.outcomes = []
-    await _save_retrain_state(state)
+    await _save_retrain_state(state, symbol)
 
     # 6. Backup a GCS
-    backup_url = await upload_model(symbol=TRAINING_SYMBOL)
+    backup_url = await upload_model(symbol=symbol)
     logger.warning(
         "[RETRAIN] ===== RETRAIN COMPLETADO ===== model=%s backup=%s sum_reward=%.3f gate=%s",
-        MODEL_PATH,
+        model_path,
         backup_url,
         report.candidate["sum_reward"],
         decision.reason,
@@ -854,18 +893,20 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int) -> None:
         "gate": decision.details,
         "report": report.to_dict(),
         "bundle": {
-            "model": os.path.basename(MODEL_PATH),
+            "model": os.path.basename(model_path),
             "vec_norm_file": os.path.basename(norm_path),
             "source": "auto_retrain_normalized",
         },
         "backup_url": backup_url,
-    })
+    }, symbol=symbol)
 
 
 async def _fetch_historical_candles(symbol: str, count: int) -> list:
     """Obtiene velas históricas de MT5 MCP."""
     import httpx
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    # 60s (P3-3): el lookback del canario (30000 H1) tarda ~18s desde el host
+    # y el contenedor puede ser más lento — con 30s quedaba al filo.
+    async with httpx.AsyncClient(timeout=60.0) as client:
         res = await client.get(
             f"{settings.mt5_http_url}/api/v1/market/candles/latest",
             params={"symbol_name": symbol, "timeframe": "H1", "count": count},
@@ -883,17 +924,19 @@ def _build_training_dataframe(candles: list) -> pd.DataFrame:
     return engineer_market_features(df)
 
 
-async def _log_retrain_event(event: str, data: dict) -> None:
+async def _log_retrain_event(event: str, data: dict, symbol: str = TRAINING_SYMBOL) -> None:
     """Persiste un evento de ciclo de retrain en audit_log (P1-1).
 
     - `retrain_promoted` / `retrain_rejected`: decisión de gate con el informe
       walk-forward completo (métricas por pliego + agregados) — antes ambos
       caminos escribían el mismo `retrain_completed` sin métricas ni hash.
+    - `symbol`: el estado (contadores/outcomes) que se adjunta es el del par
+      cuyo ciclo se registró (P3-3) — jamás el de otro mundo.
     """
     from db.connection import get_pool
 
     pool = get_pool()
-    state = await _ensure_retrain_state()
+    state = await _ensure_retrain_state(symbol)
     payload = dict(data)
     payload.setdefault("state", {
         "filled_count": state.filled_count,
@@ -919,16 +962,18 @@ async def _log_retrain_event(event: str, data: dict) -> None:
 
 # ─── HTTP Endpoint para forzar retrain manualmente ────────────────────────────
 
-async def force_retrain() -> dict:
-    """Fuerza un retrain inmediato (para uso manual/debug).
+async def force_retrain(symbol: Optional[str] = None) -> dict:
+    """Fuerza un retrain inmediato de `symbol` (para uso manual/debug).
 
     No salta el gate de promoción: eso vive dentro de _do_retrain.
+    `symbol=None` → TRAINING_SYMBOL (compatibilidad con el caller actual).
     """
-    state = await _ensure_retrain_state()
+    sym = _validate_symbol(symbol or TRAINING_SYMBOL)
+    state = await _ensure_retrain_state(sym)
     if state.retrain_in_progress:
         return {"status": "already_running"}
 
-    _spawn_retrain_task("forced")
+    _spawn_retrain_task("forced", symbol=sym)
     return {"status": "triggered", "filled_count": state.filled_count}
 
 
@@ -991,14 +1036,19 @@ async def _retrain_schedule_loop() -> None:
         await asyncio.sleep(SCHEDULE_CHECK_S)
 
 
-async def approve_retrain() -> dict:
-    """Aprueba el retrain pendiente (umbral alcanzado o calendario vencido).
+async def approve_retrain(symbol: Optional[str] = None) -> dict:
+    """Aprueba el retrain pendiente de `symbol` (umbral alcanzado o calendario).
 
     Solo aprueba si hay un disparo realmente pendiente (umbral de trades
     alcanzado O scheduled_due del calendario) y no hay otro en curso;
     el gate de promoción del candidato se aplica igual dentro de _do_retrain.
+    `symbol=None` → TRAINING_SYMBOL. P3-3: un par con retrain_auto_approve
+    false deja SU contador por encima del umbral — approve por símbolo es la
+    única vía para que ese mundo entrene (sin él quedaría pendiente para
+    siempre: fallo silencioso).
     """
-    state = await _ensure_retrain_state()
+    sym = _validate_symbol(symbol or TRAINING_SYMBOL)
+    state = await _ensure_retrain_state(sym)
     if state.retrain_in_progress:
         return {"status": "already_running", "filled_count": state.filled_count}
     if (state.filled_count < RetrainConfig.min_trades_for_retrain
@@ -1008,7 +1058,7 @@ async def approve_retrain() -> dict:
             "filled_count": state.filled_count,
             "min_trades_for_retrain": RetrainConfig.min_trades_for_retrain,
         }
-    _spawn_retrain_task("approved")
+    _spawn_retrain_task("approved", symbol=sym)
     return {
         "status": "approved",
         "filled_count": state.filled_count,

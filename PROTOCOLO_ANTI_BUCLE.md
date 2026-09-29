@@ -16,14 +16,13 @@ Antes de cualquier cambio en el sistema de trading:
 
 Si algún paso falla: NO avanzar. Corregir primero.
 
-Estado actual (2026-09-10):
-- Fase 1 observable: completo (`deal_ticket`, `position_id`).
-- Guards SL/TP: proporcionales al equity (`max_risk_pct=0.05`).
-- Guards volume: `min_lot_mt5=0.01` + paso MT5.
-- SL/TP dinámico: `Bollinger` (prioridad absoluta; sin fallback ATR). Si BB no es válido o ratio < 1.5 → `HOLD`. Ruptura BB válida solo con volumen/confirmación. Spread actual obligatorio en cálculo.
-- Trailing stop: activo cada tick con posición.
-- Modelo v3: `ppo_trading_bot_v3.zip` (reentrenado 200k pasos).
-- E2E: 8 passed (`test_e2e_ai_predict.py`).
-- Suite completa: 44 passed (`fastapi/tests/`).
-- Simulacro: 4300 pasos H1 (`simulacro_ppo_qwen.py`), `obs_shape=(10, 21)`, sin regresión.
+Estado actual (2026-09-29):
+- Plan `doc/auditoria-integral-forex-2026-09-28.md` **completo** (P0–P3-3 ejecutados; evidencia por fase en README).
+- Pares: EURUSD habilitado; GBPUSD **listado `enabled=false`** (canario). Entrenado 2026-09-29 con 30000 H1 → **RECHAZADO por el gate canario** (`canary_sharpe_below`: fold sharpes [-1.70, -5.16, -3.24, -0.53] < 1.0; openings 1524 ≥ 200 ✓; sin bundle, sin promoción). Evidencia: experimento #1 en `training_experiments` + evento `retrain_rejected` en `audit_log`. Activar exige superar el gate — no se tocan los umbrales.
+- Pipeline de retrain **parametrizado por símbolo** (`_do_retrain/_spawn/approve/force(symbol=…)`); lock y task de retrain globales (serializados). Gate: con baseline → comparativo estricto (igual que siempre); sin baseline (primer modelo de un par) → absolutos canario: ≥200 aperturas + sharpe ≥ 1.0 en ≥4 pliegues.
+- Orden temporal de velas normalizado en `engineer_market_features` (P0: el MCP entrega descendente; todo cálculo ocurre sobre ascendente).
+- Riesgo: guardián por par con `daily_loss_pct` del spec PAIRS (canario GBPUSD=2%, default 5%); `max_drawdown_block_pct` (default `None`=solo alerta) bloquea DD de cuenta si se configura (canario: 15); exposición agregada + `AccountRiskState` persistente; cierres selectivos por ledger de propiedad.
+- Artefactos por par: bundle y drift baseline en `ml/<SYMBOL>/` (EURUSD legado en raíz de `ml/`); snapshots de retrain en parquet con rango+hash.
+- E2E: 8 passed. Suite completa: **530 passed** (host + contenedor, exit 0).
+- Pendientes conocidos: EA v13.2 a compilar en MetaEditor (guard backend activo); GCS ADC sin credenciales (backup local OK, solo ERROR en log).
 - Tener siempre en cuenta el spread actual de la operación para establecer los SL/TP.

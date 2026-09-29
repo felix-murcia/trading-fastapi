@@ -218,15 +218,17 @@ class TestFilledCountIsolation:
         )
 
     @pytest.mark.asyncio
-    async def test_other_pair_at_threshold_never_spawns(self, monkeypatch):
+    async def test_other_pair_at_threshold_spawns_its_own_retrain(self, monkeypatch):
+        # P3-3: el pipeline está parametrizado — el umbral de GBPUSD dispara
+        # el retrain de GBPUSD (su symbol viaja al spawn), jamás el de otro.
         self._wire(monkeypatch, {"GBPUSD": ar.RetrainConfig.min_trades_for_retrain - 1})
 
         await self._fill("GBPUSD")
 
         # El contador de GBPUSD llegó al umbral…
         assert ar.get_state("GBPUSD").filled_count == ar.RetrainConfig.min_trades_for_retrain
-        # …pero NO existe su pipeline: jamás dispara el de otro par (P3-3)
-        ar._spawn_retrain_task.assert_not_called()
+        # …y su mundo es el que dispara su pipeline
+        ar._spawn_retrain_task.assert_called_once_with("trade_count", symbol="GBPUSD")
 
     @pytest.mark.asyncio
     async def test_training_pair_at_threshold_spawns_as_before(self, monkeypatch):
@@ -234,7 +236,20 @@ class TestFilledCountIsolation:
 
         await self._fill(ar.TRAINING_SYMBOL)
 
-        ar._spawn_retrain_task.assert_called_once_with("trade_count")
+        ar._spawn_retrain_task.assert_called_once_with(
+            "trade_count", symbol=ar.TRAINING_SYMBOL
+        )
+
+    @pytest.mark.asyncio
+    async def test_other_pair_threshold_blocked_without_auto_approve(self, monkeypatch):
+        # auto_approve=false → el umbral de GBPUSD queda PENDIENTE (sin spawn):
+        # la única vía es approve?symbol=GBPUSD (fallo silencioso imposible).
+        self._wire(monkeypatch, {"GBPUSD": ar.RetrainConfig.min_trades_for_retrain - 1})
+        monkeypatch.setattr(ar.settings, "retrain_auto_approve", False)
+
+        await self._fill("GBPUSD")
+
+        ar._spawn_retrain_task.assert_not_called()
 
 
 # ─── schema.sql: fresh install refleja la dimensión por par ─────────────────

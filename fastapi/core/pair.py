@@ -46,6 +46,9 @@ class PairConfig:
     # P3-1d: fracción de equity (0-100] que el par puede mandar — techo de
     # size por par. 100 (default) = el techo global de siempre.
     equity_allocation_pct: float = 100.0
+    # P3-3: límite de pérdida diaria PROPIO del par (canario GBPUSD=2%,
+    # EURUSD sigue en el default 5% del guardian). Ausente = 5.0.
+    daily_loss_pct: float = 5.0
 
     @staticmethod
     def from_spec(spec: dict) -> "PairConfig":
@@ -86,11 +89,27 @@ class PairConfig:
                 f"PAIRS: 'equity_allocation_pct' de {symbol!r} fuera de (0, 100]: "
                 f"{allocation!r}"
             )
+        # P3-3: límite de pérdida diaria del par — ausente = 5.0 (default del
+        # guardian); presente = número en (0, 100]. La validación del spec es
+        # una sola (aquí): risk_guardian reutiliza esta clase al crear su guardián.
+        daily_loss = spec.get("daily_loss_pct", 5.0)
+        if isinstance(daily_loss, bool) or not isinstance(daily_loss, (int, float)):
+            raise ValueError(
+                f"PAIRS: 'daily_loss_pct' debe ser numérico en {spec!r}: "
+                f"{daily_loss!r}"
+            )
+        daily_loss = float(daily_loss)
+        if not (0.0 < daily_loss <= 100.0):
+            raise ValueError(
+                f"PAIRS: 'daily_loss_pct' de {symbol!r} fuera de (0, 100]: "
+                f"{daily_loss!r}"
+            )
         return PairConfig(
             symbol=symbol,
             enabled=enabled,
             model_path=model_path,
             equity_allocation_pct=allocation,
+            daily_loss_pct=daily_loss,
         )
 
 

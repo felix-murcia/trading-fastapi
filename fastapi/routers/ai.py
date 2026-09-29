@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import torch
 import gymnasium as gym
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, field_validator
 from pydantic_core import PydanticCustomError
 from stable_baselines3 import PPO
@@ -35,6 +35,7 @@ from services.auto_retrain import (
     force_retrain as _force_retrain,
     get_state as _get_retrain_state,
     record_trade_filled,
+    TRAINING_SYMBOL as _TRAINING_SYMBOL,
 )
 from services.market_time import utc_hour_from_candle
 from services.news_filter import is_news_blackout
@@ -578,16 +579,22 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
 
 
 @router.post("/retrain/force")
-async def force_retrain_endpoint(_: None = Depends(verify_token)):
+async def force_retrain_endpoint(
+    symbol: Optional[str] = Query(default=None),
+    _: None = Depends(verify_token),
+):
     """
-    Fuerza un retrain inmediato del modelo PPO.
+    Fuerza un retrain inmediato del modelo PPO (parámetro opcional `symbol`;
+    por defecto TRAINING_SYMBOL — P3-3: pipeline por par).
     Útil para when market regime cambia (e.g., central bank intervention).
     """
-    state = _get_retrain_state()
-    result = await _force_retrain()
+    sym = symbol or _TRAINING_SYMBOL
+    state = _get_retrain_state(sym)
+    result = await _force_retrain(symbol=symbol)
     await log_to_audit(
         "retrain_forced",
         {
+            "symbol": sym,
             "status": result.get("status"),
             "filled_count": state.filled_count,
             "in_progress": state.retrain_in_progress,
@@ -599,15 +606,20 @@ async def force_retrain_endpoint(_: None = Depends(verify_token)):
 
 
 @router.post("/retrain/approve")
-async def approve_retrain_endpoint(_: None = Depends(verify_token)):
-    """Aprueba el retrain pendiente (umbral alcanzado con retrain_auto_approve=false).
+async def approve_retrain_endpoint(
+    symbol: Optional[str] = Query(default=None),
+    _: None = Depends(verify_token),
+):
+    """Aprueba el retrain pendiente de `symbol` (umbral alcanzado o calendario
+    con retrain_auto_approve=false). `symbol` opcional → TRAINING_SYMBOL.
 
     No salta el gate de promoción: ese se aplica dentro de _do_retrain.
     """
-    result = await _approve_retrain()
+    result = await _approve_retrain(symbol=symbol)
     await log_to_audit(
         "retrain_approved",
         {
+            "symbol": symbol or _TRAINING_SYMBOL,
             "status": result.get("status"),
             "filled_count": result.get("filled_count"),
             "min_trades_for_retrain": result.get("min_trades_for_retrain"),

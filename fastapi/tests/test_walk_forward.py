@@ -166,17 +166,25 @@ def _agg(sum_reward=10.0, mean_sharpe=0.5, total_openings=8, **over):
     return agg
 
 
-def _report(cand, base=None, fold_wins=None, n_folds=4):
+def _report(cand, base=None, fold_wins=None, n_folds=4, folds=None):
     return WalkForwardReport(
         n_folds=n_folds,
         embargo_bars=20,
         train_bars=350,
-        folds=[],
+        folds=folds if folds is not None else [],
         holdout={"bars": 50, "candidate": {}, "baseline": None},
         candidate=cand,
         baseline=base,
         fold_wins=fold_wins,
     )
+
+
+def _canary_folds(sharpes):
+    """Pliegues con la forma real para el gate canario (candidate.sharpe)."""
+    return [
+        {"fold": i, "bars": 100, "candidate": {"sharpe": s}, "baseline": None}
+        for i, s in enumerate(sharpes)
+    ]
 
 
 class TestGateWalkForward:
@@ -226,10 +234,43 @@ class TestGateWalkForward:
         assert decision.ok is False
         assert decision.reason == "failed:mean_sharpe_strict"
 
-    def test_first_model_requires_only_validity(self):
-        decision = gate_walk_forward(_report(_agg()), min_openings=1)
+    def test_first_model_below_canary_openings_rejected(self):
+        # P3-3: sin baseline (primer modelo del par) ya NO basta con validez —
+        # umbrales absolutos de canario (aperturas ≥ 200).
+        decision = gate_walk_forward(
+            _report(_agg(total_openings=8), folds=_canary_folds([2.0] * 4)),
+            min_openings=1,
+        )
+        assert decision.ok is False
+        assert decision.reason == "canary_insufficient_openings"
+
+    def test_first_model_below_canary_fold_sharpe_rejected(self):
+        # Aperturas suficientes pero calidad por pliego insuficiente:
+        # ≥4 pliegues deben superar sharpe 1.0 (aquí solo 1 lo hace).
+        decision = gate_walk_forward(
+            _report(_agg(total_openings=500),
+                    folds=_canary_folds([1.5, 0.4, 0.9, 0.2])),
+            min_openings=1,
+        )
+        assert decision.ok is False
+        assert decision.reason == "canary_sharpe_below"
+        assert decision.details["canary"]["folds_strong"] == 1
+
+    def test_first_model_validated_with_canary_thresholds(self):
+        decision = gate_walk_forward(
+            _report(_agg(total_openings=500),
+                    folds=_canary_folds([1.5, 1.2, 2.1, 1.0])),
+            min_openings=1,
+        )
         assert decision.ok is True
         assert decision.reason == "first_model_validated"
+
+    def test_first_model_report_without_folds_rejected(self):
+        # Informe malformado sin pliegues: jamás se valida en silencio.
+        decision = gate_walk_forward(_report(_agg(total_openings=500)),
+                                     min_openings=1)
+        assert decision.ok is False
+        assert decision.reason == "canary_sharpe_below"
 
     def test_insufficient_openings_rejected_even_without_baseline(self):
         decision = gate_walk_forward(

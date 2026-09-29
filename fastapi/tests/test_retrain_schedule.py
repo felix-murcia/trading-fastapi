@@ -113,7 +113,7 @@ class TestApproveAcceptsSchedule:
 
         assert result["status"] == "approved"
         assert result["scheduled_due"] is True
-        spawn.assert_called_once_with("approved")
+        spawn.assert_called_once_with("approved", symbol=ar.TRAINING_SYMBOL)
 
     @pytest.mark.asyncio
     async def test_no_pending_when_threshold_and_schedule_absent(self, monkeypatch):

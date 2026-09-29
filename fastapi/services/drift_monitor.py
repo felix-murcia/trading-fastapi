@@ -33,6 +33,7 @@ import numpy as np
 import pandas as pd
 
 from config import settings
+from core.pair import LEGACY_SYMBOL, default_model_path
 from services.alerting import AlertLevel, send_alert
 
 logger = logging.getLogger(__name__)
@@ -47,8 +48,17 @@ PSI_EPS = 1e-6                # suavizado para bins vacíos
 DRIFT_CHECK_DELAY_S = 300     # primera pasada tras el arranque
 
 
-def baseline_path() -> str:
-    return os.path.join(os.getenv("PPO_OUTPUT_DIR", "/app/ml"), "feature_drift_baseline.json")
+def baseline_path(symbol: str = LEGACY_SYMBOL) -> str:
+    """Baseline de drift JUNTO al bundle del mundo (P3-3: uno por par).
+
+    EURUSD (legado) → raíz de PPO_OUTPUT_DIR (la ruta de siempre); el resto
+    → su namespace ml/<SYMBOL>/. La promoción de un par jamás pisa la
+    referencia de drift de otro (mundos sin acoplamiento).
+    """
+    return os.path.join(
+        os.path.dirname(default_model_path(symbol)),
+        "feature_drift_baseline.json",
+    )
 
 
 def build_feature_baseline(train_df: pd.DataFrame) -> dict:
@@ -98,8 +108,9 @@ def build_feature_baseline(train_df: pd.DataFrame) -> dict:
     }
 
 
-def save_baseline(train_df: pd.DataFrame) -> dict:
-    """Congela el baseline en PPO_OUTPUT_DIR y devuelve {path, sha256, n_features}.
+def save_baseline(train_df: pd.DataFrame, symbol: str = LEGACY_SYMBOL) -> dict:
+    """Congela el baseline del MUNDO `symbol` junto a su bundle y devuelve
+    {path, sha256, n_features}.
 
     Lanza si ninguna feature es utilizable: una promoción sin baseline
     dejaría al drift sin referencia (mejor no promover que promover a ciegas).
@@ -109,7 +120,7 @@ def save_baseline(train_df: pd.DataFrame) -> dict:
     baseline = build_feature_baseline(train_df)
     if not baseline["features"]:
         raise RuntimeError("save_baseline: ninguna feature con distribución utilizable")
-    path = baseline_path()
+    path = baseline_path(symbol)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
@@ -120,8 +131,8 @@ def save_baseline(train_df: pd.DataFrame) -> dict:
     return info
 
 
-def load_baseline() -> dict | None:
-    path = baseline_path()
+def load_baseline(symbol: str = LEGACY_SYMBOL) -> dict | None:
+    path = baseline_path(symbol)
     if not os.path.exists(path):
         return None
     with open(path) as f:

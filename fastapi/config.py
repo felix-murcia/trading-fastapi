@@ -48,9 +48,21 @@ class Settings(BaseSettings):
     # Cada par construye su propio PairContext (modelo, riesgo, estado) vía
     # core.container — añadir un par NO toca el código de otro. 'enabled' es
     # obligatorio en cada especificación: listar un par nunca lo activa solo.
-    # P3-3 añade aquí un segundo par (+ canary) y nada más cambia.
-    # Env (JSON): PAIRS='[{"symbol":"EURUSD","enabled":true},{"symbol":"GBPUSD","enabled":false}]'
-    pairs: list[dict] = [{"symbol": "EURUSD", "enabled": True}]
+    # P3-3: GBPUSD canario listado pero NO habilitado — se entrena con el
+    # gate canario y solo se activa (enabled=true) con el gate en verde
+    # (límites del canario: daily_loss 2%, equity 20%).
+    # Env (JSON): PAIRS='[{"symbol":"EURUSD","enabled":true},{"symbol":"GBPUSD","enabled":true}]'
+    pairs: list[dict] = [
+        {"symbol": "EURUSD", "enabled": True},
+        {"symbol": "GBPUSD", "enabled": False,
+         "daily_loss_pct": 2.0, "equity_allocation_pct": 20},
+    ]
+
+    # ─── P3-3: bloqueo por drawdown de cuenta (canario = 15%) ───────────────────
+    # None (default) = solo alerta al 10% DD (comportamiento histórico).
+    # Valor (p.ej. 15.0) = el guardian BLOQUEA aperturas nuevas cuando el
+    # equity cae ≥ ese % desde el peak. Es de cuenta: aplica a todos los pares.
+    max_drawdown_block_pct: float | None = None
 
     # ─── Market Microstructure ────────────────────────────────────────────────
     microstructure_features_enabled: bool = False  # Añade VP + Orderbook al predict (requiere retrain del modelo si se activa)

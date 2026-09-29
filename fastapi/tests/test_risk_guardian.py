@@ -148,3 +148,75 @@ class TestGlobalWrapper:
         allowed, reason = check_risk(1000.0, open_positions=g.state.max_positions + 1, total_open_positions=1)
         assert allowed is False
         assert "MAX_POSITIONS" in reason
+
+
+class TestMaxDrawdownBlockConfig:
+    """P3-3: bloqueo por DD de cuenta config-driven (canario = 15%).
+
+    None (default) = comportamiento histórico: alerta al 10%, nunca bloquea.
+    """
+
+    def test_block_at_configured_threshold(self, monkeypatch):
+        import services.risk_guardian as rg
+        monkeypatch.setattr(rg.settings, "max_drawdown_block_pct", 15.0)
+        g = RiskGuardian(daily_loss_pct=50.0)  # límite diario alto: aísla el DD
+        g.set_daily_start(1500.0)
+        g.update_peak(1500.0)
+
+        reason = g.check_equity(1200.0)   # DD = 300/1500 = 20% ≥ 15%
+
+        assert reason is not None
+        assert reason.startswith("MAX DRAWDOWN")
+
+    def test_below_block_threshold_keeps_alert_only(self, monkeypatch):
+        import services.risk_guardian as rg
+        monkeypatch.setattr(rg.settings, "max_drawdown_block_pct", 15.0)
+        g = RiskGuardian(daily_loss_pct=50.0)
+        g.set_daily_start(1000.0)
+        g.update_peak(1500.0)
+
+        reason = g.check_equity(1340.0)   # DD ≈ 10.67%: alerta ≥10, no bloquea
+
+        assert reason is None
+
+    def test_unset_threshold_never_blocks(self, monkeypatch):
+        import services.risk_guardian as rg
+        monkeypatch.setattr(rg.settings, "max_drawdown_block_pct", None)
+        g = RiskGuardian(daily_loss_pct=50.0)
+        g.set_daily_start(1500.0)
+        g.update_peak(1500.0)
+
+        assert g.check_equity(1200.0) is None   # DD 20% sin umbral → solo alerta
+
+
+class TestDailyLossFromPairSpec:
+    """P3-3: el límite diario por par sale del spec en PAIRS (canario = 2%)."""
+
+    def test_guardian_uses_spec_daily_loss(self, monkeypatch):
+        import services.risk_guardian as rg
+        monkeypatch.setattr(rg.settings, "pairs", [
+            {"symbol": "EURUSD", "enabled": True},
+            {"symbol": "GBPUSD", "enabled": False, "daily_loss_pct": 2.0},
+        ])
+        monkeypatch.setattr(rg, "_GUARDIANS", {})
+
+        gb = rg.get_risk_guardian("GBPUSD")
+        eu = rg.get_risk_guardian("EURUSD")
+
+        assert gb.state.daily_loss_limit_pct == 2.0
+        assert eu.state.daily_loss_limit_pct == 5.0   # ausente → default
+
+    def test_unlisted_symbol_keeps_default(self, monkeypatch):
+        import services.risk_guardian as rg
+        monkeypatch.setattr(rg.settings, "pairs",
+                            [{"symbol": "EURUSD", "enabled": True}])
+        assert rg._daily_loss_pct_for("AUDUSD") == 5.0
+
+    def test_spec_daily_loss_validated(self):
+        from core.pair import PairConfig
+        base = {"symbol": "GBPUSD", "enabled": True}
+        assert PairConfig.from_spec({**base, "daily_loss_pct": 2.0}).daily_loss_pct == 2.0
+        assert PairConfig.from_spec(base).daily_loss_pct == 5.0        # ausente
+        for bad in (0, -1, 101, True, "2", None):
+            with pytest.raises(ValueError, match="daily_loss_pct"):
+                PairConfig.from_spec({**base, "daily_loss_pct": bad})
