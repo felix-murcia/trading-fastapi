@@ -57,6 +57,7 @@ def health_client(monkeypatch):
     monkeypatch.setattr(qwen_client, "_QWEN_STATE", QwenHealthState())
     with patch("main.init_pool", AsyncMock()), \
          patch("main.close_pool", AsyncMock()), \
+         patch("routers.ai.is_news_blackout", AsyncMock(return_value=(False, None))), \
          patch("routers.ai.load_inference_artifacts"), \
          patch("routers.ai.get_pool", return_value=pool), \
          patch("httpx.AsyncClient") as mock_http, \
@@ -136,6 +137,7 @@ def _post_predict(http_client_cls, monkeypatch):
     monkeypatch.setattr(qwen_client, "_QWEN_STATE", QwenHealthState())
     with patch("main.init_pool", AsyncMock()), \
          patch("main.close_pool", AsyncMock()), \
+         patch("routers.ai.is_news_blackout", AsyncMock(return_value=(False, None))), \
          patch("routers.ai.get_pool", return_value=MagicMock(execute=AsyncMock())), \
          patch("routers.ai.PPO.load", return_value=_mock_ppo_model()), \
          patch("services.news_scraper.get_macro_news", AsyncMock(return_value="No macro news")), \

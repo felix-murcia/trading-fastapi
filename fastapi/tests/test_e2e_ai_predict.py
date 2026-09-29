@@ -114,6 +114,7 @@ def test_ai_predict_e2e_flow():
 
     with patch("main.init_pool", AsyncMock()), \
          patch("main.close_pool", AsyncMock()), \
+         patch("routers.ai.is_news_blackout", AsyncMock(return_value=(False, None))), \
          patch("routers.ai.get_pool", return_value=MagicMock(execute=AsyncMock())), \
          patch("routers.ai.PPO.load", return_value=model), \
          patch("services.news_scraper.get_macro_news", AsyncMock(return_value="No macro news")), \
@@ -156,6 +157,7 @@ def test_predict_mt5_down_returns_ok_hold_with_cycle_id():
     """P0-2: con MT5 caído, /predict debe devolver 200 + HOLD + cycle_id (nunca 500)."""
     with patch("main.init_pool", AsyncMock()), \
          patch("main.close_pool", AsyncMock()), \
+         patch("routers.ai.is_news_blackout", AsyncMock(return_value=(False, None))), \
          patch("routers.ai.get_pool", return_value=MagicMock(execute=AsyncMock())), \
          patch("routers.ai.load_inference_artifacts"), \
          patch("httpx.AsyncClient", ConnectTimeoutAsyncClient):
@@ -183,6 +185,7 @@ def test_predict_holds_when_equity_unavailable():
 
     with patch("main.init_pool", AsyncMock()), \
          patch("main.close_pool", AsyncMock()), \
+         patch("routers.ai.is_news_blackout", AsyncMock(return_value=(False, None))), \
          patch("routers.ai.get_pool", return_value=MagicMock(execute=AsyncMock())), \
          patch("httpx.AsyncClient", ZeroEquityClient):
         with TestClient(app) as client:
@@ -204,6 +207,7 @@ def test_predict_holds_for_symbol_without_central_pip():
     declarado → HOLD (antes: heurística de dígitos que inventaba 0.0001)."""
     with patch("main.init_pool", AsyncMock()), \
          patch("main.close_pool", AsyncMock()), \
+         patch("routers.ai.is_news_blackout", AsyncMock(return_value=(False, None))), \
          patch("routers.ai.get_pool", return_value=MagicMock(execute=AsyncMock())), \
          patch("httpx.AsyncClient", FakeAsyncClient):
         with TestClient(app) as client:
@@ -218,6 +222,31 @@ def test_predict_holds_for_symbol_without_central_pip():
     assert payload["decision"] == "HOLD"
     assert payload["llm_bias"] == "ERROR"
     assert payload["volume"] is None
+
+
+def test_predict_holds_during_news_blackout():
+    """P2-3: ventana de noticias de alto impacto → HOLD (mismo mecanismo que
+    el SMC), antes de tocar MT5/modelo/Qwen. llm_bias NEUTRAL (es política,
+    no un fallo) y el motivo queda en quality_reason."""
+    with patch("main.init_pool", AsyncMock()), \
+         patch("main.close_pool", AsyncMock()), \
+         patch("routers.ai.get_pool", return_value=MagicMock(execute=AsyncMock())), \
+         patch("routers.ai.is_news_blackout", AsyncMock(return_value=(True, "Non-Farm Payrolls"))), \
+         patch("httpx.AsyncClient", FakeAsyncClient):
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/ai/predict",
+                json={"symbol": "EURUSD", "timeframe": "H1", "position": 0},
+                headers={"x-internal-token": "test-token", "x-cycle-id": "e2e-blackout"},
+            )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["decision"] == "HOLD"
+    assert payload["llm_bias"] == "NEUTRAL"
+    assert payload["quality_reason"] == "news_blackout:Non-Farm Payrolls"
+    assert payload["volume"] is None
+    assert payload["sl_pips"] is None
 
 
 def test_ea_backend_predict_contract_fields_are_aligned():

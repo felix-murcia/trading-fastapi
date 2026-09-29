@@ -83,14 +83,24 @@ def _degraded_unified(
 
 
 def _classify_session(hour: int) -> str:
-    """Classify trading session from hour."""
+    """Classify FX session from the TRUE UTC hour of the candle.
+
+    Fronteras aproximadas en UTC (P2-3 auditoría): la versión anterior trataba
+    la hora del servidor del broker como si fuera UTC y, además, rotulaba
+    17-23h como "Asia" (es la tarde de Nueva York) y 23-7h como
+    "Weekend/Closed" (entre semana el mercado abre 24h: son Sydney/Tokio).
+    La ventana 12-16 UTC es el solape Londres/NY — máxima liquidez — y merece
+    etiqueta propia: es cuando el veto decide sobre la señal más forte del día.
+    """
+    if 0 <= hour < 7:
+        return "Asia"                # Tokio + Sídney (00-07 UTC)
     if 7 <= hour < 12:
-        return "London"
-    elif 12 <= hour < 17:
-        return "NY"
-    elif 17 <= hour < 23:
-        return "Asia"
-    return "Weekend/Closed"
+        return "London"              # mañana de Londres (07-12 UTC)
+    if 12 <= hour < 16:
+        return "London/NY Overlap"   # solape = máxima liquidez (12-16 UTC)
+    if 16 <= hour < 21:
+        return "New York"            # tarde de NY (16-21 UTC)
+    return "Sydney"                  # cierre NY + apertura Sídney (21-24 UTC)
 
 
 def _classify_regime(bb_pos: float, atr_pct: float, macd_hist: float) -> str:
