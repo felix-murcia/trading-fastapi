@@ -49,6 +49,10 @@ class MT5ExecutionDataAdapter:
     `place_order_with_fallback` fue eliminado en P3-1d (código muerto con
     cero llamantes, junto a `correlation_sizing.py`): un puerto no expone
     funciones que el sistema no usa.
+
+    P2-4b: `close_positions_by_symbol` (borrar TODO el símbolo) dio paso a
+    `close_position(ticket)` — el sistema solo cierra por ticket vía el
+    ledger de propiedad; cerrar el símbolo entero tocaba posiciones ajenas.
     """
 
     async def place_order(self, symbol: str, order_type: str, volume: float,
@@ -57,9 +61,9 @@ class MT5ExecutionDataAdapter:
         from services import mt5_client
         return await mt5_client.place_order(symbol, order_type, volume, price, sl, tp, comment)
 
-    async def close_positions_by_symbol(self, symbol: str) -> dict:
+    async def close_position(self, ticket: int) -> dict:
         from services import mt5_client
-        return await mt5_client.close_positions_by_symbol(symbol)
+        return await mt5_client.close_position(ticket)
 
 
 class AiModelStoreAdapter:

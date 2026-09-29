@@ -139,9 +139,14 @@ async def get_candle_open(symbol: str, timeframe: str = "H1") -> float:
     return candles[0]["open"]
 
 
-async def close_positions_by_symbol(symbol: str) -> dict:
-    """Cierra todas las posiciones abiertas de un símbolo."""
-    return await _delete(f"/api/v1/positions/symbol/{symbol}")
+# P2-4b: `close_positions_by_symbol` (cerrar TODO el símbolo) fue eliminado —
+# los cierres pasan por `close_position(ticket)` con ledger de propiedad
+# (services/position_ownership.py); nada cierra posiciones ajenas.
+
+
+async def close_position(ticket: int) -> dict:
+    """P2-4b: cierra UNA posición por ticket (cierre selectivo por propiedad)."""
+    return await _delete(f"/api/v1/positions/{ticket}")
 
 
 # ── Normalización ──────────────────────────────────────────────────────────────

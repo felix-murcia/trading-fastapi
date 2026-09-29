@@ -19,6 +19,7 @@ import time
 from db.connection import get_pool
 from models.orders import OrderPrepareRequest
 from services import mt5_client, order_manager, position_sizing, news_filter
+from services.position_ownership import close_positions_owned
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -103,19 +104,25 @@ async def process_signal(
                 direction, symbol, price, sl_anchor_tmp, spread
             )
 
-        # 6. Cerrar posición abierta en el símbolo si la hay (flip de señal)
+        # 6. Flip de señal: cerrar SOLO las posiciones de ESTA estrategia
+        #    (P2-4b: la posición del EA es otro mundo — su ticket no está en
+        #    nuestro ledger `smc_%` y jamás se cierra desde aquí).
         pool = get_pool()
         try:
             positions = await mt5_client.get_positions()
             open_pos = [p for p in positions.get("open", []) if p["symbol"] == symbol]
             if open_pos:
-                await mt5_client.close_positions_by_symbol(symbol)
+                result = await close_positions_owned(symbol, open_pos)
                 await _audit(cycle_id, "simple_position_closed", {
                     "symbol": symbol, "reason": "signal_flip", "direction": direction,
-                    "closed_tickets": [p["ticket"] for p in open_pos],
+                    "closed_tickets": result["closed"],
+                    "skipped_foreign": result["foreign"],
+                    "failed": result["failed"],
                 })
-                logger.info("[SIMPLE] CLOSED %d position(s) on %s before %s entry",
-                            len(open_pos), symbol, direction)
+                logger.info(
+                    "[SIMPLE] CLOSED %d position(s) on %s before %s entry (%d ajenas no tocadas)",
+                    len(result["closed"]), symbol, direction, len(result["foreign"]),
+                )
         except Exception as exc:
             logger.warning("[SIMPLE] close existing position failed %s: %s", symbol, exc)
 

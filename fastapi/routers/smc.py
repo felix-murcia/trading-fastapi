@@ -7,6 +7,7 @@ from core.rules import is_winning_close
 from db.connection import get_pool
 from services import simple_pipeline, mt5_client, news_filter
 from services.auto_retrain import record_trade_filled
+from services.position_ownership import close_positions_owned
 from config import settings
 from .deps import verify_token
 
@@ -88,6 +89,41 @@ class CloseRequest(BaseModel):
     reason: str = "ema_cross"
 
 
+# Dominio de trade_outcomes.exit_reason (CHECK en db/schema.sql) — un reason
+# fuera de dominio rompe el INSERT con asyncpg (antes: la violación se tragaba
+# el except y el cierre quedaba SIN persistir en auto-retrain, solo en log).
+_EXIT_REASONS = {"sl", "tp", "manual", "news", "signal_end", "ea"}
+
+
+def _exit_reason_for_record(reason: str) -> str:
+    """Reason válido para trade_outcomes: fuera de dominio → 'signal_end'
+    (el cierre lo manda la estrategia al terminar su señal)."""
+    return reason if reason in _EXIT_REASONS else "signal_end"
+
+
+async def _record_closed_for_retrain(
+    symbol: str, closed_positions: list[dict], reason: str
+) -> None:
+    """Auto-retrain: registra SOLO los cierres realmente ejecutados de ESTA
+    estrategia (P2-4b). Un cierre fallido no genera trade."""
+    exit_reason = _exit_reason_for_record(reason)
+    for p in closed_positions:
+        try:
+            await record_trade_filled(
+                symbol=symbol,
+                entry_time=p.get("time_open", 0) or time.time(),
+                exit_time=time.time(),
+                pnl=p.get("profit", 0.0),
+                pnl_pct=p.get("profit", 0.0) / 1000.0,  # Aproximado
+                direction="LONG" if p.get("type", "").lower() in ("buy", "long") else "SHORT",
+                sl_hit=False,
+                tp_hit=False,
+                exit_reason=exit_reason,
+            )
+        except Exception as rf_exc:
+            logger.warning("[SMC] record_trade_filled falló (%s): %s", symbol, rf_exc)
+
+
 @router.post("/close")
 async def close_position(req: CloseRequest, _: None = Depends(verify_token)):
     try:
@@ -96,35 +132,43 @@ async def close_position(req: CloseRequest, _: None = Depends(verify_token)):
         if not open_pos:
             return {"action": "skip", "reason": "no_open_position"}
 
-        # Recopilar datos de cada posición antes de cerrarla (para auto-retrain)
-        for p in open_pos:
-            try:
-                await record_trade_filled(
-                    symbol=req.symbol,
-                    entry_time=p.get("time_open", 0) or time.time(),
-                    exit_time=time.time(),
-                    pnl=p.get("profit", 0.0),
-                    pnl_pct=p.get("profit", 0.0) / 1000.0,  # Aproximado
-                    direction="LONG" if p.get("type", "").lower() in ("buy", "long") else "SHORT",
-                    sl_hit=False,
-                    tp_hit=False,
-                    exit_reason=req.reason,
-                )
-            except Exception as rf_exc:
-                logger.warning("[CLOSE] record_trade_filled falló: %s", rf_exc)
+        # P2-4b: cerrar SOLO las posiciones de ESTA estrategia (ledger
+        # orders.cycle_id 'smc_%') — la posición del EA (magic 90001) es otro
+        # mundo: su ticket no está en nuestro ledger y jamás se cierra aquí.
+        result = await close_positions_owned(req.symbol, open_pos)
+        closed_set = set(result["closed"])
 
-        await mt5_client.close_positions_by_symbol(req.symbol)
+        # Auto-retrain: solo los cierres REALMENTE ejecutados. Antes se
+        # registraba cualquier posición del símbolo (incluida la del EA) y
+        # también si el cierre fallaba → datos de retrain ajenos/fantasma.
+        await _record_closed_for_retrain(
+            req.symbol,
+            [p for p in open_pos if p.get("ticket") in closed_set],
+            req.reason,
+        )
+
         pool = get_pool()
         await pool.execute(
             "INSERT INTO audit_log(cycle_id, event, data) VALUES($1,$2,$3)",
             f"close_{req.symbol}_{req.reason}",
             "position_closed",
             json.dumps({"symbol": req.symbol, "reason": req.reason,
-                        "closed_tickets": [p["ticket"] for p in open_pos]}),
+                        "closed_tickets": result["closed"],
+                        "skipped_foreign": result["foreign"],
+                        "failed": result["failed"]}),
         )
-        logger.info("[CLOSE] %s closed %d position(s) reason=%s",
-                    req.symbol, len(open_pos), req.reason)
-        return {"action": "closed", "tickets": [p["ticket"] for p in open_pos]}
+        if not result["closed"]:
+            # Nada propio que cerrar: solo posiciones ajenas (EA) y/o fallos.
+            reason = "close_failed" if result["failed"] else "no_owned_position"
+            logger.info("[CLOSE] %s sin cierre propio (reason=%s, ajenas=%d)",
+                        req.symbol, reason, len(result["foreign"]))
+            return {"action": "skip", "reason": reason,
+                    "foreign": result["foreign"], "failed": result["failed"]}
+        logger.info("[CLOSE] %s closed %d position(s) reason=%s (ajenas=%d, fallos=%d)",
+                    req.symbol, len(result["closed"]), req.reason,
+                    len(result["foreign"]), len(result["failed"]))
+        return {"action": "closed", "tickets": result["closed"],
+                "foreign": result["foreign"], "failed": result["failed"]}
     except Exception as exc:
         logger.error("[CLOSE] failed %s: %s", req.symbol, exc, exc_info=True)
         return {"action": "error", "reason": str(exc)}
@@ -163,7 +207,27 @@ async def news_check(req: NewsCheckRequest, _: None = Depends(verify_token)):
             if sym not in open_symbols:
                 continue
             try:
-                await mt5_client.close_positions_by_symbol(sym)
+                # P2-4b: solo las posiciones de ESTA estrategia (ledger 'smc_%').
+                # La del EA es otro mundo: su protección en noticias es su
+                # SL/TP + el blackout de entradas del propio EA.
+                candidates = [p for p in positions.get("open", [])
+                              if p.get("symbol") == sym]
+                result = await close_positions_owned(sym, candidates)
+                if not result["closed"]:
+                    logger.info(
+                        "[NEWS-CHECK] %s — sin cierre propio (ajenas=%d, fallos=%d)",
+                        sym, len(result["foreign"]), len(result["failed"]),
+                    )
+                    if not result["failed"]:
+                        open_symbols.remove(sym)  # nada propio que proteger
+                    continue
+                # Convención AGENTS.md: todo cierre propio se persiste en
+                # trade_outcomes (antes estos cierres no se registraban NUNCA).
+                await _record_closed_for_retrain(
+                    sym,
+                    [p for p in candidates if p.get("ticket") in set(result["closed"])],
+                    "news",
+                )
                 pool = get_pool()
                 await pool.execute(
                     "INSERT INTO audit_log(cycle_id, event, data) VALUES($1,$2,$3)",
@@ -171,13 +235,19 @@ async def news_check(req: NewsCheckRequest, _: None = Depends(verify_token)):
                     "position_closed_news",
                     json.dumps({"symbol": sym, "event": event["title"],
                                 "time_utc": event["time_utc"],
-                                "minutes_until": event["minutes_until"]}),
+                                "minutes_until": event["minutes_until"],
+                                "closed_tickets": result["closed"],
+                                "skipped_foreign": result["foreign"],
+                                "failed": result["failed"]}),
                 )
                 closed.append({"symbol": sym, "event": event["title"],
-                               "minutes_until": event["minutes_until"]})
+                               "minutes_until": event["minutes_until"],
+                               "tickets": result["closed"],
+                               "foreign": len(result["foreign"])})
                 open_symbols.remove(sym)
-                logger.info("[NEWS-CHECK] Closed %s — '%s' in %.0f min",
-                            sym, event["title"], event["minutes_until"])
+                logger.info("[NEWS-CHECK] Closed %d on %s — '%s' in %.0f min (%d ajenas no tocadas)",
+                            len(result["closed"]), sym, event["title"],
+                            event["minutes_until"], len(result["foreign"]))
             except Exception as exc:
                 logger.error("[NEWS-CHECK] Failed to close %s: %s", sym, exc)
 
