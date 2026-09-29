@@ -24,8 +24,9 @@ _LEGACY_MODEL_FILENAME = "ppo_trading_bot_v3.zip"
 def default_model_path(symbol: str) -> str:
     """Bundle propio por par (decisión P3-1: modelo por par).
 
-    `PPO_OUTPUT_DIR` (por defecto `/app/ml`) es la misma fuente que usa
-    `routers.ai.MODEL_DIR`, así que núcleo y router nunca divergen.
+    `PPO_OUTPUT_DIR` (por defecto `/app/ml`) es la única fuente de la
+    convención: `routers.ai` deriva sus rutas de esta función, así que
+    núcleo y router nunca divergen.
     """
     model_dir = os.getenv("PPO_OUTPUT_DIR", "/app/ml")
     if symbol == "EURUSD":

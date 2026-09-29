@@ -32,6 +32,11 @@ from services.walk_forward import (
 logger = logging.getLogger(__name__)
 
 MODEL_PATH = "/app/ml/ppo_trading_bot_v3.zip"   # ← EA usa v3, no v2
+# P3-1b: el pipeline de retrain entrena HOY un único mundo. Fuente única del
+# símbolo (fetch de velas + hot-reload del bundle tras promover); P3-1c lo
+# parametriza por par (columnas symbol en model_registry/training_experiments
+# y retrain_state por símbolo).
+TRAINING_SYMBOL = "EURUSD"
 RETRAIN_LOCK = asyncio.Lock()
 SCHEDULE_CHECK_S = 3600   # P3-2d: el calendario se revisa cada hora
 
@@ -571,7 +576,7 @@ async def _do_retrain(trigger: str = "manual") -> None:
     cfg = RetrainConfig
     logger.warning("[RETRAIN] ===== INICIANDO RETRAIN (trigger=%s) =====", trigger)
 
-    candles = await _fetch_historical_candles(symbol="EURUSD", count=cfg.lookback_candles)
+    candles = await _fetch_historical_candles(symbol=TRAINING_SYMBOL, count=cfg.lookback_candles)
     if len(candles) < 100:
         raise RuntimeError(f"[RETRAIN] No hay suficientes velas: {len(candles)}")
     df = _build_training_dataframe(candles)
@@ -770,8 +775,11 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int) -> None:
         {"ok": decision.ok, "reason": decision.reason,
          "checks": decision.details.get("checks")},
     )
-    from routers.ai import reload_inference_artifacts
-    reload_inference_artifacts()
+    # P3-1b: hot-reload vía ModelStorePort — el servicio ya no importa del
+    # router (el adapter resuelve `routers.ai` en el momento de la llamada,
+    # así que el patch de los tests sigue viéndose).
+    from core.adapters import AiModelStoreAdapter
+    AiModelStoreAdapter().reload(TRAINING_SYMBOL)
 
     # P3-2a: la promoción es el punto de decisión del experimento — se cierra
     # aquí, antes de los pasos posteriores (state/backup/log): si esos fallan,

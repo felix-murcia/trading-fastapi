@@ -6,10 +6,13 @@ Cobertura (comportamiento, sin red ni DB real):
   conexión (UPDATE→INSERT ordenado; exactamente un bundle activo) y parámetros
   = hashes/source/gate del manifest. La versión CTE falló en vivo el
   2026-09-28: las sub-sentencias de un CTE no se ven entre sí (P2-2).
-- load_inference_artifacts: swap ATÓMICO — si VecNormalize falla, la caché en
-  memoria sigue sirviendo el bundle anterior (nunca estado a medias).
-- reload_inference_artifacts: devuelve el estado en memoria tras recargar.
-- GET /api/v1/ai/model/status: token obligatorio + in_sync disco vs memoria.
+- load_inference_artifacts(symbol): swap ATÓMICO por par — si VecNormalize
+  falla, la entrada `_BRAINS[symbol]` en memoria sigue sirviendo el bundle
+  anterior (nunca estado a medias).
+- reload_inference_artifacts(symbol): devuelve el estado en memoria de ese
+  par tras recargar.
+- GET /api/v1/ai/model/status: token obligatorio + in_sync disco vs memoria
+  (P3-1b: por par, con resolución del único habilitado cuando no se elige).
 - schema.sql: índice único parcial que garantiza un único bundle activo.
 """
 import json
@@ -145,9 +148,8 @@ class TestAtomicBundleSwap:
     @pytest.fixture(autouse=True)
     def _save_cache(self, monkeypatch):
         from routers import ai
-        monkeypatch.setattr(ai, "_CACHED_MODEL", ai._CACHED_MODEL)
-        monkeypatch.setattr(ai, "_CACHED_VEC_NORM", ai._CACHED_VEC_NORM)
-        monkeypatch.setattr(ai, "_CACHED_BUNDLE", ai._CACHED_BUNDLE)
+        monkeypatch.setattr(ai, "_BRAINS", dict(ai._BRAINS))
+        monkeypatch.setattr(ai, "_REGISTRY", ai._REGISTRY)
 
     @staticmethod
     def _patch_load(monkeypatch, ai, *, manifest, vecnorm_load=None):
@@ -168,9 +170,10 @@ class TestAtomicBundleSwap:
 
         old_model, old_norm = object(), object()
         old_bundle = {"model_sha256": "OLD", "source": "old"}
-        monkeypatch.setattr(ai, "_CACHED_MODEL", old_model)
-        monkeypatch.setattr(ai, "_CACHED_VEC_NORM", old_norm)
-        monkeypatch.setattr(ai, "_CACHED_BUNDLE", old_bundle)
+        monkeypatch.setattr(
+            ai, "_BRAINS",
+            {"EURUSD": ai.Brain(model=old_model, vec_norm=old_norm, bundle=old_bundle)},
+        )
 
         self._patch_load(
             monkeypatch, ai,
@@ -179,26 +182,29 @@ class TestAtomicBundleSwap:
         )
 
         with pytest.raises(RuntimeError, match="pkl corrupto"):
-            ai.load_inference_artifacts()
+            ai.load_inference_artifacts("EURUSD")
 
-        # Swap atómico: la falla NO deja la caché a medias.
-        assert ai._CACHED_MODEL is old_model
-        assert ai._CACHED_VEC_NORM is old_norm
-        assert ai._CACHED_BUNDLE is old_bundle
+        # Swap atómico por par: la falla NO deja la entrada a medias.
+        brain = ai._BRAINS["EURUSD"]
+        assert brain.model is old_model
+        assert brain.vec_norm is old_norm
+        assert brain.bundle is old_bundle
 
     def test_reload_swaps_cache_and_returns_state(self, monkeypatch):
         from routers import ai
 
         new_model = self._patch_load(monkeypatch, ai, manifest=_manifest(vec_norm=False))
+        monkeypatch.setattr(ai, "_BRAINS", {})
 
-        state = ai.reload_inference_artifacts()
+        state = ai.reload_inference_artifacts("EURUSD")
 
         assert state["model_sha256"] == "a" * 64
         assert state["source"] == "auto_retrain_normalized"
         assert "loaded_at" in state
-        assert ai._CACHED_MODEL is new_model
-        assert ai._CACHED_VEC_NORM is None   # bundle declarado en crudo
-        assert ai._CACHED_BUNDLE == state
+        brain = ai._BRAINS["EURUSD"]
+        assert brain.model is new_model
+        assert brain.vec_norm is None   # bundle declarado en crudo
+        assert brain.bundle == state
 
 
 class TestModelStatusEndpoint:
@@ -217,9 +223,12 @@ class TestModelStatusEndpoint:
     def test_in_sync_when_hashes_match(self, monkeypatch):
         from routers import ai
         monkeypatch.setattr(
-            ai, "_CACHED_BUNDLE",
-            {"model_sha256": "a" * 64, "vec_norm_sha256": "b" * 64,
-             "source": "auto_retrain_normalized", "loaded_at": "t0"},
+            ai, "_BRAINS",
+            {"EURUSD": ai.Brain(
+                model=None, vec_norm=None,
+                bundle={"model_sha256": "a" * 64, "vec_norm_sha256": "b" * 64,
+                        "source": "auto_retrain_normalized", "loaded_at": "t0"},
+            )},
         )
         monkeypatch.setattr("services.model_registry.load_manifest", lambda p: _manifest())
 
@@ -227,15 +236,19 @@ class TestModelStatusEndpoint:
 
         assert response.status_code == 200
         payload = response.json()
+        assert payload["symbol"] == "EURUSD"   # único par habilitado → resuelto solo
         assert payload["in_sync"] is True
         assert payload["disk"]["source"] == "auto_retrain_normalized"
 
     def test_desync_when_disk_changed(self, monkeypatch):
         from routers import ai
         monkeypatch.setattr(
-            ai, "_CACHED_BUNDLE",
-            {"model_sha256": "c" * 64, "vec_norm_sha256": "b" * 64,
-             "source": "old_bundle", "loaded_at": "t0"},
+            ai, "_BRAINS",
+            {"EURUSD": ai.Brain(
+                model=None, vec_norm=None,
+                bundle={"model_sha256": "c" * 64, "vec_norm_sha256": "b" * 64,
+                        "source": "old_bundle", "loaded_at": "t0"},
+            )},
         )
         monkeypatch.setattr("services.model_registry.load_manifest", lambda p: _manifest())
 

@@ -6,10 +6,10 @@ Protocol-clases, nunca de los servicios concretos. Los adapters reales
 puntos de patch de la suite (`patch("services.mt5_client.get_candles")`,
 `patch("services.qwen_client.query_qwen_unified")`, …) siguen operando.
 
-Declarados en P3-1a: mercado, ejecución y LLM. `ModelStorePort` entra en
-P3-1b junto con la carga de modelos por par (hoy el loader es único y sin
-path — un puerto con un parámetro que el loader ignora sería un puerto que
-miente; se declara cuando exista quien lo implemente honradamente).
+Declarados: mercado, ejecución y LLM (P3-1a); almacén de modelos
+(`ModelStorePort`, P3-1b) — entró cuando el loader dejó de ser único y
+aceptó el símbolo del par, de modo que el protocolo refleja lo que el
+código hace de verdad.
 """
 import logging
 from typing import Optional, Protocol, runtime_checkable
@@ -35,6 +35,19 @@ class ExecutionPort(Protocol):
                           price: float, sl: float, tp: float,
                           comment: str = "") -> dict: ...
     async def close_positions_by_symbol(self, symbol: str) -> dict: ...
+
+
+@runtime_checkable
+class ModelStorePort(Protocol):
+    """Bundles de modelo por par (adapter: `routers.ai` vía `AiModelStoreAdapter`).
+
+    `load` certifica y carga en memoria el bundle del par; `reload` hace el
+    swap atómico tras una promoción (P0-5/P1-2) y devuelve la procedencia
+    del bundle resultante.
+    """
+
+    def load(self, symbol: str) -> None: ...
+    def reload(self, symbol: str) -> dict: ...
 
 
 @runtime_checkable

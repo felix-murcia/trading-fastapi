@@ -62,6 +62,23 @@ class MT5ExecutionDataAdapter:
         return await mt5_client.close_positions_by_symbol(symbol)
 
 
+class AiModelStoreAdapter:
+    """`ModelStorePort` sobre `routers.ai` (el loader de inferencia vive ahí).
+
+    Late binding como el resto: `patch("routers.ai.reload_inference_artifacts")`
+    —el del test de promoción de retrain— se ve siempre, porque el atributo
+    se resuelve en el momento de la llamada.
+    """
+
+    def load(self, symbol: str) -> None:
+        from routers import ai
+        ai.load_inference_artifacts(symbol)
+
+    def reload(self, symbol: str) -> dict:
+        from routers import ai
+        return ai.reload_inference_artifacts(symbol)
+
+
 class QwenLLMAdapter:
     """`LLMPort` sobre `services.qwen_client`."""
 

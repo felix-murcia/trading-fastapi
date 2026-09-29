@@ -4,6 +4,7 @@ import logging
 import os
 import time
 from datetime import datetime, timezone
+from dataclasses import dataclass
 from typing import Optional
 
 import httpx
@@ -18,6 +19,8 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from config import settings
+from core.container import build_registry_from_settings
+from core.pair import PairRegistry, default_model_path
 from db.connection import get_pool
 from ml.trading_env_v2 import (
     MARKET_FEATURES,
@@ -64,9 +67,8 @@ class _DummyEnv(gym.Env):
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# Paths de artefactos
-MODEL_DIR = os.getenv("PPO_OUTPUT_DIR", "/app/ml")
-MODEL_V3_PATH = os.path.join(MODEL_DIR, "ppo_trading_bot_v3.zip")
+# Paths de artefactos: P3-1b — la convención de rutas vive en
+# core.pair.default_model_path (fuente única); este router solo la consume.
 QWEN_URL = getattr(settings, "qwen_url", "http://100.90.16.33:8080/v1/chat/completions")
 
 QUALITY_THRESHOLD = 5.0
@@ -91,36 +93,60 @@ def _veto_reason(original: str, final: str, qwen: dict) -> str | None:
     return "unknown_veto"
 
 
-# Estado en memoria para inferencia rápida
-_CACHED_MODEL: Optional[PPO] = None
-_CACHED_VEC_NORM: Optional[VecNormalize] = None
-_CACHED_BUNDLE: dict = {}   # P1-2: procedencia del bundle EN MEMORIA (sha, source, loaded_at)
+# Estado en memoria para inferencia rápida — P3-1b: UN BRAIN POR PAR.
+# Cada entrada es el bundle certificado de ESE símbolo (modelo + normalizador
+# + procedencia): los pares no comparten estado de inferencia.
+@dataclass(frozen=True)
+class Brain:
+    """Bundle certificado de UN par en memoria (P0-5/P1-2 + P3-1b)."""
+
+    model: PPO
+    vec_norm: Optional[VecNormalize]
+    bundle: dict   # P1-2: procedencia del bundle EN MEMORIA (sha, source, loaded_at)
 
 
-def load_inference_artifacts():
-    """Carga PPO y VecNormalize una sola vez, validando el bundle contra su manifest (P0-5).
+_BRAINS: dict[str, Brain] = {}
+_REGISTRY: Optional[PairRegistry] = None   # mundos configurados vía PAIRS
+
+
+def _get_registry() -> PairRegistry:
+    """Registro de pares (mundos) — construido una vez, de forma explícita.
+
+    Construcción perezosa (nunca en import del módulo): los tests parchean
+    `services.*` antes de que exista ningún adapter, y un PAIRS inválido
+    falla con su error en el primer uso, no en el import.
+    """
+    global _REGISTRY
+    if _REGISTRY is None:
+        _REGISTRY = build_registry_from_settings()
+    return _REGISTRY
+
+
+def load_inference_artifacts(symbol: str) -> None:
+    """Carga PPO y VecNormalize del par `symbol`, validando su bundle (P0-5).
 
     Cualquier incoherencia (manifest ausente, hash distinto, obs_shape distinto)
     lanza RuntimeError y detiene el arranque: nunca se sirve un binario sin
     certificar ni se degrada en silencio.
 
-    El swap de la caché es ATÓMICO (se asigna al final): si la validación o la
-    carga de VecNormalize fallan, se mantiene íntegro el bundle anterior — nunca
+    El swap de la caché es ATÓMICO por símbolo: la entrada `_BRAINS[symbol]`
+    se asigna al final — si la validación o la carga de VecNormalize fallan,
+    se mantiene íntegro el bundle anterior de ese par (o su ausencia), nunca
     un estado mitad nuevo, mitad viejo.
     """
-    global _CACHED_MODEL, _CACHED_VEC_NORM, _CACHED_BUNDLE
     from services.model_registry import assert_obs_shape, validate_bundle
 
-    manifest = validate_bundle(MODEL_V3_PATH)
-    model = PPO.load(MODEL_V3_PATH, device="cpu")
-    logger.info("[AI-STARTUP] Modelo PPO v3 cargado en memoria exitosamente.")
+    model_path = default_model_path(symbol)
+    manifest = validate_bundle(model_path)
+    model = PPO.load(model_path, device="cpu")
+    logger.info("[AI-STARTUP] Modelo PPO v3 de %s cargado en memoria exitosamente.", symbol)
 
     obs_space = getattr(model, "observation_space", None)
     assert_obs_shape(manifest, getattr(obs_space, "shape", None))
 
     vec_norm_file = manifest.get("vec_norm_file")
     if vec_norm_file:
-        vec_path = os.path.join(os.path.dirname(MODEL_V3_PATH), vec_norm_file)
+        vec_path = os.path.join(os.path.dirname(model_path), vec_norm_file)
         dummy_env = DummyVecEnv([lambda: _DummyEnv(obs_space, model.action_space)])
         vec_norm = VecNormalize.load(vec_path, dummy_env)
         vec_norm.training = False
@@ -133,35 +159,41 @@ def load_inference_artifacts():
         )
 
     # Swap atómico al final: solo aquí deja de valer el bundle anterior.
-    _CACHED_MODEL = model
-    _CACHED_VEC_NORM = vec_norm
-    _CACHED_BUNDLE = {
-        "model_sha256": manifest["model_sha256"],
-        "vec_norm_sha256": manifest.get("vec_norm_sha256"),
-        "source": manifest["source"],
-        "loaded_at": datetime.now(timezone.utc).isoformat(),
-    }
+    _BRAINS[symbol] = Brain(
+        model=model,
+        vec_norm=vec_norm,
+        bundle={
+            "model_sha256": manifest["model_sha256"],
+            "vec_norm_sha256": manifest.get("vec_norm_sha256"),
+            "source": manifest["source"],
+            "loaded_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
 
 
-def reload_inference_artifacts() -> dict:
-    """P1-2: hot-reload del bundle tras una promoción, sin reiniciar el proceso.
+def reload_inference_artifacts(symbol: str) -> dict:
+    """P1-2: hot-reload del bundle de `symbol` tras una promoción, sin reiniciar.
 
     Valida el bundle nuevo ANTES de tocar la caché: si falla, la excepción se
     propaga (el done-callback del retrain emite alerta) y se sigue sirviendo el
-    bundle anterior — nunca un swap parcial ni degradación silenciosa.
+    bundle anterior de ESE par — nunca un swap parcial ni degradación silenciosa.
     """
-    load_inference_artifacts()
+    load_inference_artifacts(symbol)
+    brain = _BRAINS[symbol]
     logger.warning(
-        "[AI-RELOAD] Bundle recargado en memoria: source=%s sha=%s…",
-        _CACHED_BUNDLE.get("source"),
-        str(_CACHED_BUNDLE.get("model_sha256"))[:12],
+        "[AI-RELOAD] Bundle de %s recargado en memoria: source=%s sha=%s…",
+        symbol,
+        brain.bundle.get("source"),
+        str(brain.bundle.get("model_sha256"))[:12],
     )
-    return dict(_CACHED_BUNDLE)
+    return dict(brain.bundle)
 
 
 @router.on_event("startup")
 async def on_startup():
-    load_inference_artifacts()
+    # P3-1b: cada par habilitado en PAIRS carga SU brain (mundo autónomo).
+    for ctx in _get_registry().enabled():
+        load_inference_artifacts(ctx.config.symbol)
 
 
 def _build_qwen_candle_context(df: pd.DataFrame, count: int = 10) -> str:
@@ -253,6 +285,32 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     # heurístico de dígitos daba 0.01 en oro frente al 0.10 del resto del
     # sistema). Símbolo sin pip declarado → HOLD visible, nunca heurística.
     sym = req.symbol.upper()
+
+    # P3-1b: gate de MUNDO — el símbolo debe estar configurado en PAIRS y
+    # habilitado. Desconocido o deshabilitado → HOLD explícito ANTES de tocar
+    # MT5, noticias o el modelo: jamás un modelo de otro par responde por un
+    # par que no es suyo (los mundos son independientes y la lista de mundos
+    # es settings.pairs).
+    ctx = _get_registry().get(sym)
+    if ctx is None:
+        logger.warning("[%s] par NO configurado en PAIRS: %r → HOLD", cycle_id, req.symbol)
+        return PredictResponse(
+            cycle_id=cycle_id,
+            ml_prob=0.5,
+            llm_bias="ERROR",
+            decision="HOLD",
+            quality_reason="pair_not_configured",
+        )
+    if not ctx.config.enabled:
+        logger.warning("[%s] par deshabilitado en PAIRS: %r → HOLD", cycle_id, req.symbol)
+        return PredictResponse(
+            cycle_id=cycle_id,
+            ml_prob=0.5,
+            llm_bias="NEUTRAL",
+            decision="HOLD",
+            quality_reason="pair_disabled",
+        )
+
     if not is_supported(sym):
         logger.error("[%s] símbolo sin pip centralizado: %r → HOLD", cycle_id, req.symbol)
         return PredictResponse(cycle_id=cycle_id, ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
@@ -324,10 +382,12 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     features_list = get_market_features(df)
     candle_context = _build_qwen_candle_context(raw_df, count=10)
 
-    if _CACHED_MODEL is None:
-        load_inference_artifacts()
-    if _CACHED_MODEL is None:
-        logger.error("[%s] No hay modelo PPO disponible.", cycle_id)
+    brain = _BRAINS.get(sym)
+    if brain is None:
+        load_inference_artifacts(sym)
+        brain = _BRAINS.get(sym)
+    if brain is None:
+        logger.error("[%s] No hay modelo PPO disponible para %s.", cycle_id, sym)
         return PredictResponse(cycle_id=cycle_id, ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
 
     current_price = float(df['close'].iloc[-1])
@@ -364,12 +424,12 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         window_size=20,
     )
 
-    if _CACHED_VEC_NORM is not None:
-        norm_obs = _CACHED_VEC_NORM.normalize_obs(raw_obs)
+    if brain.vec_norm is not None:
+        norm_obs = brain.vec_norm.normalize_obs(raw_obs)
     else:
         norm_obs = raw_obs
 
-    action, _ = _CACHED_MODEL.predict(norm_obs, deterministic=True)
+    action, _ = brain.model.predict(norm_obs, deterministic=True)
     raw_action = np.asarray(action, dtype=np.float32).reshape(-1)
     # P2-1 / D3: contrato [direction, volume]. El bundle activo pre-P2-1
     # (4 cabezas) sigue siendo válido durante la transición: sl/tp ya se
@@ -545,22 +605,57 @@ async def approve_retrain_endpoint(_: None = Depends(verify_token)):
     return result
 
 
+def _sole_enabled_symbol() -> Optional[str]:
+    """Símbolo del único par habilitado en PAIRS.
+
+    `None` si hay 0 o varios habilitados: la ambigüedad no se resuelve por
+    heurística — el caller debe elegir explícitamente.
+
+    Lee `config.settings` en el momento de la llamada (mismo criterio que
+    `core.container.build_registry_from_settings`): TODOS los lectores de
+    `pairs` comparten la misma fuente canónica.
+    """
+    from config import settings
+    enabled = [p.get("symbol") for p in settings.pairs if p.get("enabled")]
+    return enabled[0] if len(enabled) == 1 else None
+
+
 @router.get("/model/status")
-async def model_status(_: None = Depends(verify_token)):
+async def model_status(symbol: Optional[str] = None, _: None = Depends(verify_token)):
     """P1-2: qué bundle corre EN MEMORIA vs qué certifica EL DISCO (in_sync).
+
+    P3-1b: responde por par (`?symbol=`); con un único par habilitado se
+    resuelve solo. Varios (o cero) pares habilitados sin elegir → 400: la
+    ambigüedad no se resuelve por heurística.
 
     `in_sync=false` = hubo una promoción que no se recargó (o un cambio en disco
     no certificado): el operador ve de inmediato disco ≠ memoria.
     """
     from services.model_registry import load_manifest
 
-    disk = load_manifest(MODEL_V3_PATH)  # RuntimeError si no está certificado
-    memory = dict(_CACHED_BUNDLE)
+    sym = symbol or _sole_enabled_symbol()
+    if not sym:
+        raise HTTPException(
+            status_code=400,
+            detail="Varios (o cero) pares habilitados en PAIRS: especifique ?symbol=",
+        )
+    if _get_registry().get(sym) is None:
+        # Observabilidad sí, pero no se lee el disco de un par que no existe:
+        # 404 con detalle en vez de un 500 sin explicación.
+        raise HTTPException(
+            status_code=404,
+            detail=f"Par {sym!r} no configurado en PAIRS",
+        )
+
+    brain = _BRAINS.get(sym)
+    memory = dict(brain.bundle) if brain is not None else {}
+    disk = load_manifest(default_model_path(sym))  # RuntimeError si no está certificado
     in_sync = (
         memory.get("model_sha256") == disk["model_sha256"]
         and memory.get("vec_norm_sha256") == disk.get("vec_norm_sha256")
     )
     return {
+        "symbol": sym,
         "memory": memory,
         "disk": {
             "model_sha256": disk["model_sha256"],

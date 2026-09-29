@@ -202,18 +202,28 @@ def test_predict_holds_when_equity_unavailable():
     assert payload["volume"] is None
 
 
-def test_predict_holds_for_symbol_without_central_pip():
-    """P2-2: pip centralizado en position_sizing.PIP_SIZE — símbolo sin pip
-    declarado → HOLD (antes: heurística de dígitos que inventaba 0.0001)."""
+def test_predict_holds_for_symbol_without_central_pip(monkeypatch):
+    """P2-2: pip centralizado en position_sizing.PIP_SIZE — símbolo HABILITADO
+    en PAIRS pero sin pip declarado → HOLD (antes: heurística de dígitos que
+    inventaba 0.0001). El gate de mundo (P3-1b) lo deja pasar porque está
+    configurado: la compuerta del pip existe de forma independiente."""
+    from config import settings
+    from routers import ai
+    monkeypatch.setattr(settings, "pairs", [
+        {"symbol": "EURUSD", "enabled": True},
+        {"symbol": "XXXYZZ", "enabled": True},
+    ])
+    monkeypatch.setattr(ai, "_REGISTRY", None)   # rebuild con este PAIRS
     with patch("main.init_pool", AsyncMock()), \
          patch("main.close_pool", AsyncMock()), \
          patch("routers.ai.is_news_blackout", AsyncMock(return_value=(False, None))), \
          patch("routers.ai.get_pool", return_value=MagicMock(execute=AsyncMock())), \
+         patch("routers.ai.load_inference_artifacts", MagicMock()), \
          patch("httpx.AsyncClient", FakeAsyncClient):
         with TestClient(app) as client:
             response = client.post(
                 "/api/v1/ai/predict",
-                json={"symbol": "BTCUSD", "timeframe": "H1", "position": 0},
+                json={"symbol": "XXXYZZ", "timeframe": "H1", "position": 0},
                 headers={"x-internal-token": "test-token", "x-cycle-id": "e2e-bad-symbol"},
             )
 
