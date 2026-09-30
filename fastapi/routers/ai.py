@@ -51,6 +51,7 @@ from services.position_sizing import (
 from services.order_manager import mark_order_filled
 from services.qwen_client import query_qwen_unified, query_qwen_sltp_validator
 from services.structured_logging import log_to_audit
+from services.strategist import STRATEGIST_VERSION, deliberate
 from .deps import verify_token
 
 
@@ -579,6 +580,49 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         else:
             logger.debug("[%s] sizing_below_min (rate-limited) → HOLD", cycle_id)
 
+    # Fase 2 / D-5: CAPA ESTRATEGA (shadow) — estado narrativo + criterios
+    # C1–C8 (config versionada, TODOS OFF) evaluados en CADA ciclo y trazados
+    # en `deliberation`. El verdict se REGISTRA, no se aplica: la decisión
+    # final sigue siendo exclusiva de esta cadena (autonomía ≠ opacidad;
+    # activación solo con replay aprobado — plan §6).
+    veto_reason = _veto_reason(
+        decision, final_decision, qwen,
+        sizing_rejected=sizing_below_min,
+        position_rejected=position_rejected,
+    )
+    try:
+        deliberation = await deliberate(
+            symbol=sym,
+            candidate=decision,
+            veto_reason=veto_reason,
+            qwen=qwen,
+            qwen_degraded=not qwen.get("ok", True),
+            direction_head=float(direction),
+            lots=float(final_lots),
+            sizing_below_min=sizing_below_min,
+            env_position=env_position,
+            df=df,
+            current_price=current_price,
+            current_atr=current_atr,
+            pip_size=pip_size,
+            equity=equity_val,
+            quality_threshold=QUALITY_THRESHOLD,
+        )
+    except Exception as exc:
+        # Contención TESTEADA (test_strategist_shadow): la capa es shadow con
+        # cero poder de decisión — su fallo no tumba el ciclo de decisión; la
+        # verdad se propaga A LA TRAZA (verdict=ERROR) + WARNING en log.
+        logger.warning(
+            "[%s] deliberación falló (%s: %s) → traza ERROR",
+            cycle_id, type(exc).__name__, exc,
+        )
+        deliberation = {
+            "verdict": "ERROR",
+            "shadow": True,
+            "config_version": STRATEGIST_VERSION,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
     record_cycle_metrics(
         symbol=req.symbol,
         decision=final_decision,
@@ -609,12 +653,9 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             "tp_pips": round(tp_pips_final, 1) if final_decision in ("BUY", "SELL") else None,
             "latency_ms": round((time.time() - t_start) * 1000, 2),
             "veto": decision != final_decision,
-            "veto_reason": _veto_reason(
-                decision, final_decision, qwen,
-                sizing_rejected=sizing_below_min,
-                position_rejected=position_rejected,
-            ),
+            "veto_reason": veto_reason,
             "sizing_below_min": sizing_below_min,
+            "deliberation": deliberation,
             "mt5_time": mt5_ts,
         },
         cycle_id=cycle_id,
