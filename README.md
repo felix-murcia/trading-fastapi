@@ -1669,3 +1669,23 @@ Ahora, si las Bandas de Bollinger son inválidas o el ratio es insuficiente, el 
 **Próximo (Fase 2):** replay de C1–C8 sobre ~2015 ciclos / 141 trades (expectancia tras costes y regla 3 €, split temporal) → informe a Félix; **ningún criterio se activa antes de su aprobación**.
 
 **Archivos:** `fastapi/services/strategist.py` (nuevo), `fastapi/routers/ai.py`, `fastapi/tests/test_strategist_shadow.py` (nuevo), `README.md`, `PROTOCOLO_ANTI_BUCLE.md`.
+
+### Fase 2 (plan 2026-09-30): replay C1–C8 — informe de activación (2026-09-30)
+
+**Contexto:** plan §6 — «ningún criterio activo sin informe de replay aprobado por Félix». `scripts/replay_strategist.py` (nuevo, **solo lectura**: SELECT + GET de velas H1) reconstruye el estado narrativo de cada ciclo `ai_predict_cycle` (2050 parseados: 1763 formato nuevo + 287 antiguo) con el **mismo `evaluate_criteria` de serve** (no una reimplementación), mapea cada trade a su ciclo productor (ventana [entry−300 s, entry+60 s] + dirección coincidente) y mide la expectancia de los subconjuntos permitido vs bloqueado con split temporal (train 23 / test 23; θ se elige en train y se verifica en test — «Prohibido ajustar umbrales» para forzar resultado).
+
+**Método (decisiones quedan en el informe §2):** dominio temporal broker unificado (`mt5_time` / `created_at+3h` / `trade_outcomes` / velas MCP — validado empíricamente por la tasa de mapeo); C1 con proxy `ml_prob` (clip 0.1–0.99, la cabeza cruda no se persiste); **excluido ≠ bloqueado** (dato ausente sale del análisis; `pass=None` estructural SÍ bloquea = fail-safe real de activación); expectancia = pnl real medio ya neto de costes (la regla 3 € no altera una media — se aplica a win-rates); sanidad §6 (a) E_bloq<E_permit en test, (b) win-rate bloqueado <10 %, (c) `pass=False` en ≤40 % de HOLD puro, con estado `na` = sin evidencia (activación exige evidencia, no solo ausencia de fallo).
+
+**Resultados (`doc/replay-estratega.md` + `doc/replay-cycles.csv`, gitignored):**
+- Muestra: 141 trades válidos → 52 mapeados → **46 analizados** (6 de era antigua excluidos: atribución débil, Δ≈3–5 min sin el patrón de latencia de ~19 s); 89 sin ciclo en ventana (10 pre-auditoría + 79 de otras fuentes/rechazos de EA); huecos de cobertura > 6 h listados.
+- **C2 → CANDIDATO A ACTIVAR (contrato broker, neutro):** 0 bloqueos en train ni test, umbral `settings.min_volume` no tuneable. Único candidato.
+- **C1/C3/C8 → MANTENER OFF (sin evidencia en test):** 0 bloqueos en test. Estructurales: `quality_score` = **7.5 constante** en los 511 ciclos entry (C3 vacío sobre candidatos: ≤7.5 nada, ≥8.0 todo); `ml_prob` ≥ 0.195 en todos los candidatos (C1 no discrimina); C8 con separación +8.01 € en train pero win-rate bloqueado 14 % ≥ 10 % en todo el barrido y 0 bloqueos en test.
+- **C4/C5 → MANTENER OFF (falla a+b):** bloquean el **100 %** de candidatos en test (precondiciones casi nunca cumplidas bajo fail-safe) y los bloqueados ganan 26 % (>10 %).
+- **C6 → MANTENER OFF (falla b+c):** win-rate bloqueado 31 % y `pass=False` en **71 %** de los HOLD puro (duplicaría el rechazo existente); IC de la separación test [−5.24, +9.62] € incluye 0.
+- **C7 → fuera de replay** (no hay spread histórico; se decide con el deque vivo ≥ 30 muestras/par).
+
+**Decisión:** **NADA activado** — `CRITERIA[*].active=false` intactos, `STRATEGIST_VERSION=1.0.0` sin tocar, config serve sin cambios. Informe entregado para aprobación de Félix; en paralelo el shadow sigue recogiendo traza viva (§6: ≥ 7 días o ≥ 50 candidatos — ambas puertas antes de cualquier activación, un criterio por PR).
+
+**Evidencia (2026-09-30):** suite **617 passed** (sin variación — `scripts/` no se importa desde la app), 24.2 s. Ejecución host: venv `.venv312`, env de `.env` por sustitución de shell (nunca emitida) → informe regenerado de principio a fin (idéntico entre ejecuciones salvo timestamp) y CSV con 2050 filas (un por ciclo). Verificado en vivo que la config serve no cambió: trazas de deliberación posteriores siguen `config_version=1.0.0`, todos los criterios OFF.
+
+**Archivos:** `scripts/replay_strategist.py` (nuevo), `README.md`, `PROTOCOLO_ANTI_BUCLE.md`.
