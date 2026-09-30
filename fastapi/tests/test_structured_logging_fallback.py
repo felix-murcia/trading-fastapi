@@ -52,3 +52,30 @@ class TestLogToAuditFallback:
         assert "INSERT INTO audit_log" in call_args[0]
         assert call_args[1] == "trace_no-trace"  # cycle_id with no trace
         assert call_args[2] == "test_event"
+
+    @pytest.mark.asyncio
+    async def test_mt5_time_never_overrides_created_at(self):
+        """T-1: con mt5_time (reloj broker, UTC+3) el INSERT es único y SIN
+        to_timestamp — `created_at` lo pone el DEFAULT de la columna (now() UTC).
+        Antes, el epoch del broker se escribía como created_at → filas "futuras"
+        y timeline invertida. El epoch sigue disponible dentro del payload."""
+        mock_pool = MagicMock()
+        mock_pool.execute = AsyncMock(return_value="INSERT 0 1")
+
+        await log_to_audit(
+            "ai_predict_cycle",
+            {"symbol": "EURUSD", "mt5_time": 1790783400.0},
+            pool=mock_pool,
+            cycle_id="EURUSD_1790783400000",
+        )
+
+        mock_pool.execute.assert_called_once()
+        call_args = mock_pool.execute.call_args[0]
+        sql = call_args[0]
+        # Único INSERT, sin rama de reloj broker: solo 3 placeholders
+        assert "to_timestamp" not in sql
+        assert "created_at" not in sql
+        assert sql.count("$") == 3
+        assert call_args[1] == "EURUSD_1790783400000"
+        # El epoch del broker viaja en data/enriched, no en el timeline
+        assert '"mt5_time": 1790783400.0' in call_args[3]

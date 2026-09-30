@@ -185,3 +185,11 @@ class TestPredictQwenAudit:
         state = qwen_client.get_qwen_state()
         assert state.consecutive_failures >= 1
         assert state.last_error is not None
+
+    def test_ai_predict_cycle_carries_real_cycle_id(self, monkeypatch):
+        """A-2: el evento lleva el cycle_id real del ciclo — antes no se pasaba
+        y la fila quedaba con el fallback `trace_no-trace`, roto para correlación."""
+        response, audit_mock = _post_predict(FakeAsyncClient, monkeypatch)
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert audit_mock.await_args.kwargs.get("cycle_id") == payload["cycle_id"]

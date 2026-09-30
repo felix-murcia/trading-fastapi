@@ -48,6 +48,7 @@ from services.position_sizing import (
     pip_value_per_lot,
     size_ppo_position,
 )
+from services.order_manager import mark_order_filled
 from services.qwen_client import query_qwen_unified, query_qwen_sltp_validator
 from services.structured_logging import log_to_audit
 from .deps import verify_token
@@ -81,10 +82,23 @@ SL_MAX_NORM = 0.30
 TP_MIN_NORM = 0.05
 TP_MAX_NORM = 0.50
 
+# S-1/S-2: rate-limit del aviso de sizing (1 WARNING / 600 s por símbolo).
+# La verdad completa (sizing_below_min + veto_reason sizing_veto) se escribe
+# en audit_log EN TODOS los ciclos — el rate-limit solo silencia el ruido de
+# `docker logs` (antes: 21 ERROR "sizing inviable" en una ventana).
+_SIZING_WARN_TS: dict[str, float] = {}
+_SIZING_WARN_INTERVAL_S = 600.0
 
-def _veto_reason(original: str, final: str, qwen: dict) -> str | None:
+
+def _veto_reason(original: str, final: str, qwen: dict, sizing_rejected: bool = False) -> str | None:
     if original == final:
         return None
+    # S-1/S-2: el bloque de sizing solo se activa con final_decision en
+    # (BUY, SELL), es decir, cuando NINGÚN otro veto ya había revertido la
+    # decisión → el flag es autoridad: se declara ANTES que cualquier otro
+    # motivo (antes, 21 rechazos de sizing se atribuían a ranging/unknown_veto).
+    if sizing_rejected:
+        return "sizing_veto"
     if final == "HOLD" and qwen.get("regime") == "RANGING":
         return "ranging_veto"
     if final == "HOLD" and qwen.get("quality", 10) < QUALITY_THRESHOLD:
@@ -517,14 +531,27 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         logger.warning("[%s] VETO BIAS ║ SELL revertido por LLM BULLISH (conf=%.2f)", cycle_id, qwen.get("confidence", 1.0))
         final_decision = "HOLD"
 
-    # P2-2: sizing no operable (ni el lote mínimo cabe en el tope de riesgo)
-    # → no existe orden válida que enviar: degrada a HOLD, visible en log.
+    # P2-2/S-1: sizing no operable (ni el lote mínimo cabe en el tope de riesgo)
+    # → no existe orden válida que enviar: degrada a HOLD y SE DECLARA en la
+    # auditoría (`sizing_below_min` + `veto_reason=sizing_veto`). S-2: el ruido
+    # pasa de 21 ERROR "sizing inviable" a 1 WARNING / 600 s por símbolo (el
+    # literal prohibido ya no se emite en ningún nivel). La respuesta se queda
+    # en HOLD: es el único valor no-comprado que el EA entiende (un valor nuevo
+    # como "WAIT" caería en silencio en el EA y no reportaría ea_decision).
+    sizing_below_min = False
     if final_lots <= 0.0 and final_decision in ("BUY", "SELL"):
-        logger.error(
-            "[%s] sizing inviable (equity=%s, sl=%s pips, vol_norm=%s) → HOLD",
-            cycle_id, equity_val, sl_pips_final, volume_norm,
-        )
+        sizing_below_min = True
         final_decision = "HOLD"
+        now_ts = time.time()
+        if now_ts - _SIZING_WARN_TS.get(req.symbol, 0.0) >= _SIZING_WARN_INTERVAL_S:
+            _SIZING_WARN_TS[req.symbol] = now_ts
+            logger.warning(
+                "[%s] sizing_below_min: vol_norm=%s sl=%s pips equity=%s → HOLD declarado "
+                "(veto sizing, 1 aviso/%ss por símbolo)",
+                cycle_id, volume_norm, sl_pips_final, equity_val, int(_SIZING_WARN_INTERVAL_S),
+            )
+        else:
+            logger.debug("[%s] sizing_below_min (rate-limited) → HOLD", cycle_id)
 
     record_cycle_metrics(
         symbol=req.symbol,
@@ -556,9 +583,11 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             "tp_pips": round(tp_pips_final, 1) if final_decision in ("BUY", "SELL") else None,
             "latency_ms": round((time.time() - t_start) * 1000, 2),
             "veto": decision != final_decision,
-            "veto_reason": _veto_reason(decision, final_decision, qwen),
+            "veto_reason": _veto_reason(decision, final_decision, qwen, sizing_rejected=sizing_below_min),
+            "sizing_below_min": sizing_below_min,
             "mt5_time": mt5_ts,
         },
+        cycle_id=cycle_id,
     )
 
     return PredictResponse(
@@ -919,6 +948,10 @@ async def trade_filled_webhook(req: TradeFilledRequest, _: None = Depends(verify
             "symbol=%s entry=%s deal=%s position=%s",
             req.symbol, entry_ts, req.deal_ticket, req.position_id,
         )
+        # O-1: la apertura confirma la ejecución → la orden sale del pool de
+        # `duplicate_order` (pending/placed → filled). Si este reporte se
+        # pierde, la rama de cierre hace la misma transición (idempotente).
+        await mark_order_filled(req.symbol, "BUY" if req.direction == "LONG" else "SELL")
         return {"status": "ignored_open_deal"}
 
     minimum_timestamp = 946684800.0  # 2000-01-01 UTC
@@ -956,4 +989,8 @@ async def trade_filled_webhook(req: TradeFilledRequest, _: None = Depends(verify
         deal_ticket=deal_ticket,
         position_id=position_id,
     )
+    # O-1: catch-all de transición — si el reporte de apertura no llegó (el EA
+    # v13.2 filtra DEAL_ENTRY_IN), este cierre saca la orden del pool de
+    # `duplicate_order`. Idempotente: si la apertura ya la marcó, no matchea.
+    await mark_order_filled(req.symbol, "BUY" if direction == "LONG" else "SELL")
     return {"status": "recorded"}

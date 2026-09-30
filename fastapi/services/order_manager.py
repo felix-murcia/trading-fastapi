@@ -43,6 +43,55 @@ def _reject(reason: str) -> OrderPrepareResponse:
     return OrderPrepareResponse(approved=False, order_payload={}, rejection_reason=reason)
 
 
+async def mark_order_filled(symbol: str, order_type: str) -> int | None:
+    """O-1: transiciona la orden viva más reciente de (symbol, type) a 'filled'.
+
+    El webhook /api/v1/ai/trade/filled confirma la ejecución (apertura o
+    cierre), pero `orders.status` se quedaba en 'pending' para siempre →
+    `check_duplicate` rechazaba entradas legítimas contra órdenes ya cerradas
+    (6 `duplicate_order` falsos en la ventana auditada; el guard solo debe
+    matchear órdenes VIVAS).
+
+    Match: la más reciente `pending`/`placed` de (symbol, type), sin ventana
+    temporal — `entry_time` de los reportes es reloj broker (UTC+3), inútil
+    contra `created_at` UTC, y el guard de posición del EA garantiza ≤1 orden
+    viva por símbolo entre prepare y fill. Las filas SMC (`smc_*`, pipeline
+    distinto, su propio ciclo de vida) quedan excluidas por `cycle_id`.
+
+    Idempotente: el reporte de cierre tras el de apertura (o un reintento del
+    outbox) no matchea nada — 'filled' ya no es vivo → devuelve None.
+    'filled' es terminal en `orders`: la verdad del cierre vive en
+    `trade_outcomes` (el CHECK `orders_status_check` no incluye 'closed';
+    decisión documentada, ver plan O-1).
+
+    Devuelve el id transicionado, o None si no había orden viva que casar.
+    """
+    pool = get_pool()
+    row = await pool.fetchrow(
+        "UPDATE orders SET status='filled' WHERE id = ("
+        "SELECT id FROM orders "
+        "WHERE symbol=$1 AND type=$2 AND status IN ('pending','placed') "
+        "AND cycle_id NOT LIKE 'smc\\_%' "
+        "ORDER BY created_at DESC LIMIT 1) "
+        "RETURNING id, cycle_id",
+        symbol, order_type,
+    )
+    if row is None:
+        logger.info(
+            "[ORDER-MANAGER] mark_order_filled: sin orden viva que casar (%s %s) — idempotente",
+            symbol, order_type,
+        )
+        return None
+    logger.info(
+        "[ORDER-MANAGER] orden %s → filled (%s %s, cycle=%s)",
+        row["id"], symbol, order_type, row["cycle_id"],
+    )
+    await _audit(row["cycle_id"], "order_filled", {
+        "order_db_id": row["id"], "symbol": symbol, "type": order_type,
+    })
+    return row["id"]
+
+
 async def prepare(req: OrderPrepareRequest) -> OrderPrepareResponse:
     pool = get_pool()
 

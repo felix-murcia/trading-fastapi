@@ -30,11 +30,16 @@ BASE_PAYLOAD = {
 
 
 def _post_filled(**overrides):
-    """POST /trade/filled con record_trade_filled parcheado; devuelve (response, mock)."""
+    """POST /trade/filled con record_trade_filled parcheado; devuelve (response, mock).
+
+    O-1: también se parchea `mark_order_filled` (transición orders.status) —
+    la capa BD se mockea igual que en record_trade_filled.
+    """
     with patch("main.init_pool", AsyncMock()), \
          patch("main.close_pool", AsyncMock()), \
          patch("routers.ai.load_inference_artifacts"), \
-         patch("routers.ai.record_trade_filled", AsyncMock()) as record_mock:
+         patch("routers.ai.record_trade_filled", AsyncMock()) as record_mock, \
+         patch("routers.ai.mark_order_filled", AsyncMock()):
         with TestClient(app) as client:
             response = client.post(
                 "/api/v1/ai/trade/filled",

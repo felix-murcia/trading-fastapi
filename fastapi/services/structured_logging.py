@@ -129,7 +129,6 @@ async def log_to_audit(audit_event: str, data: dict, pool=None, cycle_id: str | 
     Si el pool no está disponible, loguea un warning y continúa.
     """
     from db.connection import get_pool as _get_pool
-    import time
 
     trace = get_trace_id() or "no-trace"
     mt5_ts = data.get("mt5_time")
@@ -144,21 +143,17 @@ async def log_to_audit(audit_event: str, data: dict, pool=None, cycle_id: str | 
         if pool is None:
             pool = _get_pool()
 
-        if mt5_ts is not None:
-            await pool.execute(
-                "INSERT INTO audit_log(cycle_id, event, data, created_at) VALUES($1, $2, $3, to_timestamp($4::double precision))",
-                cycle_id or f"trace_{trace}",
-                audit_event,
-                json.dumps(enriched),
-                mt5_ts,
-            )
-        else:
-            await pool.execute(
-                "INSERT INTO audit_log(cycle_id, event, data) VALUES($1, $2, $3)",
-                cycle_id or f"trace_{trace}",
-                audit_event,
-                json.dumps(enriched),
-            )
+        # T-1: `created_at` SIEMPRE now() del servidor (default de la columna).
+        # Antes, si `data` traía `mt5_time` (reloj broker = UTC+3) se escribía
+        # como `created_at` → filas "futuras", timeline invertida y correlación
+        # rota con el resto del pipeline (UTC). El epoch del broker sigue
+        # disponible en `enriched.mt5_time` (y en `data.mt5_time` del payload).
+        await pool.execute(
+            "INSERT INTO audit_log(cycle_id, event, data) VALUES($1, $2, $3)",
+            cycle_id or f"trace_{trace}",
+            audit_event,
+            json.dumps(enriched),
+        )
     except Exception as exc:
         logging.getLogger(__name__).warning(
             "[trace_id=%s] No se pudo guardar audit_log: %s", trace, exc
