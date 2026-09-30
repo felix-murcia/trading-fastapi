@@ -73,6 +73,13 @@ def _fake_httpx_client(deals):
         async def get(self, url, *args, **kwargs):
             if url.endswith("/api/v1/history/deals"):
                 return _Resp(deals)
+            if "/api/v1/market/candles/latest" in url:
+                # D-3: vela formándose con sello UTC honesto → desfase 0, así
+                # los fixtures de deals (epoch tal cual) agrupan igual que
+                # antes. El caso desfase≠0 vive en test_d3_utc_day_domain.
+                return _Resp([{
+                    "time": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                }])
             return _Resp({"balance": 4200.0})
 
     return _Client

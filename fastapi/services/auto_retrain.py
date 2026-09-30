@@ -12,7 +12,7 @@ import logging
 import json
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import ClassVar, Optional
 
@@ -901,6 +901,12 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int, symbol: str = TRAINING
         "backup_url": backup_url,
     }, symbol=symbol)
 
+    # M-1: la promoción queda marcada para el commit de cron (bundle completo
+    # y registrado arriba — el marcador es lo último que se toca).
+    _write_promotion_marker(
+        symbol=symbol, model_path=model_path, reason=decision.reason
+    )
+
 
 async def _fetch_historical_candles(symbol: str, count: int) -> list:
     """Obtiene velas históricas de MT5 MCP."""
@@ -959,6 +965,49 @@ async def _log_retrain_event(event: str, data: dict, symbol: str = TRAINING_SYMB
         event,
         json.dumps(payload, default=float, ensure_ascii=False),
     )
+
+
+def _write_promotion_marker(symbol: str, model_path: str, reason: str) -> None:
+    """M-1 (plan 2026-09-30): marcador de commit pendiente junto al bundle.
+
+    Su presencia con contenido distinto de HEAD (`git status` lo marca) significa
+    "artefactos de promoción sin versionar". El script de cron
+    `scripts/commit_promotion.py` valida el sha256 del zip contra el marcador,
+    versiona `fastapi/ml` y deja el propio marcador como evidencia permanente
+    del evento en el historial de git.
+
+    Se escribe al FINAL de la promoción (bundle certificado + registro en
+    model_registry + evento de auditoría ya hechos): si el proceso muere antes,
+    el marcador no existe y los archivos sucios siguen visibles en `git status`
+    — la pendencia nunca es silenciosa. Si la escritura del marcador falla, la
+    promoción YA está viva (no hay rollback posible ni deseable): no se lanza,
+    pero el fallo queda en alerta (rate-limited, B-1) con instrucción manual.
+    """
+    from services.model_registry import sha256_of
+
+    marker = os.path.join(os.path.dirname(model_path), "last_promotion.json")
+    payload = {
+        "symbol": symbol,
+        "model": os.path.basename(model_path),
+        "model_sha256": sha256_of(model_path),
+        "reason": reason,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        tmp = marker + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        os.replace(tmp, marker)
+        logger.info("[M-1] marcador de promoción escrito: %s", marker)
+    except OSError as e:
+        logger.error(
+            "[M-1] marcador NO escrito (%s): %s — commitear fastapi/ml manualmente",
+            marker, e,
+        )
+        send_alert(
+            AlertLevel.ERROR, "auto_retrain",
+            f"M-1: marcador de promoción no escrito — commitear fastapi/ml manualmente ({e})",
+        )
 
 
 # ─── HTTP Endpoint para forzar retrain manualmente ────────────────────────────

@@ -90,9 +90,22 @@ _SIZING_WARN_TS: dict[str, float] = {}
 _SIZING_WARN_INTERVAL_S = 600.0
 
 
-def _veto_reason(original: str, final: str, qwen: dict, sizing_rejected: bool = False) -> str | None:
+def _veto_reason(
+    original: str,
+    final: str,
+    qwen: dict,
+    sizing_rejected: bool = False,
+    position_rejected: bool = False,
+) -> str | None:
     if original == final:
         return None
+    # A-1: el veto de posición es el más mecánico de todos — el EA lo ejecuta
+    # en 3 puntos (L407/L440/L475) con MISMA variable pre-request, así que su
+    # flag es autoridad absoluta: se declara antes que sizing y cualquier
+    # motivo derivado de Qwen. Es mutuamente excluyente con sizing por
+    # construcción (se activa antes de la cadena → final_decision ya es HOLD).
+    if position_rejected:
+        return "position_veto"
     # S-1/S-2: el bloque de sizing solo se activa con final_decision en
     # (BUY, SELL), es decir, cuando NINGÚN otro veto ya había revertido la
     # decisión → el flag es autoridad: se declara ANTES que cualquier otro
@@ -517,7 +530,20 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     )
 
     final_decision = decision
-    if RANGING_VETO and qwen.get("regime") == "RANGING" and final_decision in ("BUY", "SELL"):
+    # A-1: flip con posición abierta → el EA lo rechaza siempre en ejecución
+    # (L407/L440/L475: rejected_position_open) porque la salida es exclusiva
+    # SL/TP. El backend lo declara AQUÍ, antes de la cadena Qwen y del sizing,
+    # con la MISMA información pre-request (req.position) que usa el EA: misma
+    # decisión, misma traza, 0 rejected_position_open. CLOSE/HOLD intactos.
+    position_rejected = env_position != 0 and final_decision in ("BUY", "SELL")
+    if position_rejected:
+        logger.warning(
+            "[%s] VETO POSICION ║ flip %s con posición abierta (pos=%d) → HOLD "
+            "(coherente con EA: salida solo SL/TP)",
+            cycle_id, final_decision, req.position,
+        )
+        final_decision = "HOLD"
+    elif RANGING_VETO and qwen.get("regime") == "RANGING" and final_decision in ("BUY", "SELL"):
         if qwen.get("quality", 0) < QUALITY_THRESHOLD or qwen.get("effective_prob", 0) < 0.35:
             logger.warning("[%s] VETO RANGING ║ Régimen lateral + calidad/prob baja → HOLD", cycle_id)
             final_decision = "HOLD"
@@ -583,7 +609,11 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             "tp_pips": round(tp_pips_final, 1) if final_decision in ("BUY", "SELL") else None,
             "latency_ms": round((time.time() - t_start) * 1000, 2),
             "veto": decision != final_decision,
-            "veto_reason": _veto_reason(decision, final_decision, qwen, sizing_rejected=sizing_below_min),
+            "veto_reason": _veto_reason(
+                decision, final_decision, qwen,
+                sizing_rejected=sizing_below_min,
+                position_rejected=position_rejected,
+            ),
             "sizing_below_min": sizing_below_min,
             "mt5_time": mt5_ts,
         },

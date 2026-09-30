@@ -4,6 +4,7 @@ Tests for services/auto_retrain.py
 import pytest
 from datetime import datetime
 from unittest.mock import patch, AsyncMock, MagicMock
+import json
 import numpy as np
 import pandas as pd
 
@@ -465,6 +466,15 @@ class TestDoRetrainPromotion:
         # Informe walk-forward persistido en el bundle (P1-1).
         assert manifest["extra"]["walk_forward"]["n_folds"] == 4
         assert manifest["extra"]["gate"]["ok"] is True
+
+        # M-1: la promoción queda marcada junto al bundle para que el commit
+        # de cron (scripts/commit_promotion.py) la versione con su sha.
+        marker = json.loads(
+            (tmp_path / "last_promotion.json").read_text(encoding="utf-8")
+        )
+        assert marker["symbol"] == "EURUSD"
+        assert marker["model"] == "ppo_trading_bot_v3.zip"
+        assert marker["model_sha256"] == manifest["model_sha256"]
 
         # Evento de auditoría con métricas por pliego (antes: retrain_completed
         # idéntico para promoción y rechazo, sin métricas).

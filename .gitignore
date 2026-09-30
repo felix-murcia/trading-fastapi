@@ -34,6 +34,13 @@ package-lock.json
 package.json
 opencode.json
 *.zip
+# M-1: los bundles de promoción en ml/ son evidencia versionada — fuera del
+# alcance de *.zip. backups/ y snapshots/ siguen ignorados por sus propias
+# reglas (al excluir un directorio no se desciende a sus zips, así que esta
+# exención no los re-incluye). Log del commit de cron (contenido volátil).
+!fastapi/ml/*.zip
+!fastapi/ml/*/*.zip
+fastapi/ml/promotion-commit.log
 TRADING_AGENT.md
 # P3-2: artefactos MLOps locales (backup de bundles + snapshots de train)
 fastapi/ml/backups/
