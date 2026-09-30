@@ -13,7 +13,6 @@ class Settings(BaseSettings):
     ppo_risk_pct: float = 0.03        # P2-2: tope de riesgo por trade del PPO (fracción del equity)
     order_max_age_hours: int = 48
     simple_pipeline_enabled: bool = True
-    paper_mode: bool = False              # Si true, simula órdenes sin ejecutarlas
     signal_cooldown_minutes: int = 60     # H1: 1 vela = 60 min
     sl_risk_usd: float = 15.0
     sl_risk_usd_xauusd: float = 15.0

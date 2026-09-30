@@ -15,9 +15,10 @@ class TestLookbackPerSymbol:
     def test_canary_lookback_is_multi_year_history(self):
         assert ar.RetrainConfig.lookback_for("GBPUSD") == 30000
 
-    def test_default_lookback_unchanged(self):
-        assert ar.RetrainConfig.lookback_for("EURUSD") == 500
-        assert ar.RetrainConfig.lookback_for("EURUSD") == ar.RetrainConfig.lookback_candles
+    def test_eurusr_lookback_is_multi_year_history(self):
+        # P0 G-2 (plan 2026-09-30): EURUSD sube de 500 velas (pliegues de
+        # 19 barras = ruido en el gate) a 30000 H1, como el canario GBPUSD.
+        assert ar.RetrainConfig.lookback_for("EURUSD") == 30000
 
     def test_unknown_symbol_falls_back_to_default(self):
         assert ar.RetrainConfig.lookback_for("AUDJPY") == ar.RetrainConfig.lookback_candles

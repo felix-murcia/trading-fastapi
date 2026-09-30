@@ -28,10 +28,14 @@ Métricas (velas H1; anualización 24*252 barras/año):
 Gate multi-métrico (todas las reglas estrictas; empates = fallo):
 1. total_openings >= min_openings (candidato evaluable, no HOLD permanente)
 2. métricas finitas
-3. Si hay baseline: sum_reward > baseline, mayoría de folds ganados
+3. Suelo absoluto (P0 G-1, plan 2026-09-30): en el agregado de pliegues,
+   sum_reward > 0, mean_sharpe > 0 y total_expectancy > 0 — en ambas vías.
+   Un candidato no positivo en absoluto no promueve aunque supere a un
+   baseline peor. El holdout sigue sin decidir.
+4. Si hay baseline: sum_reward > baseline, mayoría de folds ganados
    (>= n_folds//2 + 1) y mean_sharpe > baseline.
 
-Sin baseline (primer modelo): se exige solo validez (1 y 2).
+Sin baseline (primer modelo): reglas 1-3 + umbrales canario absolutos.
 """
 from dataclasses import dataclass
 
@@ -334,6 +338,23 @@ def gate_walk_forward(report: WalkForwardReport, min_openings: int) -> GateDecis
     values = [cand["sum_reward"], cand["mean_sharpe"], cand["mean_sortino"], cand["worst_max_dd"]]
     if not all(np.isfinite(v) for v in values):
         return GateDecision(False, "non_finite_metrics", details)
+
+    # P0 G-1 (plan 2026-09-30): suelo ABSOLUTO en ambas vías — un candidato
+    # que no es positivo en absoluto no promueve nunca, aunque supere a un
+    # baseline peor. Sin este suelo, la promoción 2026-09-30 03:14 se aprobó
+    # con sum_reward=-4.716 / mean_sharpe=-3.19 / total_expectancy=-10.26
+    # solo porque el baseline era aún peor (cada "menos malo" era el nuevo
+    # baseline: deriva en cadena). Forma positiva en todas: un NaN no supera
+    # `> 0` y cae al rechazo (expectancy no está en el chequeo de finitud).
+    absolute_floor = {
+        "sum_reward": cand["sum_reward"] > 0.0,
+        "mean_sharpe": cand["mean_sharpe"] > 0.0,
+        "total_expectancy": cand["total_expectancy"] > 0.0,
+    }
+    if not all(absolute_floor.values()):
+        details["absolute_floor"] = absolute_floor
+        failed_floor = next(k for k, v in absolute_floor.items() if not v)
+        return GateDecision(False, f"absolute_floor_{failed_floor}", details)
 
     if report.baseline is None:
         if cand["total_openings"] < CANARY_MIN_OPENINGS:

@@ -67,12 +67,13 @@ class RetrainConfig:
     trades_before_retrain: int = 10       # ← 50 era demasiado: 10 permite aprender rápido
     min_trades_for_retrain: int = 5      # ← mínimo razonable tras primer trade
     lookback_candles: int = 500           # Velas históricas a usar para retrain
-    # P3-3: lookback POR PAR — el entrenamiento INICIAL de un par nuevo
-    # necesita años de H1 (walk-forward con masa estadística para el gate
-    # canario: ≥200 aperturas OOS). Símbolos sin entrada → lookback_candles
-    # (EURUSD sigue en 500: su bundle ya existe y el gate es comparativo).
+    # P3-3: lookback POR PAR — el entrenamiento de un par necesita años de
+    # H1 (walk-forward con masa estadística para el gate). Símbolos sin
+    # entrada → lookback_candles. P0 G-2 (plan 2026-09-30): EURUSD sube de
+    # 500 a 30000 — con 481 velas los pliegues eran de 19 barras y el gate
+    # decidía sobre ruido (promoción de las 03:14 del 30 sep).
     # ClassVar: atributo de CLASE (RetrainConfig se usa sin instanciar).
-    lookback_by_symbol: ClassVar[dict] = {"GBPUSD": 30000}
+    lookback_by_symbol: ClassVar[dict] = {"GBPUSD": 30000, "EURUSD": 30000}
     retrain_window_size: int = 20         # Window size del entorno
     initial_balance: float = 1000.0
     commission: float = 0.0001            # 0.01% por trade (MT5 typical)
@@ -81,7 +82,7 @@ class RetrainConfig:
     learning_rate: float = 3e-4
     verbose: int = 0
     real_outcome_weight: float = 0.3      # Peso del feedback real vs sintético (0=ignorar, 1=dominante)
-    min_validation_openings: int = 1      # Un candidato HOLD permanente no reemplaza al activo
+    min_validation_openings: int = 20     # P0 G-1: masa mínima de aperturas OOS (1 dejaba promover con 8)
     walk_forward_folds: int = 4           # P1-1: ≥4 pliegues OOS (exigencia de auditoría)
     walk_forward_train_frac: float = 0.70
     walk_forward_holdout_frac: float = 0.10  # holdout congelado: reporta, nunca decide

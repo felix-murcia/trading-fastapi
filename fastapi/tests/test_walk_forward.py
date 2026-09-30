@@ -286,6 +286,54 @@ class TestGateWalkForward:
         assert decision.ok is False
         assert decision.reason == "non_finite_metrics"
 
+    # ── P0 G-1: suelo absoluto (plan 2026-09-30) ──────────────────────────
+
+    def test_negative_candidate_blocked_even_vs_worse_baseline(self):
+        # Promoción 2026-09-30 03:14: cand(sum_reward=-4.716, sharpe=-3.19,
+        # expectancy=-10.26) superó a base(-19.397/-18.72) y se APROBÓ con
+        # fold_wins=3/4. Con suelo absoluto: rechazo pese a ganar los 3 checks.
+        decision = gate_walk_forward(
+            _report(_agg(sum_reward=-4.716, mean_sharpe=-3.19,
+                         total_expectancy=-10.26, total_openings=8),
+                    _agg(sum_reward=-19.397, mean_sharpe=-18.72),
+                    fold_wins=3),
+            min_openings=1,
+        )
+        assert decision.ok is False
+        assert decision.reason == "absolute_floor_sum_reward"
+        assert decision.details["absolute_floor"]["sum_reward"] is False
+
+    def test_negative_sharpe_blocked_with_positive_reward(self):
+        decision = gate_walk_forward(
+            _report(_agg(sum_reward=5.0, mean_sharpe=-0.3),
+                    _agg(sum_reward=-10.0, mean_sharpe=-2.0),
+                    fold_wins=4),
+            min_openings=1,
+        )
+        assert decision.ok is False
+        assert decision.reason == "absolute_floor_mean_sharpe"
+
+    def test_negative_expectancy_blocked(self):
+        decision = gate_walk_forward(
+            _report(_agg(sum_reward=5.0, mean_sharpe=0.8,
+                         total_expectancy=-0.5, total_openings=8),
+                    _agg(sum_reward=-10.0, mean_sharpe=-2.0),
+                    fold_wins=4),
+            min_openings=1,
+        )
+        assert decision.ok is False
+        assert decision.reason == "absolute_floor_total_expectancy"
+
+    def test_absolute_floor_applies_to_canary_path_too(self):
+        # Sin baseline: pliegues "fuertes" no salvan un agregado no positivo.
+        decision = gate_walk_forward(
+            _report(_agg(sum_reward=-1.0, total_openings=500),
+                    folds=_canary_folds([1.5, 1.2, 2.1, 1.0])),
+            min_openings=1,
+        )
+        assert decision.ok is False
+        assert decision.reason == "absolute_floor_sum_reward"
+
 
 def _fake_df(n=500):
     return pd.DataFrame({"close": np.linspace(1.0, 1.1, n)})
@@ -303,7 +351,10 @@ def _fake_eval(reward_per_bar=0.1, model_rewards=None):
             "openings": 2, "trades": 1, "wins": 1, "losses": 0,
             "win_rate": 1.0, "reward": per_bar * n,
             "balance": 1010.0,
-            "equity_curve": [1000.0, 1010.0],
+            # 3 puntos: np.diff deja 2 retornos → sharpe computable > 0
+            # (con [1000, 1010] el sharpe es 0.0 y el suelo G-1 intercepta
+            # el gate antes de las reglas comparativas que aquí se prueban).
+            "equity_curve": [1000.0, 1005.0, 1010.0],
             "step_rewards": [10.0],
         }
 
