@@ -1761,3 +1761,49 @@ Ahora, si las Bandas de Bollinger son inválidas o el ratio es insuficiente, el 
 **Tests (2026-10-01):** `cd fastapi && pytest tests/ -q` → **638 passed** (634 + 4: `TestPositionVetoParity` — flip con LONG no cierra ni revierte; espejo con SHORT; flip ≡ mismo-dirección-HOLD **bit a bit** (posición, balance, equity, volumen, reward, drawdown); FLAT aún cierra con el round-trip de spread −1.76 €. Ningún test existente codificaba la reversión — la ruta estaba sin cubrir).
 
 **Archivos:** `fastapi/ml/trading_env_v2.py`, `fastapi/tests/test_trading_env_step.py`, `README.md`, `PROTOCOLO_ANTI_BUCLE.md`.
+
+### Exp #11 (retrain único pre-registrado con O-1): RECHAZADO por el suelo absoluto — A/B que aísla el efecto de O-1 (2026-10-01)
+
+**Ejecución:** `POST /api/v1/ai/retrain/force` a las 13:15:58, cerró 13:21:04 (~5 min). trigger=`forced`, snapshot `00d59b09e026` (29981 barras — re-fetch con la ventana desplazada +2 h respecto al de #10), split `train=20986 | 4×1494 | embargo=20 | holdout@26982 congelado`, 147 outcomes inyectados (peso 0.30), candidato (20,25) entrenado desde cero. `experiment_tracker #11 → status=rejected, reason=absolute_floor_sum_reward, sha=-` → **sin artefacto, sin promoción**. Bundle activo intacto: `4185451b` obs (20,24), `/health` ok (equity 468.16), ciclos EA normales (BLACKOUT Lagarde → HOLD a las 13:25). El `ERROR` de `MODEL-BACKUP` GCS (13:21:04) es ambiental (sin ADC en el contenedor): fallback **local verificado OK** (`backups/4185451b80a3`); ajeno a O-1.
+
+**Gate (íntegro, umbrales sin tocar):**
+
+| condición | umbral | #11 | veredicto |
+|---|---|---|---|
+| `total_openings` | ≥ `min_openings` | 753 | ✓ |
+| floor `sum_reward` | > 0 | **−3.423** | **✗ → `absolute_floor_sum_reward`** |
+| floor `mean_sharpe` | > 0 | +0.315 | ✓ |
+| floor `total_expectancy` | > 0 | +0.108 | ✓ |
+| `fold_majority` (no alcanzado) | ≥ 3/4 | **2/4** | ✗ (habría rechazado también) |
+| `sum_reward_strict` / `mean_sharpe_strict` | > baseline | −3.42 > −40.90 / +0.315 > −0.760 | ✓ |
+| holdout congelado (sólo reporte, el gate no lo lee) | — | cand **−13.05** vs base **+22.58** | adverso |
+
+**#10 → #11 (candidato; misma config, única variable declarada = dinámica O-1 + re-fetch de snapshot):**
+
+| métrica | #10 (dinámica vieja) | #11 (O-1) |
+|---|---|---|
+| `sum_reward` | −89.242 | **−3.423** |
+| `mean_sharpe` | −2.677 | **+0.315** |
+| `total_expectancy` | −7.336 | **+0.108** |
+| `total_openings` | 2060 | 753 |
+| `total_trades` | 593 | 398 |
+| `fold_wins` | 3/4 | 2/4 |
+| holdout cand | −27.413 (sharpe −5.41) | −13.055 (sharpe −1.49) |
+| motivo de rechazo | `absolute_floor_sum_reward` | `absolute_floor_sum_reward` |
+
+El baseline (bundle activo) pasó de **−115.737 con `n_steps=3592`** (bancarrota anticipada: equity ≤50 % cortó 408 pasos) a **−40.901 con 4000 pasos completos**.
+
+**A/B de atribución (script `diagnostico_expectancia.py`, mismo bundle activo, mismo snapshot `a0f03c07` de #10, sólo cambia la dinámica):**
+- Folds `sum_reward`: **−115.737 → −21.91** (+93.8 = **81 % del castigo simulado eliminado por O-1**); fold0 +3.24 → +31.74 con 216 → 125 trades (los ciclos de flip-reversión desaparecen).
+- Efecto snapshot (dinámica fija): −21.91 (snap viejo) vs −40.901 (snap nuevo de #11) → el re-fetch **resta ~19 puntos al baseline**, es decir la mejora de O-1 queda parcialmente enmascarada en el gate de #11.
+- Confirma el diagnóstico: **el flip-reversión era el motor** de la expectancia simulada negativa.
+
+**Residuo — por qué el candidato sigue sin pasar:**
+1. **Fricción > edge** incluso con O-1: en los 4 pliegos el mercado da **+568.6 €** y la fricción total **−717.9 €** (neto −149.3 €).
+2. **Anti-churn sigue inerte** (bug de unidades, O-2): `churn_opens` 121/126 en fold0 — 96 % de reentradas ≤2 velas siguen sin pagar recargo (`commission=0.0001` en vez de 7.0).
+3. **Holdout adverso**: el candidato pierde contra el baseline en el bloque congelado (−13.05 vs +22.58) — no generaliza.
+4. Métrica `openings` del gate sigue distorsionada (fold0 76 contados vs 126 reales; fold3 260 vs 80) — backlog, sin tocar.
+
+**Reglas respetadas:** un único retrain pre-registrado (no repetido), umbrales intactos, sin artefacto promovido, bundle 24 sigue sirviendo. **Siguiente paso a decisión de Félix:** O-2 (calibrar comisión real del broker + arreglar unidades de la anti-churn → un retrain único nuevo pre-registrado) u O-4 (mantener bundle 24 + shadow §6).
+
+**Archivos:** `README.md`, `PROTOCOLO_ANTI_BUCLE.md` (sólo evidencia; sin cambio de código — suite **638 passed** intacta en `06b6e4e`).
