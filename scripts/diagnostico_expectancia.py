@@ -9,7 +9,8 @@ mismas stats VecNormalize) en:
   1. Mezcla de cierres (sl / tp / agent) × (bruto de mercado, fricción, neto).
   2. Ficción total = spread completo + 2 comisiones por round-trip.
   3. Frecuencia real de trading vs la métrica `openings` del gate
-     (intención del policy con umbral 0.33 — ¿cuadra con aperturas reales?).
+     (aperturas reales del env — post-fix 2026-10-01 debe cuadrar con
+     los `opens_reales` detectados por transición de posición).
   4. Reaperturas en la ventana anti-churn (≤2 velas) del candidato Fase 3.
   5. Ventana 2024-09-02→2026-10-01 (mismo tramo que el libro REAL, 147
      trades, +306.81 €) → comparación sim-vs-real sobre idénticos datos.
@@ -114,7 +115,6 @@ def evaluate(policy, segment_df, rms, env_cfg_template):
     records: list[dict] = []
     metric_openings = 0
     actual_opens = 0
-    prev_pos = 0
     prev_equity = cfg["initial_balance"]
     total_reward = 0.0
     open_step_idx = None
@@ -136,12 +136,12 @@ def evaluate(policy, segment_df, rms, env_cfg_template):
 
         action, _ = policy.predict(obs, deterministic=True)
         flat = np.asarray(action, dtype=np.float32).reshape(-1)
-        target = 1 if flat[0] > 0.33 else (-1 if flat[0] < -0.33 else 0)
-        if target != 0 and prev_pos == 0:
-            metric_openings += 1          # métrica 'openings' del gate
 
         obs, reward, done_arr, infos = env.step(flat.reshape(1, -1))
         info = infos[0]
+        # Espejo de la métrica del gate (fix 2026-10-01): aperturas REALES
+        # contadas por el env en su sitio de apertura, no intención pre-step.
+        metric_openings = int(info["openings"])
         total_reward += float(reward[0])
         step += 1
 
@@ -194,7 +194,6 @@ def evaluate(policy, segment_df, rms, env_cfg_template):
             open_step_idx = step
             open_t = raw.df.iloc[pre_candle_idx]["time"]
 
-        prev_pos = int(info.get("position", 0))
         prev_equity = float(info.get("equity", prev_equity))
         done = bool(done_arr[0])
 

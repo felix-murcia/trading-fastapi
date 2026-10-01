@@ -277,6 +277,61 @@ class TestEvaluateModelDeterminism:
         assert np.isfinite(metrics["reward"])
 
 
+class _StrongDirZeroVolumeModel:
+    """[direction=1.0, volume=0.0]: pide LONG pero el sizing no da volumen
+    (size_ppo_position → 0.0) → el env nunca abre."""
+
+    observation_space = gym.spaces.Box(
+        -np.inf, np.inf, shape=(20, 25), dtype=np.float32
+    )
+
+    def predict(self, observation, deterministic=True):
+        return np.array([1.0, 0.0], dtype=np.float32), None
+
+
+class _WeakDirModel:
+    """[direction=0.2, volume=0.5]: abre en el env (0.2 > zona muerta 0.05)
+    pero quedaba FUERA del umbral legacy 0.33 de la métrica de intención."""
+
+    observation_space = gym.spaces.Box(
+        -np.inf, np.inf, shape=(20, 25), dtype=np.float32
+    )
+
+    def predict(self, observation, deterministic=True):
+        return np.array([0.2, 0.5], dtype=np.float32), None
+
+
+class TestOpeningsMetricIntegrity:
+    """Integridad de la métrica `openings` del gate (fix 2026-10-01, O-4).
+
+    La métrica debe reflejar aperturas REALES (info['openings'] del env), no
+    la intención pre-step de la política. Antes: umbral 0.33 vs zona muerta
+    real 0.05 + contaba intentos que el sizing denegaba → inflaba la masa
+    del gate (exp #14: 826 «aperturas» vs 413 trades). Los umbrales del gate
+    (min_openings=20, canario=200) NO cambian: la masa real es menor → el
+    check queda más estricto, nunca más laxo.
+    """
+
+    @pytest.fixture
+    def df(self):
+        from services.auto_retrain import _build_training_dataframe
+        return _build_training_dataframe(_candles(120))
+
+    def test_volume_denied_intent_is_not_counted(self, df):
+        from services.auto_retrain import _evaluate_model
+        metrics = _evaluate_model(_StrongDirZeroVolumeModel(), df, _env_cfg(df))
+        assert metrics["openings"] == 0   # el env nunca abrió
+        assert metrics["trades"] == 0
+
+    def test_open_below_legacy_033_threshold_is_counted(self, df):
+        from services.auto_retrain import _evaluate_model
+        metrics = _evaluate_model(_WeakDirModel(), df, _env_cfg(df))
+        # 0.2 > zona muerta 0.05 → el env abre; el umbral 0.33 no lo contaba
+        assert metrics["openings"] >= 1
+        # Invariante: cada apertura acaba en un cierre, salvo la que siga abierta
+        assert metrics["openings"] <= metrics["trades"] + 1
+
+
 class TestEvaluateModelObsContract:
     """Fase 3: el env de evaluación se construye con el observation_space del
     modelo evaluado — baseline pre-memoria (20,24) vs candidato (20,25);

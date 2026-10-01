@@ -363,6 +363,7 @@ class ForexTradingEnvV2(gym.Env):
         self.max_equity = self.initial_balance
 
         self.trade_count = 0
+        self.opening_count = 0   # aperturas REALES (integridad métrica gate, fix 2026-10-01)
         self.wins = 0
         self.losses = 0
 
@@ -457,6 +458,7 @@ class ForexTradingEnvV2(gym.Env):
         self.max_equity = self.initial_balance
 
         self.trade_count = 0
+        self.opening_count = 0
         self.wins = 0
         self.losses = 0
         self._used_outcomes.clear()
@@ -604,6 +606,10 @@ class ForexTradingEnvV2(gym.Env):
                 self.volume = new_volume
                 self.sl_pips, self.tp_pips = sl_pips_c, tp_pips_c
                 self.steps_in_trade = 0
+                # Único sitio del env donde 0 → posición con volumen > 0: la
+                # métrica `openings` del gate cuenta APERTURAS REALES aquí,
+                # no la intención de la política (fix 2026-10-01, O-4).
+                self.opening_count += 1
 
                 # Aplicar spread al precio de entrada
                 if self.position == 1:
@@ -686,6 +692,7 @@ class ForexTradingEnvV2(gym.Env):
             'balance': self.balance,
             'equity': self.equity,
             'trades': self.trade_count,
+            'openings': self.opening_count,
             'win_rate': (self.wins / self.trade_count) if self.trade_count > 0 else 0.0,
             'drawdown': (self.max_equity - self.equity) / self.max_equity,
             # Fase 3 / R-1: pnl por trade para que el gate walk-forward calcule

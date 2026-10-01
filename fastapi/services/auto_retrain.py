@@ -596,8 +596,6 @@ def _evaluate_model(model, df: pd.DataFrame, env_cfg: dict, obs_rms=None) -> dic
     initial_balance = float(eval_cfg.get("initial_balance", 0.0))
     observation = env.reset()
     total_reward = 0.0
-    openings = 0
-    previous_position = 0
     info = {}
     done = False
     equity_curve: list = []
@@ -606,21 +604,21 @@ def _evaluate_model(model, df: pd.DataFrame, env_cfg: dict, obs_rms=None) -> dic
     while not done:
         action, _ = model.predict(observation, deterministic=True)
         flat = np.asarray(action, dtype=np.float32).reshape(-1)
-        if flat.size >= 1:
-            target_position = 1 if flat[0] > 0.33 else (-1 if flat[0] < -0.33 else 0)
-        else:
-            target_position = 0
-        if target_position != 0 and previous_position == 0:
-            openings += 1
 
         observation, reward, done_arr, infos = env.step(flat.reshape(1, -1))
         total_reward += float(reward[0])
         info = infos[0]
         equity_curve.append(float(info.get("equity", initial_balance)))
         step_rewards.append(float(reward[0]))
-        previous_position = int(info.get("position", 0))
         done = bool(done_arr[0])
 
+    # Integridad métrica (fix 2026-10-01, O-4): aperturas REALES contadas por
+    # el env en su sitio de apertura (info['openings']). Antes se contaba la
+    # intención pre-step con umbral 0.33 (la env decodifica con zona muerta
+    # 0.05) y sumaba intentos que el sizing denegaba → masa del gate inflada
+    # (exp #14: 826 «aperturas» vs 413 trades). Key directa: si el env no la
+    # expone, el error PROPAGA (sin .get silencioso a 0).
+    openings = int(info["openings"])
     trades = int(info.get("trades", 0))
     win_rate = float(info.get("win_rate", 0.0))
     wins = int(round(win_rate * trades))

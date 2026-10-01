@@ -255,7 +255,8 @@ class TestEpisodeBoundaries:
         _, _, _, _, info = env.step(FLAT)
 
         for key in ("position", "volume", "sl_pips", "tp_pips",
-                    "balance", "equity", "trades", "win_rate", "drawdown"):
+                    "balance", "equity", "trades", "win_rate", "drawdown",
+                    "openings"):
             assert key in info, f"info sin clave de dinero: {key}"
 
     def test_observation_shape_matches_contract(self):
@@ -269,6 +270,52 @@ class TestEpisodeBoundaries:
         obs_l, _ = legacy.reset()
         assert obs_l.shape == (5, 24)
         assert legacy.observation_space.shape == (5, 24)
+
+
+class TestOpeningsCounter:
+    """Integridad de la métrica `openings` (fix 2026-10-01, O-4 backlog).
+
+    `info["openings"]` cuenta aperturas REALES del env (0 → posición con
+    volumen > 0), no la intención pre-step de la política. Antes el gate
+    contaba la intención con umbral 0.33 (la env decodifica con zona muerta
+    0.05) y sumaba intentos que el sizing denegaba → masa inflada
+    (exp #14: 826 «aperturas» contadas vs 413 trades reales).
+    """
+
+    def test_real_open_counts_exactly_one_and_hold_adds_none(self):
+        env = _env(engineer_market_features(_raw_df()))
+        env.reset()
+
+        _, _, _, _, info = env.step(OPEN)               # abre
+        assert env.position == 1
+        assert info["openings"] == 1
+
+        _, _, _, _, info = env.step(OPEN)               # mantiene (HOLD)
+        assert env.position == 1
+        assert info["openings"] == 1                    # mantener no reabre
+
+    def test_volume_denied_intent_counts_zero(self):
+        env = _env(engineer_market_features(_raw_df()))
+        env.reset()
+
+        # dirección clara (1.0) pero vol_norm=0 → size_ppo_position() = 0.0
+        # → el env no abre: la intención no es una apertura.
+        _, _, _, _, info = env.step(np.array([1.0, 0.0], dtype=np.float32))
+
+        assert env.position == 0
+        assert info["openings"] == 0
+
+    def test_counter_resets_with_episode(self):
+        env = _env(engineer_market_features(_raw_df()))
+        env.reset()
+        env.step(OPEN)
+        assert env.opening_count == 1
+
+        env.reset()
+
+        assert env.opening_count == 0
+        _, _, _, _, info = env.step(FLAT)
+        assert info["openings"] == 0
 
 
 def _df_step_move(move: float, n: int = 40, jump: int = 26):
