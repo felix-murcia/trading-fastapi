@@ -503,6 +503,43 @@ class TestComputeSinceExit:
         assert move is None
 
 
+# ─── Canal de memoria del obs (fetch_bars_since_close, Fase 3) ────────────────
+
+class TestFetchBarsSinceClose:
+    """Fase 3: el serve construye el canal bars_since_close con el MISMO
+    dominio (broker) y la misma ventana que el narrativo del estratega."""
+
+    def _df(self):
+        return pd.DataFrame({
+            "time": [f"2024-01-01T{h:02d}:00:00Z" for h in range(10)],
+            "close": [round(1.1000 + i * 0.0005, 5) for i in range(10)],
+        })
+
+    @pytest.mark.asyncio
+    async def test_bars_from_last_close(self):
+        pool = _pool(_ROW)
+        with patch.object(strategist, "get_pool", return_value=pool):
+            bars = await strategist.fetch_bars_since_close(
+                "ZZZUSD", df=self._df(), current_price=1.1045, pip_size=0.0001)
+        assert bars == 3   # misma ventana que fetch_narrative (salida 06:00)
+        assert pool.fetchrow.await_args.args[1] == "ZZZUSD"
+
+    @pytest.mark.asyncio
+    async def test_no_closes_returns_none(self):
+        with patch.object(strategist, "get_pool", return_value=_pool(None)):
+            bars = await strategist.fetch_bars_since_close(
+                "ZZZUSD", df=self._df(), current_price=1.1045, pip_size=0.0001)
+        assert bars is None   # el serve normaliza a 1.0 (sin cierre reciente)
+
+    @pytest.mark.asyncio
+    async def test_exit_before_window_returns_none(self):
+        row = {**_ROW, "exit_time": datetime(2023, 12, 31, 23, 0, tzinfo=timezone.utc)}
+        with patch.object(strategist, "get_pool", return_value=_pool(row)):
+            bars = await strategist.fetch_bars_since_close(
+                "ZZZUSD", df=self._df(), current_price=1.1045, pip_size=0.0001)
+        assert bars is None   # salida anterior a la ventana → serve normaliza a 1.0
+
+
 # ─── Router: traza en audit + shadow sin poder de decisión ────────────────────
 
 def _post_predict(action, monkeypatch, position=0, *, deliberate_side_effect=None):

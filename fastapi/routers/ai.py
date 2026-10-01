@@ -23,6 +23,8 @@ from core.container import build_registry_from_settings
 from core.pair import PairRegistry, default_model_path
 from db.connection import get_pool
 from ml.trading_env_v2 import (
+    EXTRA_STATE_FEATURES,
+    FOREX_MARKET_FEATURE_COUNT,
     MARKET_FEATURES,
     build_v3_observation,
     decode_v3_direction,
@@ -51,7 +53,7 @@ from services.position_sizing import (
 from services.order_manager import mark_order_filled
 from services.qwen_client import query_qwen_unified, query_qwen_sltp_validator
 from services.structured_logging import log_to_audit
-from services.strategist import STRATEGIST_VERSION, deliberate
+from services.strategist import STRATEGIST_VERSION, deliberate, fetch_bars_since_close
 from .deps import verify_token
 
 
@@ -134,6 +136,10 @@ class Brain:
     model: PPO
     vec_norm: Optional[VecNormalize]
     bundle: dict   # P1-2: procedencia del bundle EN MEMORIA (sha, source, loaded_at)
+    # Fase 3: contrato de obs del bundle — True = (20,25) con canal
+    # bars_since_close; False = (20,24) pre-memoria (derivado en load, nunca
+    # inferido a mano).
+    memory_channel: bool = False
 
 
 _BRAINS: dict[str, Brain] = {}
@@ -175,6 +181,26 @@ def load_inference_artifacts(symbol: str) -> None:
     obs_space = getattr(model, "observation_space", None)
     assert_obs_shape(manifest, getattr(obs_space, "shape", None))
 
+    # Fase 3: el ancho del observation_space del bundle decide si el obs
+    # lleva el canal de memoria (20,25) o es pre-memoria (20,24). Ancho
+    # desconocido = RuntimeError: nunca se sirve un contrato que no se
+    # construye.
+    obs_width = None
+    obs_shape = getattr(obs_space, "shape", None)
+    if obs_shape:
+        obs_width = obs_shape[-1]
+    base_width = FOREX_MARKET_FEATURE_COUNT + EXTRA_STATE_FEATURES
+    if obs_width == base_width:
+        memory_channel = False
+    elif obs_width == base_width + 1:
+        memory_channel = True
+    else:
+        raise RuntimeError(
+            f"[AI-STARTUP] Contrato de observación desconocido para {symbol}: "
+            f"{obs_shape} (esperado {base_width} pre-memoria "
+            f"o {base_width + 1} con memoria)"
+        )
+
     vec_norm_file = manifest.get("vec_norm_file")
     if vec_norm_file:
         vec_path = os.path.join(os.path.dirname(model_path), vec_norm_file)
@@ -193,6 +219,7 @@ def load_inference_artifacts(symbol: str) -> None:
     _BRAINS[symbol] = Brain(
         model=model,
         vec_norm=vec_norm,
+        memory_channel=memory_channel,
         bundle={
             "model_sha256": manifest["model_sha256"],
             "vec_norm_sha256": manifest.get("vec_norm_sha256"),
@@ -448,6 +475,18 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         tp_p = entry_p + tp_pips * pip_size if env_position == 1 else entry_p - tp_pips * pip_size
 
     market_slice = df[features_list].iloc[-20:].values
+    # Fase 3: contrato del obs según el bundle — con memoria (20,25) el
+    # canal bars_since_close se normaliza IGUAL que en el env
+    # (min(1, bars/max_holding_steps); 1.0 = sin cierre registrado o salida
+    # anterior a la ventana, idéntico al arranque del env). Bundle
+    # pre-memoria → sin canal (20,24), contrato intacto.
+    max_holding_steps = 120
+    bars_norm = None
+    if brain.memory_channel:
+        bars = await fetch_bars_since_close(
+            sym, df=df, current_price=current_price, pip_size=pip_size,
+        )
+        bars_norm = 1.0 if bars is None else min(1.0, bars / max_holding_steps)
     raw_obs = build_v3_observation(
         market_values=market_slice,
         expected_market_features=len(features_list),
@@ -458,10 +497,11 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         tp_price=tp_p,
         current_atr=current_atr,
         steps_in_trade=req.steps_in_trade,
-        max_holding_steps=120,
+        max_holding_steps=max_holding_steps,
         balance=equity_val,
         initial_balance=10000.0,
         window_size=20,
+        bars_since_close_norm=bars_norm,
     )
 
     if brain.vec_norm is not None:

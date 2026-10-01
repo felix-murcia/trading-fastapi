@@ -22,8 +22,12 @@ particionan el eje temporal completo.
 Métricas (velas H1; anualización 24*252 barras/año):
 - sharpe / sortino: retornos por paso de la curva de equity del episodio
 - max_dd: peak-to-trough de la curva de equity
-- expectancy: PnL realizado medio por trade ((balance_final - inicial)/trades)
-- rewards agregados: sum_reward (decisión primaria), aperturas, trades
+- expectancy: PnL medio por trade CON regla 3 € (R-1): cada close <3 €
+  cuenta como pérdida de la misma magnitud; el crudo
+  ((balance_final − inicial)/trades) se reporta aparte como expectancy_raw
+- rewards agregados: sum_reward (decisión primaria) — el reward del env ya
+  clasifica los closes sub-3 € como pérdida (R-1), así que sum_reward y
+  expectancy hablan el mismo idioma que AGENTS.md
 
 Gate multi-métrico (todas las reglas estrictas; empates = fallo):
 1. total_openings >= min_openings (candidato evaluable, no HOLD permanente)
@@ -41,6 +45,8 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+
+from core.rules import is_winning_close
 
 H1_BARS_PER_YEAR = 24 * 252  # Forex: 24h de sesiones × 252 días hábiles
 
@@ -193,23 +199,51 @@ def _max_dd(equity: np.ndarray) -> float:
 
 
 def segment_metrics(result: dict, initial_balance: float) -> dict:
-    """Métricas de un episodio (_evaluate_model) en unidades comparables."""
+    """Métricas de un episodio (_evaluate_model) en unidades comparables.
+
+    R-1 / regla 3 € (plan D-2): `expectancy` clasifica el pnl de cada trade
+    con `core.rules.is_winning_close` — un close ∈ [0, 3 €) cuenta como
+    PÉRDIDA de la misma magnitud (signo invertido). Así un candidato que
+    sobreviva de closes sub-3 € no puede superar el suelo absoluto del gate.
+    `expectancy_raw` conserva la media cruda como diagnóstico; el gate usa
+    `expectancy`.
+
+    Sin trade_pnls coherentes no se calcula: RuntimeError (sin datos, sin
+    valor inventado).
+    """
     equity = np.asarray(result.get("equity_curve", []), dtype=float)
     rewards = np.asarray(result.get("step_rewards", []), dtype=float)
     trades = int(result.get("trades", 0))
     balance = float(result.get("balance", initial_balance))
+    pnls = result.get("trade_pnls")
 
     if len(equity) >= 2:
         rets = np.diff(equity) / np.maximum(equity[:-1], 1e-9)
     else:
         rets = np.array([], dtype=float)
 
+    expectancy_raw = float((balance - initial_balance) / trades) if trades else 0.0
+    if trades == 0:
+        expectancy = 0.0
+    else:
+        if pnls is None or len(pnls) != trades:
+            raise RuntimeError(
+                f"[WALK-FORWARD] trades={trades} sin trade_pnls coherentes "
+                f"(len={len(pnls) if pnls is not None else 'ausente'}) — la "
+                "expectancy con regla 3 € exige el pnl por trade"
+            )
+        # close <3 € → pérdida de la MISMA magnitud; losses (pnl<0) no cambian
+        expectancy = float(np.mean([
+            p if is_winning_close(p) else -abs(p) for p in pnls
+        ]))
+
     return {
         "reward": float(result.get("reward", 0.0)),
         "sharpe": _sharpe(rets),
         "sortino": _sortino(rets),
         "max_dd": _max_dd(equity),
-        "expectancy": float((balance - initial_balance) / trades) if trades else 0.0,
+        "expectancy": expectancy,
+        "expectancy_raw": expectancy_raw,
         "trades": trades,
         "wins": int(result.get("wins", 0)),
         "losses": int(result.get("losses", 0)),

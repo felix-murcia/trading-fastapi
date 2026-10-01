@@ -20,7 +20,8 @@ from ml.trading_env_v2 import (
 from ml.train_ppo_v3 import FEATURE_NAMES
 from config import settings
 from main import app
-from routers.ai import PredictRequest, PredictResponse, TradeFilledRequest
+import routers.ai
+from routers.ai import Brain, PredictRequest, PredictResponse, TradeFilledRequest
 from services.position_sizing import pip_value_per_lot, size_ppo_position
 
 
@@ -154,6 +155,80 @@ def test_ai_predict_e2e_flow():
                 min_lot=settings.min_volume,
             )
             assert abs(payload["volume"] - expected_lots) < 1e-9
+
+
+def test_predict_memory_contract_adds_normalized_bars_since_close(monkeypatch):
+    """Fase 3: bundle con memoria (20,25) → el obs lleva bars_since_close
+    normalizado IGUAL que el env (min(1, bars/max_holding); None → 1.0);
+    el bundle pre-memoria (20,24) sigue sin canal y sin consultar la BD."""
+    model_legacy = MagicMock()
+    model_legacy.predict.return_value = (np.array([0.80, 0.18], dtype=np.float32), None)
+    model_legacy.observation_space = Box(-np.inf, np.inf, shape=(20, 24), dtype=np.float32)
+    model_legacy.action_space = Box(-1.0, 1.0, shape=(4,), dtype=np.float32)
+
+    model_mem = MagicMock()
+    model_mem.predict.return_value = (np.array([0.80, 0.18], dtype=np.float32), None)
+    model_mem.observation_space = Box(-np.inf, np.inf, shape=(20, 25), dtype=np.float32)
+    model_mem.action_space = Box(-1.0, 1.0, shape=(4,), dtype=np.float32)
+
+    for m in (model_legacy, model_mem):
+        dist = MagicMock()
+        dist.distribution.mean.numpy.return_value = np.array([0.1, 0.1, 0.1, 0.1], dtype=np.float32)
+        dist.distribution.stddev.numpy.return_value = np.array([0.5, 0.5, 0.5, 0.5], dtype=np.float32)
+        m.policy.get_distribution.return_value = dist
+
+    fetch_bars = AsyncMock(return_value=60)
+    base_headers = {"x-internal-token": "test-token"}
+
+    with patch("main.init_pool", AsyncMock()), \
+         patch("main.close_pool", AsyncMock()), \
+         patch("routers.ai.is_news_blackout", AsyncMock(return_value=(False, None))), \
+         patch("routers.ai.get_pool", return_value=MagicMock(execute=AsyncMock())), \
+         patch("routers.ai.PPO.load", return_value=model_legacy), \
+         patch("routers.ai.fetch_bars_since_close", fetch_bars), \
+         patch("services.news_scraper.get_macro_news", AsyncMock(return_value="No macro news")), \
+         patch("httpx.AsyncClient", FakeAsyncClient):
+        with TestClient(app) as client:
+            # 1) arranque con el bundle pre-memoria real → obs (20,24) y
+            #    NINGUNA consulta de velas desde el cierre
+            r1 = client.post(
+                "/api/v1/ai/predict",
+                json={"symbol": "EURUSD", "timeframe": "H1", "position": 0},
+                headers={**base_headers, "x-cycle-id": "e2e-mem-legacy"},
+            )
+            assert r1.status_code == 200, r1.text
+            obs = model_legacy.predict.call_args[0][0]
+            assert obs.shape == (20, 24)
+            fetch_bars.assert_not_awaited()
+
+            # 2) swap a un bundle con memoria (contrato (20,25)) → consulta
+            #    las velas desde el cierre y normaliza como el env: 60/120
+            monkeypatch.setitem(routers.ai._BRAINS, "EURUSD", Brain(
+                model=model_mem, vec_norm=None, memory_channel=True,
+                bundle={"model_sha256": "a" * 64, "vec_norm_sha256": None,
+                        "source": "test", "loaded_at": "2026-10-01T00:00:00+00:00"},
+            ))
+            r2 = client.post(
+                "/api/v1/ai/predict",
+                json={"symbol": "EURUSD", "timeframe": "H1", "position": 0},
+                headers={**base_headers, "x-cycle-id": "e2e-mem-25"},
+            )
+            assert r2.status_code == 200, r2.text
+            assert fetch_bars.await_args.args[0] == "EURUSD"
+            obs = model_mem.predict.call_args[0][0]
+            assert obs.shape == (20, 25)
+            np.testing.assert_allclose(obs[:, -1], 0.5)   # 60/120
+
+            # 3) sin cierre registrado (None) → 1.0, idéntico al arranque del env
+            fetch_bars.return_value = None
+            r3 = client.post(
+                "/api/v1/ai/predict",
+                json={"symbol": "EURUSD", "timeframe": "H1", "position": 0},
+                headers={**base_headers, "x-cycle-id": "e2e-mem-none"},
+            )
+            assert r3.status_code == 200, r3.text
+            obs = model_mem.predict.call_args[0][0]
+            np.testing.assert_allclose(obs[:, -1], 1.0)
 
 
 def test_predict_mt5_down_returns_ok_hold_with_cycle_id():

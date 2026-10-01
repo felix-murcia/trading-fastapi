@@ -163,6 +163,8 @@ def main():
         'trailing_min_pips': 15.0,
         'trailing_atr_mult': 2.0,
         'min_stop_dist_pips': 1.0,
+        # Fase 3: contrato con memoria — canal bars_since_close → obs (20,25)
+        'memory_channel': True,
     }
 
     eval_env_config = train_env_config.copy()

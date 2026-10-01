@@ -267,10 +267,14 @@ class TestRetrainContractChange:
         from services.auto_retrain import _make_train_env
         from services.model_registry import build_manifest, write_manifest
 
-        window = 20   # obs (20,24) del env real → check_shape_equal del load
+        window = 20   # obs (20,25) del env Fase 3 → check_shape_equal del load
 
         class _LegacyAct4Env(gym.Env):
-            observation_space = spaces.Box(-np.inf, np.inf, shape=(20, 24), dtype=np.float32)
+            # Fase 3: el obs del pickle CASA con el contrato nuevo (20,25);
+            # lo obsoleto es la CABEZA de acción (4). El caso obs obsoleto
+            # (20,24 → stats nuevos desde cero) cubre
+            # test_make_train_env_rebuilds_stats_on_obs_contract_change.
+            observation_space = spaces.Box(-np.inf, np.inf, shape=(20, 25), dtype=np.float32)
             action_space = spaces.Box(
                 low=np.array([-1.0, 0.0, 0.0, 0.0], dtype=np.float32),
                 high=np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32),
@@ -294,7 +298,7 @@ class TestRetrainContractChange:
         assert tuple(legacy.action_space.shape) == (4,)   # pkl "viejo" real
 
         write_manifest(str(zip_path), build_manifest(
-            str(zip_path), obs_shape=(20, 24),
+            str(zip_path), obs_shape=(20, 25),
             vec_norm_file=pkl_path.name, source="test",
         ))
         env_cfg = dict(df=engineer_market_features(_raw_df()), window_size=window,
@@ -303,6 +307,67 @@ class TestRetrainContractChange:
 
         assert tuple(env.action_space.shape) == (2,)
         assert tuple(env.venv.action_space.shape) == (2,)
+
+    def test_make_train_env_rebuilds_stats_on_obs_contract_change(self, tmp_path):
+        """Fase 3: bundle pre-memoria (obs 24) sobre env con memoria (25) →
+        VecNormalize NUEVO desde cero (SB3 rechazaría el set_venv con un
+        AssertionError críptico; la normalización se reconstruye, igual que
+        la cabeza de acción en P2-1)."""
+        from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+
+        from services.auto_retrain import _make_train_env
+        from services.model_registry import build_manifest, write_manifest
+
+        window = 20
+        zip_path = tmp_path / "ppo_trading_bot_v3.zip"
+        zip_path.write_bytes(b"fake-ppo-zip")
+        pkl_path = tmp_path / "ppo_trading_bot_v3_vec_norm.pkl"
+        legacy = VecNormalize(
+            DummyVecEnv([lambda: ForexTradingEnvV2(
+                df=engineer_market_features(_raw_df()), window_size=window,
+                random_reset=False, max_episode_steps=30, memory_channel=False,
+            )]),
+            norm_obs=True, norm_reward=True,
+        )
+        legacy.reset()
+        legacy.save(str(pkl_path))
+        assert tuple(legacy.observation_space.shape) == (20, 24)  # contrato viejo
+
+        write_manifest(str(zip_path), build_manifest(
+            str(zip_path), obs_shape=(20, 24),
+            vec_norm_file=pkl_path.name, source="test",
+        ))
+        # env_cfg SIN memory_channel → contrato nuevo (20,25) por defecto
+        env_cfg = dict(df=engineer_market_features(_raw_df()), window_size=window,
+                       random_reset=False, max_episode_steps=30)
+        env = _make_train_env(env_cfg, str(zip_path))
+
+        # stats del pickle (20,24) NO se pueden usar: se reconstruyen a 25
+        assert tuple(env.observation_space.shape) == (20, 25)
+        assert np.shape(env.obs_rms.mean) == (20, 25)
+
+    def test_load_or_create_model_fresh_on_legacy_obs_contract(self, tmp_path):
+        """Fase 3: zip pre-memoria (20,24) + env con memoria (20,25) →
+        reentreno desde cero con el contrato nuevo (mismo precedente P2-1)."""
+        from stable_baselines3 import PPO
+        from stable_baselines3.common.vec_env import DummyVecEnv
+
+        from services.auto_retrain import RetrainConfig, _load_or_create_model
+
+        legacy_df = engineer_market_features(_raw_df())
+        legacy_zip = tmp_path / "legacy24.zip"
+        PPO("MlpPolicy", DummyVecEnv([lambda: ForexTradingEnvV2(
+            df=legacy_df, window_size=20, random_reset=False, max_episode_steps=30,
+            memory_channel=False,
+        )]), n_steps=8, verbose=0).save(str(legacy_zip))
+
+        env = self._train_env(legacy_df, window=20)   # (20,25) con memoria
+        model = _load_or_create_model(str(legacy_zip), env, RetrainConfig)
+
+        # contrato incompatible → política NUEVA con el obs del env
+        assert tuple(model.observation_space.shape) == (20, 25)
+        assert tuple(model.action_space.shape) == (2,)
+        assert model.seed is None   # recién creada (el zip legado no tenía seed)
 
     def test_load_or_create_model_fresh_when_no_model(self, tmp_path):
         from services.auto_retrain import RetrainConfig, _load_or_create_model

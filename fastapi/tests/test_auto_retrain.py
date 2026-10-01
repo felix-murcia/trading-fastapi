@@ -5,6 +5,7 @@ import pytest
 from datetime import datetime
 from unittest.mock import patch, AsyncMock, MagicMock
 import json
+import gymnasium as gym
 import numpy as np
 import pandas as pd
 
@@ -218,6 +219,12 @@ class _ZerosModel:
     """Política determinista: acción [0,0,0,0] (bundle legado 4-dim, evaluable
     en el gate walk-forward) → nunca abre posición."""
 
+    # Fase 3: contrato de obs del candidato (20,25) — _evaluate_model construye
+    # el env con el canal de memoria según ESTE observation_space.
+    observation_space = gym.spaces.Box(
+        -np.inf, np.inf, shape=(20, 25), dtype=np.float32
+    )
+
     def predict(self, observation, deterministic=True):
         return np.zeros(4, dtype=np.float32), None
 
@@ -246,7 +253,7 @@ class TestEvaluateModelDeterminism:
         metrics = _evaluate_model(_ZerosModel(), df, _env_cfg(df))
         assert set(metrics) == {"openings", "trades", "wins", "losses",
                                 "win_rate", "reward", "balance",
-                                "equity_curve", "step_rewards"}
+                                "equity_curve", "step_rewards", "trade_pnls"}
         assert metrics["openings"] == 0  # política de ceros nunca abre
 
     def test_normalized_run_uses_obs_rms(self, df):
@@ -259,6 +266,50 @@ class TestEvaluateModelDeterminism:
         metrics = _evaluate_model(_ZerosModel(), df, _env_cfg(df), obs_rms=norm.obs_rms)
         assert metrics["openings"] == 0
         assert np.isfinite(metrics["reward"])
+
+
+class TestEvaluateModelObsContract:
+    """Fase 3: el env de evaluación se construye con el observation_space del
+    modelo evaluado — baseline pre-memoria (20,24) vs candidato (20,25);
+    contrato desconocido = RuntimeError (sin degradación silenciosa)."""
+
+    @pytest.fixture
+    def df(self):
+        from services.auto_retrain import _build_training_dataframe
+        return _build_training_dataframe(_candles(120))
+
+    @staticmethod
+    def _recorder(width: int):
+        class _Recorder:
+            def __init__(self):
+                self.observation_space = gym.spaces.Box(
+                    -np.inf, np.inf, shape=(20, width), dtype=np.float32
+                )
+                self.seen = []
+
+            def predict(self, observation, deterministic=True):
+                self.seen.append(tuple(np.asarray(observation).shape))
+                return np.zeros(4, dtype=np.float32), None
+
+        return _Recorder()
+
+    def test_legacy_24_model_evaluated_without_memory_channel(self, df):
+        from services.auto_retrain import _evaluate_model
+        model = self._recorder(24)
+        metrics = _evaluate_model(model, df, _env_cfg(df))
+        assert model.seen and model.seen[0] == (1, 20, 24)
+        assert "trade_pnls" in metrics
+
+    def test_memory_25_model_evaluated_with_memory_channel(self, df):
+        from services.auto_retrain import _evaluate_model
+        model = self._recorder(25)
+        _evaluate_model(model, df, _env_cfg(df))
+        assert model.seen and model.seen[0] == (1, 20, 25)
+
+    def test_unknown_obs_contract_raises(self, df):
+        from services.auto_retrain import _evaluate_model
+        with pytest.raises(RuntimeError, match="Contrato de observación desconocido"):
+            _evaluate_model(self._recorder(30), df, _env_cfg(df))
 
 
 class TestRetrainStateBootstrap:
@@ -344,17 +395,17 @@ class TestBundleNormHelpers:
         from services.auto_retrain import _load_obs_rms
         zip_path = tmp_path / "ppo_trading_bot_v3.zip"
         zip_path.write_bytes(b"x")
-        assert _load_obs_rms(str(zip_path), _env_cfg(self._df())) is None
+        assert _load_obs_rms(str(zip_path)) is None
 
     def test_load_obs_rms_raw_bundle_returns_none(self, tmp_path):
         from services.auto_retrain import _load_obs_rms
         model = self._certified(tmp_path, vec_norm=False)
-        assert _load_obs_rms(model, _env_cfg(self._df())) is None
+        assert _load_obs_rms(model) is None
 
     def test_load_obs_rms_normalized_bundle_returns_stats(self, tmp_path):
         from services.auto_retrain import _load_obs_rms
         model = self._certified(tmp_path, vec_norm=True)
-        assert _load_obs_rms(model, _env_cfg(self._df())) is not None
+        assert _load_obs_rms(model) is not None
 
     def test_train_env_fresh_vecnorm_for_raw_bundle(self, tmp_path):
         from stable_baselines3.common.vec_env import VecNormalize
@@ -435,12 +486,15 @@ class TestDoRetrainPromotion:
 
         openings=50×4 pliegues = 200 aperturas: el gate canario (P3-3) exige
         ≥200 cuando no hay baseline — 3 por pliego quedaría corto.
+        trade_pnls consistente con balance (10 ≥3€ win + −5 loss = +5):
+        expectancy R-1 = +2.5 > 0 → suelo absoluto superado.
         """
         return {
             "openings": 50, "trades": 2, "wins": 1, "losses": 1,
-            "win_rate": 0.5, "reward": 1.5, "balance": 1002.0,
+            "win_rate": 0.5, "reward": 1.5, "balance": 1005.0,
             "equity_curve": [1000.0, 1005.0, 998.0, 1010.0],
             "step_rewards": [1.0, -0.5, 1.0],
+            "trade_pnls": [10.0, -5.0],
         }
 
     @pytest.mark.asyncio

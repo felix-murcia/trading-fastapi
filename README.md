@@ -60,7 +60,7 @@ El EA `AI_Quant_Terminal.mq5` consulta a FastAPI cada nueva vela H1:
 - El agente decide autónomamente **dirección y volumen** sin heurísticas externas
 - SL/TP salen de `production_stops()` (ATR relativo ×1.5 acotado a [10,50] pips, TP = 2×SL): la MISMA función que usa el env de entrenamiento → paridad train/serve
 - Trailing stop modelado dentro del env, espejo de `ManageTrailingStop` del EA
-- Observation space: `(20, 24)` — 17 features de mercado + 7 canales de estado
+- Observation space: `(20, 25)` (Fase 3) — 17 features de mercado + 8 canales de estado (7 legacy + `bars_since_close`); un bundle pre-memoria `(20, 24)` se sirve sin canal (el serve deriva el contrato del ancho del obs)
 - 12 features: `returns`, `range`, `dist_sma20`, `rsi14`, `macd`, `macd_signal`, `macd_hist`, `bb_pos`, `lag_return_1/2/3/5`
 - **Guards activos**: volume ∈ [10%, 30%], SL ∈ [15, 30] pips, TP ∈ [25, 60] pips
   - **Guard logic**: SL/TP capped **siempre** a 30/60 pips (sin threshold `>0.95`)
@@ -166,11 +166,15 @@ El script de entrenamiento permite hasta 120 segundos para descargar las
 timeout de 30 segundos aunque consultas más pequeñas respondan correctamente.
 
 El modelo v3 original fue reentrenado el 2026-09-09 con 200.000 pasos. El
-contrato vigente de observación es `(20, 24)`: ventana de 20 velas × (17
-features de mercado + 7 state channels), con acción continua `(4,)`. El bundle
-activo en `model_registry` se entrenó y validó con walk-forward bajo este
-contrato (2026-09-28); un modelo con el contrato anterior `(10, 21)` no pasa
-la validación de `load_inference_artifacts` y no se sirve.
+contrato de observación desde Fase 3 (2026-10-01) es `(20, 25)`: ventana de
+20 velas × (17 features de mercado + 8 state channels — los 7 legacy más
+`bars_since_close`), con acción continua `(4,)`. El bundle **activo** en
+`model_registry` se entrenó y validó con walk-forward bajo el contrato
+pre-memoria `(20, 24)` (2026-09-28) y sigue sirviéndose sin canal de memoria
+hasta el próximo retrain: `load_inference_artifacts` deriva el contrato del
+ancho del obs del bundle (25 → canal activo con `min(1, bars/120)`; 24 →
+legado sin consulta; otro ancho → `RuntimeError`, no se sirve). Un modelo con
+el contrato antiguo `(10, 21)` tampoco pasa la validación.
 
 El feedback de operaciones reales se carga desde `trade_outcomes` durante el
 auto-retrain, por lo que sobrevive a reinicios del contenedor. Se excluyen
@@ -336,7 +340,7 @@ Cada vez que un trade se cierra, se registra en `trade_outcomes`. Cada 10 trades
 - Usa **`ForexTradingEnvV2`** (spread=3 pips EURUSD) — coincide con producción
 - Modelo reentrenado: **`ppo_trading_bot_v3.zip`** — el mismo que el EA consume
 
-**Modelo actual**: `ppo_trading_bot_v3.zip` — obs space `(20, 24)` (17 features + 7 canales de estado), acción continua Box(2,) `[direction, volume]` — stops ATR de `production_stops()` compartidos con `/predict` (P2-1) y volumen como escalador de riesgo 0…3% del equity vía `size_ppo_position()` compartida serve↔env (P2-2)
+**Modelo actual**: `ppo_trading_bot_v3.zip` — obs space `(20, 24)` (bundle activo, pre-memoria: 17 features + 7 canales; **contrato Fase 3 = `(20, 25)`** con `bars_since_close` para el próximo reentrenamiento — el serve deriva el canal del ancho del obs), acción continua Box(2,) `[direction, volume]` — stops ATR de `production_stops()` compartidos con `/predict` (P2-1) y volumen como escalador de riesgo 0…3% del equity vía `size_ppo_position()` compartida serve↔env (P2-2)
 
 **Modelo legacy**: `ppo_trading_bot.zip` — 200k steps, obs space `(10, 11)`, 10 features, acción Discrete(3), entrenado con `train_ppo_v2.py`
 
@@ -1703,3 +1707,23 @@ Ahora, si las Bandas de Bollinger son inválidas o el ratio es insuficiente, el 
 **Evidencia (2026-10-01):** suite **617 passed** (23.3 s). Deploy `docker compose up -d --build fastapi` → `/health` ok. Verificado en vivo en el primer ciclo post-deploy: `config_version=1.1.0`, `criteria.C2_executable_size.active=true`, `verdict=NO_CANDIDATE` (modelo HOLD), `decision=HOLD` intacta; 0 errores nuevos (solo los 2 GCS ADC conocidos, D-4). `rejected_position_open` = 0 desde el deploy de A-1.
 
 **Archivos:** `fastapi/services/strategist.py`, `fastapi/tests/test_strategist_shadow.py`, `README.md`, `PROTOCOLO_ANTI_BUCLE.md`.
+
+### Fase 3 (plan §7): retrain con memoria — obs (20,25), anti-churn y regla 3 € en el reward (2026-10-01)
+
+**Contexto:** plan `doc/plan-optimizacion-y-estratega-2026-09-30.md` §7 (Fase 3, elegida por Félix sobre el estratega §4.3). El gate absoluto de Fase 1 hace su trabajo (candidato `sum_reward=-107` vs baseline `−68` → RECHAZADO) y la causa de fondo está en el MDP: el agente no distingue "reentrada legítima" de "churn" (sin memoria de la última salida el reward es ciego al timing de reabrir), un win de 0.64 € se pagaba igual que uno de 3.84 € (contradiciendo la regla 3 € «cualquier operación cerrada inferior a 3 € se considera pérdida») y reabrir dentro de la ventana de 2 velas costaba exactamente lo mismo que esperar.
+
+**Cambios (6 ficheros de código):**
+- **`fastapi/ml/trading_env_v2.py` — contrato obs `(20,24) → (20,25)`:** flag `memory_channel: bool = True` (los bundles legados se evalúan con `False`; el contrato viejo sigue siendo un ciudadano de primera clase). 8º canal de estado `bars_since_close`: init `max_holding_steps` → normalizado **1.0** («sin cierre reciente», idéntico al arranque del serve), **0** en el paso de cierre, **+1** por vela sin cierre, normalización `min(1, bars/max_holding_steps)`; `ever_closed` marca si el episodio ha cerrado algo. **Anti-churn (Fricción completa — decisión de Félix 2026-10-01):** `CHURN_BARS = 2` — reabrir con `ever_closed and bars_since_close ≤ 2` paga `volume × commission × 2` extra de reward en la apertura (la primera apertura y cualquier espera ≥3 velas quedan intactas; el flip mismo-paso ve `bars=0` y también paga). **Regla 3 € en el reward:** un close con `pnl ∈ (0, 3 €)` recibe `reward −= 2 × (pnl/balance) × reward_scale` (invierte el signo del aporte: un ciclo open+close de 0.64 € queda **negativo**), el dinero (`balance`, `info["trade_pnls"]`) **no se toca** — la regla cambia la señal de aprendizaje, nunca el saldo. `info["trade_pnls"]` expone el pnl por trade (lo consume el gate). `_apply_real_outcome_feedback` clasifica la evidencia con `is_winning_close` (mismo umbral que el resto del sistema). `FOREX_MARKET_FEATURE_COUNT = len(MARKET_FEATURES)` para que el ancho base no pueda desincronizarse entre env y serve.
+- **`fastapi/services/walk_forward.py` — expectancia 3 € en el gate:** `segment_metrics.expectancy` = media de `trade_pnls` clasificados (sub-3 € → `−abs(pnl)`), `expectancy_raw` como diagnóstico; trades > 0 con `trade_pnls` ausente o incoherente → `RuntimeError` (sin degradación silenciosa); `_evaluate_model` devuelve `trade_pnls`.
+- **`fastapi/services/auto_retrain.py` — contrato por modelo:** `env_cfg` de evaluación con `memory_channel=True`; `_evaluate_model` deriva el contrato del **ancho del observation_space del modelo** (24 → `False`, 25 → `True`, otro → `RuntimeError`) — así el baseline pre-memoria se evalúa en su propio dominio (24) y el candidato en el suyo (25), y solo se comparan métricas de dominios conocidos; `_load_or_create_model` con obs mismatch → **reentreno nuevo** (precedente P2-1: nunca arrastra política incompatible); `_make_train_env` pre-valida la forma del obs del pickle VecNormalize contra el env (mismatch → stats **desde cero** + WARNING — sin eso, SB3 `set_venv` revienta con un `AssertionError` críptico); `_load_obs_rms` carga con `pickle.load` directo (1 arg — SB3 excluye `venv` de `__getstate__`).
+- **`fastapi/ml/train_ppo_v3.py`** — `'memory_channel': True` en la config: todo reentrenamiento nuevo nace con memoria.
+- **`fastapi/routers/ai.py` — serve paridad train/serve:** `Brain.memory_channel: bool` derivado en `load_inference_artifacts` del ancho del obs del bundle (desconocido → `RuntimeError`); el build del obs consulta `strategist.fetch_bars_since_close` y normaliza `min(1, bars/120)` (`None` → **1.0**, exactamente el arranque del env; patch point `routers.ai.fetch_bars_since_close`). **Transición sin riesgo:** con el bundle 24 actual el serve no consulta nada y no cambia ni un byte del obs.
+- **`fastapi/services/strategist.py`** — `fetch_bars_since_close(symbol, df, current_price, pip_size)`: reutiliza `_LAST_CLOSE_SQL` + `compute_since_exit` (mismo SQL, misma ventana y mismo dominio broker que el narrativo del estratega).
+
+**Paridad train/serve verificada por test:** E2E serve — bundle legado (20,24) → obs (20,24) y **cero** consultas; bundle memoria (20,25) → obs (20,25) con última columna `0.5` para 60 velas y `1.0` para `None`. Env — evolución del canal (1.0 → cierre → 0 → 1/120 → 2/120), 3 € flip (0.64 € → reward `−0.064` y losses=1 / 3.84 € → `+0.384` y wins=1), churn con delta exacto del recargo en las fronteras 1–2 (paga) y 3 (no paga).
+
+**Evidencia (2026-10-01):** suite **634 passed** (617 → 634, +17: `test_walk_forward.py` +3 3€/gate, `test_trading_env_step.py` +5 `TestFase3MemoryChurnAndThreeEuro`, `test_p21_unification.py` +2 contrato retrain, `test_auto_retrain.py` +3 `_evaluate_model` 24/25/desconocido, `test_strategist_shadow.py` +3 `fetch_bars_since_close`, `test_e2e_ai_predict.py` +1 serve memoria), 23.5 s, exit 0.
+
+**Troubleshooting (trampas de autoría de tests, ninguna en producción):** (1) `engineer_market_features` **descarta las 19 filas de warmup** (SMA20) — un df crudo de 40 filas llega al env con 21 y un salto de precio en la fila 7 cae *fuera* de la ventana visible (entry/close ambos en 1.1003 → pnl plana −1.76 €); fixture `_df_step_move(jump=26)` documenta el hueco. (2) `env.step()` devuelve `(obs, reward, …)` — `r_open, *_ = step(...)` captura el obs como reward (unpack corregido a `_, r_open, *_`).
+
+**Archivos:** `fastapi/ml/trading_env_v2.py`, `fastapi/ml/train_ppo_v3.py`, `fastapi/routers/ai.py`, `fastapi/services/auto_retrain.py`, `fastapi/services/strategist.py`, `fastapi/services/walk_forward.py`, `fastapi/tests/test_trading_env_step.py`, `fastapi/tests/test_walk_forward.py`, `fastapi/tests/test_auto_retrain.py`, `fastapi/tests/test_p21_unification.py`, `fastapi/tests/test_strategist_shadow.py`, `fastapi/tests/test_e2e_ai_predict.py`, `README.md`, `PROTOCOLO_ANTI_BUCLE.md`.

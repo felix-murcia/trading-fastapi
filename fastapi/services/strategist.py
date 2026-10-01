@@ -247,6 +247,30 @@ def compute_since_exit(
     return bars, round(move_pips, 2)
 
 
+async def fetch_bars_since_close(
+    symbol: str,
+    *,
+    df: pd.DataFrame,
+    current_price: float,
+    pip_size: float,
+) -> Optional[int]:
+    """Velas desde el último cierre de `symbol` — canal de memoria del obs (Fase 3).
+
+    Devuelve las velas posteriores a la última salida en `trade_outcomes`
+    (mismo dominio broker que `df['time']`; ver `compute_since_exit`).
+
+    `None` = sin cierre registrado O salida anterior a la ventana de velas:
+    en ambos casos el obs normaliza a 1.0 ("sin cierre reciente"), idéntico
+    al arranque del env de entrenamiento (contador ≥ max_holding_steps).
+    """
+    pool = get_pool()
+    row = await pool.fetchrow(_LAST_CLOSE_SQL, symbol)
+    if row is None:
+        return None
+    bars, _ = compute_since_exit(df, row["exit_time"], current_price, pip_size)
+    return bars
+
+
 async def fetch_narrative(
     symbol: str,
     *,

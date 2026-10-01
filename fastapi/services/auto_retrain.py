@@ -11,6 +11,7 @@ import asyncio
 import logging
 import json
 import os
+import pickle
 import time
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
@@ -458,8 +459,15 @@ def _spawn_retrain_task(trigger: str = "manual", symbol: str = TRAINING_SYMBOL) 
     return task
 
 
-def _load_obs_rms(model_path: str, env_cfg: dict):
-    """obs_rms congeladas del bundle certificado en su manifest (None = bundle crudo)."""
+def _load_obs_rms(model_path: str):
+    """obs_rms congeladas del bundle certificado en su manifest (None = bundle crudo).
+
+    Se extraen con `pickle.load` directo (SB3 descarta `venv` al empaquetar):
+    así las stats del bundle activo se obtienen SIN atarlas a un env — la
+    igualdad de contrato se exige después, en `_evaluate_model`, construyendo
+    el env con el contrato del modelo que se evalúa (Fase 3: baseline 24
+    canales vs candidato 25).
+    """
     from services.model_registry import load_manifest
 
     try:
@@ -471,17 +479,11 @@ def _load_obs_rms(model_path: str, env_cfg: dict):
     if not vec_norm_file:
         return None
 
-    from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
-    from ml.trading_env_v2 import ForexTradingEnvV2
-
     pkl_path = os.path.join(os.path.dirname(model_path), vec_norm_file)
-    cfg = dict(env_cfg)
-    cfg["real_outcomes"] = []
-    venv = VecNormalize.load(pkl_path, DummyVecEnv([lambda: ForexTradingEnvV2(**cfg)]))
-    venv.training = False
-    venv.norm_reward = False
+    with open(pkl_path, "rb") as fh:
+        frozen = pickle.load(fh)
     logger.info("[RETRAIN] Baseline se evaluará con stats del bundle: %s", pkl_path)
-    return venv.obs_rms
+    return frozen.obs_rms
 
 
 def _make_train_env(env_cfg: dict, model_path: str):
@@ -489,7 +491,13 @@ def _make_train_env(env_cfg: dict, model_path: str):
 
     - bundle activo declarando vec_norm_file → continúa con ESAS stats
       (train/serve coherente entre ciclos);
-    - bundle crudo o sin manifest → stats nuevas desde cero.
+    - bundle crudo o sin manifest → stats nuevas desde cero;
+    - stats con contrato de obs distinto al del env (Fase 3: bundle (20,24)
+      entrenando un env (20,25)) → stats nuevas desde cero. SB3 rechazaría
+      el `set_venv` con un AssertionError críptico; el contrato cambia, la
+      normalización se reconstruye (mismo precedente que la cabeza de acción
+      P2-1). La comparación se hace sobre el pickle directo: el `observation_
+      space` guardado es el del env con el que se entrenó ese bundle.
     """
     from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
     from ml.trading_env_v2 import ForexTradingEnvV2
@@ -501,21 +509,33 @@ def _make_train_env(env_cfg: dict, model_path: str):
     except RuntimeError as exc:
         logger.warning("[RETRAIN] Manifest no disponible (%s) — VecNormalize nuevo desde cero", exc)
 
+    dummy = DummyVecEnv([lambda: ForexTradingEnvV2(**env_cfg)])
     if vec_norm_file:
         pkl_path = os.path.join(os.path.dirname(model_path), vec_norm_file)
-        train_env = VecNormalize.load(pkl_path, DummyVecEnv([lambda: ForexTradingEnvV2(**env_cfg)]))
-        # P2-1: el pickle de VecNormalize arrastra el action_space del bundle
-        # origen y set_venv() no lo refresca; sin esta línea PPO construiría
-        # la política con la cabeza vieja (p.ej. 4 tras pasar a [dir, volume]).
-        train_env.action_space = train_env.venv.action_space
-        train_env.training = True
-        train_env.norm_reward = True
-        logger.warning("[RETRAIN] Continuando con stats de normalización del bundle activo: %s", vec_norm_file)
-        return train_env
+        with open(pkl_path, "rb") as fh:
+            frozen = pickle.load(fh)
+        stored_shape = tuple(getattr(frozen.observation_space, "shape", ()))
+        env_shape = tuple(dummy.observation_space.shape)
+        if stored_shape == env_shape:
+            train_env = VecNormalize.load(pkl_path, dummy)
+            # P2-1: el pickle de VecNormalize arrastra el action_space del bundle
+            # origen y set_venv() no lo refresca; sin esta línea PPO construiría
+            # la política con la cabeza vieja (p.ej. 4 tras pasar a [dir, volume]).
+            train_env.action_space = train_env.venv.action_space
+            train_env.training = True
+            train_env.norm_reward = True
+            logger.warning("[RETRAIN] Continuando con stats de normalización del bundle activo: %s", vec_norm_file)
+            return train_env
+        logger.warning(
+            "[RETRAIN] Stats del bundle en contrato %s ≠ env %s (Fase 3: memoria) "
+            "— VecNormalize nuevo desde cero",
+            stored_shape, env_shape,
+        )
+        return VecNormalize(dummy, norm_obs=True, norm_reward=True, clip_obs=10.0)
 
     logger.warning("[RETRAIN] Bundle activo sin normalización — VecNormalize nuevo (stats desde cero)")
     return VecNormalize(
-        DummyVecEnv([lambda: ForexTradingEnvV2(**env_cfg)]),
+        dummy,
         norm_obs=True, norm_reward=True, clip_obs=10.0,
     )
 
@@ -527,18 +547,39 @@ def _evaluate_model(model, df: pd.DataFrame, env_cfg: dict, obs_rms=None) -> dic
       el MISMO segmento → la comparación es válida.
     - `obs_rms`: estadísticas congeladas de VecNormalize (None = bundle crudo):
       cada política se evalúa en el espacio de entrada con el que fue entrenada.
+    - Contrato de obs por modelo (Fase 3): el env se construye con el número
+      de canales del observation_space del modelo evaluado — baseline (20,24)
+      pre-memoria vs candidato (20,25). Contrato desconocido = RuntimeError
+      (sin degradación silenciosa).
     - Devuelve además curvas (equity, rewards por paso) para que el harness
       walk-forward calcule Sharpe/Sortino/DD.
     - wins/losses derivan de info['trades'] e info['win_rate'] (el env NO
       expone claves "wins"/"losses": antes siempre daban 0 — bug P1-4).
     """
     from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
-    from ml.trading_env_v2 import ForexTradingEnvV2
+    from ml.trading_env_v2 import (
+        EXTRA_STATE_FEATURES,
+        FOREX_MARKET_FEATURE_COUNT as _MARKET_FEATURE_COUNT,
+        ForexTradingEnvV2,
+    )
 
     eval_cfg = dict(env_cfg)
     eval_cfg["df"] = df
     eval_cfg["real_outcomes"] = []
     eval_cfg["random_reset"] = False  # episodio fijo: baseline y candidato idénticos
+
+    obs_shape = tuple(getattr(getattr(model, "observation_space", None), "shape", ()))
+    base_width = _MARKET_FEATURE_COUNT + EXTRA_STATE_FEATURES
+    if len(obs_shape) == 2 and obs_shape[-1] == base_width:
+        eval_cfg["memory_channel"] = False   # bundle pre-memoria (20,24)
+    elif len(obs_shape) == 2 and obs_shape[-1] == base_width + 1:
+        eval_cfg["memory_channel"] = True    # contrato Fase 3 (20,25)
+    else:
+        raise RuntimeError(
+            f"[RETRAIN] Contrato de observación desconocido: {obs_shape} "
+            f"(esperado {base_width} o {base_width + 1} canales) — no se evalúa"
+        )
+
     dummy = DummyVecEnv([lambda: ForexTradingEnvV2(**eval_cfg)])
     if obs_rms is not None:
         env = VecNormalize(dummy, training=False, norm_reward=False, clip_obs=10.0)
@@ -587,6 +628,9 @@ def _evaluate_model(model, df: pd.DataFrame, env_cfg: dict, obs_rms=None) -> dic
         "balance": float(info.get("balance", initial_balance)),
         "equity_curve": equity_curve,
         "step_rewards": step_rewards,
+        # Fase 3 / R-1: pnl por trade — segment_metrics calcula la expectancy
+        # con la regla 3 €; None si el env no lo expone (error allí, no aquí).
+        "trade_pnls": info.get("trade_pnls"),
     }
 
 
@@ -618,6 +662,21 @@ def _load_or_create_model(model_path: str, train_env, cfg) -> "PPO":
             "[RETRAIN] Contrato de acción %s ≠ env %s (P2-1: [direction, volume]) "
             "— reentreno desde cero con política nueva",
             model_shape, env_shape,
+        )
+        return _fresh()
+
+    # Fase 3: mismo precedente P2-1 para el contrato de OBSERVACIÓN — un
+    # bundle pre-memoria (20,24) sobre un env (20,25) rompería el forward de
+    # la política en mitad del entrenamiento con un error críptico de forma;
+    # aquí se detecta antes y se reentrena desde cero (stats ya reconstruidos
+    # por _make_train_env al no casar el contrato del pickle).
+    model_obs = tuple(getattr(getattr(probe, "observation_space", None), "shape", ()))
+    env_obs = tuple(getattr(train_env.observation_space, "shape", ()))
+    if model_obs != env_obs:
+        logger.warning(
+            "[RETRAIN] Contrato de observación %s ≠ env %s (Fase 3: canal "
+            "bars_since_close) — reentreno desde cero con contrato nuevo",
+            model_obs, env_obs,
         )
         return _fresh()
 
@@ -740,6 +799,10 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int, symbol: str = TRAINING
         trailing_min_pips=15.0,
         trailing_atr_mult=2.0,
         min_stop_dist_pips=1.0,
+        # Fase 3 (plan 2026-09-30): candidato SIEMPRE con el contrato nuevo —
+        # canal 8º bars_since_close → obs (20,25). El eval de cada modelo
+        # pisa este flag según el observation_space del modelo evaluado.
+        memory_channel=True,
     )
 
     from stable_baselines3 import PPO
@@ -762,7 +825,7 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int, symbol: str = TRAINING
     baseline_rms = None
     if os.path.exists(model_path):
         baseline_model = PPO.load(model_path)
-        baseline_rms = _load_obs_rms(model_path, env_cfg)
+        baseline_rms = _load_obs_rms(model_path)
 
     def _eval_segment(policy, segment_df, rms):
         return _evaluate_model(policy, segment_df, env_cfg, obs_rms=rms)

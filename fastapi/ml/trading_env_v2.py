@@ -14,6 +14,15 @@ ForexTradingEnv v3 — Arquitectura Óptima para RL (PPO)
   (MISMA función que `/predict`): la cabeza `volume` modula el riesgo entre 0 y
   `risk_pct` del balance; volumen 0 → sin entrada (paridad con el HOLD por
   sizing inviable de `/predict`).
+- Fase 3 (plan 2026-09-30, ejecutado 2026-10-01):
+  * Memoria: canal 8º `bars_since_close` (normalizado a max_holding_steps) —
+    contrato obs `(20,24) → (20,25)`; `memory_channel=False` evalúa el
+    contrato legado de un bundle pre-memoria (transición).
+  * R-1 / regla 3 €: un close con pnl ∈ (0, 3 €) es PÉRDIDA también en la
+    recompensa (su aporte se invierte; el balance de dinero no se toca).
+  * Anti-churn (Félix, 2026-10-01): reabrir con ≤ CHURN_BARS velas desde el
+    último cierre paga la fricción completa de ida+vuelta
+    (volume × commission × 2) como penalización de reward.
 """
 
 from datetime import datetime
@@ -37,7 +46,16 @@ MARKET_FEATURES = (
     "lag_return_3", "lag_return_5",
 )
 
+# Ancho base del tensor: canales de mercado + 7 de estado. El contrato Fase 3
+# añade +1 (bars_since_close) → obs (20, 25); 24 canales = bundle pre-memoria.
+FOREX_MARKET_FEATURE_COUNT = len(MARKET_FEATURES)
+
 EXTRA_STATE_FEATURES = 7  # [entry_norm, pos, unrealized_pnl, balance_norm, dist_sl, dist_tp, holding_time]
+# Fase 3: +1 canal opcional `bars_since_close` (obs 25) — ver memory_channel.
+
+# Anti-churn: reabrir con <= CHURN_BARS velas H1 completas desde el último
+# cierre paga la fricción completa de ida+vuelta (commission × 2 por lot).
+CHURN_BARS = 2
 
 
 def engineer_market_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -130,8 +148,14 @@ def build_v3_observation(
     balance: float,
     initial_balance: float,
     window_size: int = 20,
+    bars_since_close_norm: Optional[float] = None,
 ) -> np.ndarray:
-    """Genera el tensor de estado (window_size, total_features) invariante al par de divisas."""
+    """Genera el tensor de estado (window_size, total_features) invariante al par de divisas.
+
+    Fase 3: `bars_since_close_norm` (0 = cerró en esta vela, 1 = ≥
+    max_holding_steps o sin cierre) añade el 8º canal de estado → obs
+    (20, 25). `None` = contrato legado (20, 24) de un bundle pre-memoria.
+    """
     last_market = np.asarray(market_values[-window_size:], dtype=np.float32)
     feats_present = last_market.shape[1]
 
@@ -156,16 +180,20 @@ def build_v3_observation(
         dist_tp = 0.0
         holding_norm = 0.0
 
+    state_rows = [
+        entry_norm_val,
+        float(position),
+        unrealized_pct * 10.0,
+        balance / initial_balance,
+        np.clip(dist_sl, -5.0, 5.0),
+        np.clip(dist_tp, -5.0, 5.0),
+        holding_norm,
+    ]
+    if bars_since_close_norm is not None:
+        state_rows.append(float(np.clip(bars_since_close_norm, 0.0, 1.0)))
+
     state_extensions = np.tile(
-        np.array([
-            entry_norm_val,
-            float(position),
-            unrealized_pct * 10.0,
-            balance / initial_balance,
-            np.clip(dist_sl, -5.0, 5.0),
-            np.clip(dist_tp, -5.0, 5.0),
-            holding_norm
-        ], dtype=np.float32),
+        np.array(state_rows, dtype=np.float32),
         (window_size, 1)
     )
 
@@ -243,6 +271,7 @@ class ForexTradingEnvV2(gym.Env):
         trailing_min_pips: float = 15.0,
         trailing_atr_mult: float = 2.0,
         min_stop_dist_pips: float = 1.0,
+        memory_channel: bool = True,
     ):
         super(ForexTradingEnvV2, self).__init__()
         self.df = df.reset_index(drop=True)
@@ -274,6 +303,17 @@ class ForexTradingEnvV2(gym.Env):
         self._real_outcomes_by_step = self._index_real_outcomes(self.real_outcomes)
         self._used_outcomes = set()
 
+        # Fase 3: contrato de observación. True (canonical) = 8 canales de
+        # estado → obs (20, 25). False = legado pre-memoria (20, 24), sólo
+        # para evaluar bundles viejos (auto_retrain._evaluate_model decide
+        # según observation_space del modelo que se evalúa).
+        self.memory_channel = bool(memory_channel)
+        # Memoria desde el último cierre (0 = cerró en esta vela; el arranque
+        # usa max_holding_steps → normalizado a 1.0 = "sin cierre reciente").
+        self.bars_since_close = int(max_holding_steps)
+        self.ever_closed = False
+        self.trade_pnls: list = []
+
         self.features = get_market_features(self.df)
         # P2-1 / D3: el modelo decide [direction, volume]; SL/TP los pone
         # production_stops() igual que en /predict (cabezas muertas fuera).
@@ -285,7 +325,10 @@ class ForexTradingEnvV2(gym.Env):
         self.observation_space = spaces.Box(
             low=-np.inf,
             high=np.inf,
-            shape=(window_size, len(self.features) + EXTRA_STATE_FEATURES),
+            shape=(
+                window_size,
+                len(self.features) + EXTRA_STATE_FEATURES + (1 if self.memory_channel else 0),
+            ),
             dtype=np.float32
         )
 
@@ -348,6 +391,14 @@ class ForexTradingEnvV2(gym.Env):
             self.current_step - self.window_size + 1 : self.current_step + 1
         ].values
 
+        bars_norm = None
+        if self.memory_channel:
+            # Paridad serve: min(1, bars/max_holding_steps) — el bundle
+            # pre-memoria recibe None (canal ausente).
+            bars_norm = min(
+                1.0, self.bars_since_close / max(1, self.max_holding_steps)
+            )
+
         return build_v3_observation(
             market_values=market_slice,
             expected_market_features=len(self.features),
@@ -362,6 +413,7 @@ class ForexTradingEnvV2(gym.Env):
             balance=self.balance,
             initial_balance=self.initial_balance,
             window_size=self.window_size,
+            bars_since_close_norm=bars_norm,
         )
 
     def reset(self, seed=None, options=None):
@@ -382,6 +434,9 @@ class ForexTradingEnvV2(gym.Env):
         self.sl_pips = 0.0
         self.tp_pips = 0.0
         self.steps_in_trade = 0
+        self.bars_since_close = int(self.max_holding_steps)
+        self.ever_closed = False
+        self.trade_pnls = []
 
         self.balance = self.initial_balance
         self.equity = self.initial_balance
@@ -415,6 +470,9 @@ class ForexTradingEnvV2(gym.Env):
 
         close_reason = None
         exit_price = 0.0
+        closed_this_step = False
+        last_realized_pnl = 0.0
+        churn_penalty = 0.0
 
         # -------------------------------------------------------------
         # 1. Chequeo de salidas intra-vela (High/Low)
@@ -457,6 +515,13 @@ class ForexTradingEnvV2(gym.Env):
             self.balance += realized_pnl
             self.equity = self.balance
             self.trade_count += 1
+            self.trade_pnls.append(float(realized_pnl))
+            # Fase 3: memoria desde el cierre (0 = esta vela) + flag para el
+            # recargo anti-churn (sin cierre previo no hay churn que penalizar).
+            self.bars_since_close = 0
+            self.ever_closed = True
+            closed_this_step = True
+            last_realized_pnl = float(realized_pnl)
             # Convención AGENTS.md: cierre < MIN_WIN_EUR (3€) = pérdida
             # también en simulación — el win rate del entrenamiento mide
             # la misma regla que el mercado real.
@@ -471,6 +536,13 @@ class ForexTradingEnvV2(gym.Env):
             self.sl_price = 0.0
             self.tp_price = 0.0
             self.steps_in_trade = 0
+
+        # Fase 3: si no hubo cierre en ESTE paso, avanza la memoria — al
+        # final de la vela el obs muestra las velas completas desde el
+        # cierre (paridad con serve: 0 = cerró en esta vela). Un cierre en
+        # esta misma vela lo reinicia a 0 (por delante de este incremento).
+        if not closed_this_step:
+            self.bars_since_close += 1
 
         # -------------------------------------------------------------
         # 4. Apertura de nueva posición
@@ -495,6 +567,17 @@ class ForexTradingEnvV2(gym.Env):
                 max_lot=self.max_lot,
             )
             if new_volume > 0.0:
+                # Anti-churn (Félix 2026-10-01): reabrir habiendo pasado ≤
+                # CHURN_BARS velas desde el último cierre paga la fricción
+                # completa de ida+vuelta (commission × 2 por lot) — el
+                # re-entry inmediato sólo se hace si el edge lo justifica.
+                # Sin cierre previo en el episodio (ever_closed) no aplica.
+                if self.ever_closed and self.bars_since_close <= CHURN_BARS:
+                    churn_penalty = (
+                        2.0 * self.commission_per_lot * new_volume
+                        / self.initial_balance
+                    ) * self.reward_scale
+
                 self.position = target_pos
                 self.volume = new_volume
                 self.sl_pips, self.tp_pips = sl_pips_c, tp_pips_c
@@ -540,6 +623,18 @@ class ForexTradingEnvV2(gym.Env):
         delta_equity = self.equity - self.prev_equity
         reward = (delta_equity / self.initial_balance) * self.reward_scale - risk_penalty
 
+        # R-1 / regla 3 € (plan D-2): un close con pnl ∈ (0, 3 €) NO es una
+        # ganancia — la recompensa lo trata como PÉRDIDA (el aporte se invierte:
+        # delta ya lo sumó positivo, restar 2× lo convierte en −pnl). El
+        # balance de dinero real queda intacto; sólo cambia la señal de
+        # aprendizaje. Así un candidato que sobrevive de closes <3 € no puede
+        # acumular reward positivo.
+        if closed_this_step and last_realized_pnl > 0.0 and not is_winning_close(last_realized_pnl):
+            reward -= 2.0 * (last_realized_pnl / self.initial_balance) * self.reward_scale
+
+        # Anti-churn (Félix 2026-10-01): recargo cobrado en la apertura.
+        reward -= churn_penalty
+
         # Penalización por estancamiento si supera tiempo máximo sugerido
         if self.steps_in_trade > self.max_holding_steps:
             reward -= 0.001
@@ -571,6 +666,9 @@ class ForexTradingEnvV2(gym.Env):
             'trades': self.trade_count,
             'win_rate': (self.wins / self.trade_count) if self.trade_count > 0 else 0.0,
             'drawdown': (self.max_equity - self.equity) / self.max_equity,
+            # Fase 3 / R-1: pnl por trade para que el gate walk-forward calcule
+            # la expectancy con la regla 3 € (sin lista no se inventa un valor).
+            'trade_pnls': list(self.trade_pnls),
         }
 
         return self._get_observation(), float(reward), terminated, truncated, info
@@ -653,9 +751,13 @@ class ForexTradingEnvV2(gym.Env):
         real_pos = 1 if outcome.direction == "LONG" else (-1 if outcome.direction == "SHORT" else 0)
 
         pnl_norm = float(np.clip(outcome.pnl / 100.0, -1.0, 1.0))
+        # R-1 / regla 3 €: la evidencia real se clasifica igual que AGENTS.md —
+        # un cierre <3 € es pérdida, así que coincidir con él es MALO (antes
+        # un win sub-3 € recompensaba la coincidencia: pnl crudo).
+        evidence = pnl_norm if is_winning_close(outcome.pnl) else -abs(pnl_norm)
 
         if target_pos == real_pos and target_pos != 0:
-            return pnl_norm * self.real_outcome_weight
+            return evidence * self.real_outcome_weight
         elif target_pos != 0 and real_pos != 0 and target_pos != real_pos:
-            return -abs(pnl_norm) * self.real_outcome_weight
+            return -abs(evidence) * self.real_outcome_weight
         return 0.0

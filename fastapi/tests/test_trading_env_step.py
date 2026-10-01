@@ -31,7 +31,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from ml.trading_env_v2 import ForexTradingEnvV2, engineer_market_features
+from ml.trading_env_v2 import CHURN_BARS, ForexTradingEnvV2, engineer_market_features
 
 INITIAL = 1000.0
 LOT = 100000.0
@@ -261,6 +261,147 @@ class TestEpisodeBoundaries:
     def test_observation_shape_matches_contract(self):
         env = _env(engineer_market_features(_raw_df()))
         obs, _ = env.reset()
-        # 17 MARKET_FEATURES + 7 EXTRA_STATE_FEATURES, window 5 → (5, 24)
-        assert obs.shape == (5, 24)
-        assert env.observation_space.shape == (5, 24)
+        # 17 MARKET_FEATURES + 8 estado (7 + bars_since_close Fase 3), window 5
+        assert obs.shape == (5, 25)
+        assert env.observation_space.shape == (5, 25)
+        # Contrato legado pre-memoria (bundle (20,24)): sin el canal 8º
+        legacy = _env(engineer_market_features(_raw_df()), memory_channel=False)
+        obs_l, _ = legacy.reset()
+        assert obs_l.shape == (5, 24)
+        assert legacy.observation_space.shape == (5, 24)
+
+
+def _df_step_move(move: float, n: int = 40, jump: int = 26):
+    """Cierre 1.1000 hasta `jump-1` y salto `move` desde `jump`.
+
+    `engineer_market_features` descarta las 19 filas de warmup (SMA20) → el
+    env ve las originales 19..39; el salto debe caer después de la fila 19
+    (por eso `jump=26`: pasos 1-2 del env = originales 24-25 en 1.1000 y el
+    cierre en el original 26). El rango intra-vela sigue en 0.0011 → TR
+    idéntico al fixture plano → ATR y stops 15/30 pips intactos
+    (production_stops se evalúa en el paso de apertura, anterior al salto)."""
+    closes = np.full(n, 1.1000)
+    closes[jump:] = 1.1000 + move
+    return pd.DataFrame({
+        "time": pd.date_range("2024-01-01", periods=n, freq="h"),
+        "open": closes,
+        "high": closes + 0.00055,
+        "low": closes - 0.00055,
+        "close": closes,
+        "tick_volume": np.full(n, 1000),
+    })
+
+
+class TestFase3MemoryChurnAndThreeEuro:
+    """Fase 3 (plan 2026-09-30): canal bars_since_close, recargo anti-churn
+    (fricción completa, decisión de Félix 2026-10-01) y regla 3 € en el
+    reward (R-1): un close ∈ (0, 3 €) se recompensa como pérdida."""
+
+    def test_memory_channel_starts_fully_risen_and_counts_after_close(self):
+        env = _env(engineer_market_features(_raw_df()))
+        obs, _ = env.reset()
+        # sin cierre previo: contador ≥ max_holding_steps → normalizado 1.0
+        assert obs[:, -1] == pytest.approx(1.0)
+
+        obs, *_ = env.step(FLAT)      # idx5: sin cierre → sigue "frío"
+        assert obs[:, -1] == pytest.approx(1.0)
+
+        obs, *_ = env.step(OPEN)      # idx6: abre; aún no ha cerrado nada
+        assert env.position == 1
+        assert obs[:, -1] == pytest.approx(1.0)
+
+        obs, _, _, _, info = env.step(FLAT)   # idx7: cierra → 0 velas desde el cierre
+        assert env.trade_count == 1
+        assert obs[:, -1] == pytest.approx(0.0)
+        # R-1: el gate necesita el pnl por trade (close discrecional pierde
+        # round-trip de spread −1.2 € + comisión de cierre −0.56 €)
+        assert info["trade_pnls"] == pytest.approx([-1.76])
+        assert info["balance"] == pytest.approx(997.68)
+
+        obs, *_ = env.step(FLAT)      # idx8: +1 vela
+        assert obs[:, -1] == pytest.approx(1.0 / env.max_holding_steps)
+        obs, *_ = env.step(FLAT)      # idx9: +2 velas
+        assert obs[:, -1] == pytest.approx(2.0 / env.max_holding_steps)
+
+    def test_sub_3euro_win_is_rewarded_as_a_loss(self):
+        env = _env(engineer_market_features(_df_step_move(0.0003)))
+        env.reset()
+        env.step(FLAT)                              # paso 1
+        _, r_open, *_ = env.step(OPEN)              # paso 2: abre (sin cierre previo)
+        _, r_close, _, _, info = env.step(FLAT)     # paso 3: cierra en +0.64 €
+
+        pnl = 0.08 * LOT * (0.0003 - 2 * HALF_SPREAD) - 0.08 * COMM
+        assert pnl == pytest.approx(0.64)
+        assert info["trade_pnls"] == pytest.approx([pnl])
+        # la regla 3 € cambia la SEÑAL de aprendizaje, nunca el dinero
+        assert info["balance"] == pytest.approx(INITIAL - 0.56 + pnl)
+        assert env.wins == 0 and env.losses == 1     # win de dinero, pérdida AGENTS.md
+
+        # el paso de cierre sólo suma el pnl realizado (+0.64 €): base 0.064
+        # y la inversión R-1 −2×0.64×0.1 = −0.128 → reward −0.064 (PERDEDORA
+        # para el aprendizaje aunque el dinero subió)
+        assert r_close == pytest.approx(
+            (pnl / INITIAL) * 100.0 - 2.0 * (pnl / INITIAL) * 100.0
+        )
+        assert r_close < 0.0
+        # el ciclo completo (open+close) queda NEGATIVO: no compensa
+        assert r_open + r_close < 0.0
+
+    def test_win_at_or_above_3euros_keeps_positive_reward(self):
+        env = _env(engineer_market_features(_df_step_move(0.0007)))
+        env.reset()
+        env.step(FLAT)                              # paso 1
+        env.step(OPEN)                              # paso 2
+        _, r_close, _, _, info = env.step(FLAT)     # paso 3: cierra en +3.84 €
+
+        pnl = 0.08 * LOT * (0.0007 - 2 * HALF_SPREAD) - 0.08 * COMM
+        assert pnl == pytest.approx(3.84)
+        assert info["trade_pnls"] == pytest.approx([pnl])
+        assert env.wins == 1 and env.losses == 0
+        # delta = pnl realizado (+3.84 €) → SIN inversión, reward positivo
+        assert r_close == pytest.approx((pnl / INITIAL) * 100.0)
+        assert r_close > 0.0
+
+    @staticmethod
+    def _churn_scenario(open_delay: int):
+        """Cierra y reabre `open_delay` velas después (1..CHURN_BARS =
+        recargo; CHURN_BARS+1 = sin recargo). Devuelve (env, reward_apertura)."""
+        env = _env(engineer_market_features(_raw_df()))
+        env.reset()
+        env.step(FLAT)                # paso 1
+        env.step(OPEN)                # paso 2: abre
+        env.step(FLAT)                # paso 3: cierra (bars=0)
+        for _ in range(open_delay - 1):
+            env.step(FLAT)            # velas de espera → bars = 1, 2, ...
+        _, r_open, *_ = env.step(OPEN)   # reabre (la memoria ya avanzó en este paso)
+        return env, r_open
+
+    def test_reopen_within_churn_window_pays_full_friction(self):
+        assert CHURN_BARS == 2   # las fronteras 2/3 de este test dependen de él
+
+        env_free, r_free = self._churn_scenario(open_delay=CHURN_BARS + 1)
+        assert env_free.ever_closed
+        vol = env_free.volume
+        churn_expected = (2.0 * COMM * vol / INITIAL) * 100.0
+        assert churn_expected > 0.0
+
+        for delay in (1, 2):   # ≤ CHURN_BARS → fricción completa
+            env_c, r_c = self._churn_scenario(open_delay=delay)
+            assert env_c.volume == pytest.approx(vol)   # misma historia y balance
+            # misma delta y risk_penalty que la apertura "fría": la ÚNICA
+            # diferencia del reward es el recargo anti-churn
+            assert r_c == pytest.approx(r_free - churn_expected)
+
+    def test_first_open_never_pays_churn(self):
+        """Sin cierre previo (ever_closed False) la primera apertura es
+        limpia — mismo reward exacto que asercionan los tests de apertura."""
+        env = _env(engineer_market_features(_raw_df()))
+        env.reset()
+        _, r_open, *_ = env.step(OPEN)
+        assert env.ever_closed is False
+        expected_balance = INITIAL - VOL_OPEN * COMM
+        capital_at_risk = VOL_OPEN * LOT * (SL_PIPS * 0.0001)
+        risk_penalty = (capital_at_risk / expected_balance) * 0.02
+        assert r_open == pytest.approx(
+            (expected_balance - INITIAL) / INITIAL * 100.0 - risk_penalty
+        )

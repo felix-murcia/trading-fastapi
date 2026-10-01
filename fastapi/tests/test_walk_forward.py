@@ -101,13 +101,44 @@ class TestSegmentMetrics:
             "win_rate": 0.5, "reward": 1.0, "balance": 1040.0,
             "equity_curve": [1000.0, 1040.0],
             "step_rewards": [40.0],
+            # R-1: pnl por trade consistente con balance (suma 40); todos
+            # ≥3€ o negativos → expectancy clasificada == cruda.
+            "trade_pnls": [25.0, 25.0, -5.0, -5.0],
         }
         base.update(over)
         return base
 
     def test_expectancy_is_realized_pnl_per_trade(self):
         m = segment_metrics(self._result(balance=1040.0, trades=4), initial_balance=1000.0)
-        assert m["expectancy"] == pytest.approx(10.0)  # (1040-1000)/4
+        assert m["expectancy"] == pytest.approx(10.0)      # media de trade_pnls
+        assert m["expectancy_raw"] == pytest.approx(10.0)  # (1040-1000)/4
+
+    def test_expectancy_counts_sub_3euro_wins_as_losses(self):
+        # R-1: los closes <3€ se invierten — crudo 10, clasificado 8.5
+        m = segment_metrics(
+            self._result(balance=1040.0, trades=4,
+                         trade_pnls=[1.5, 1.5, 40.0, -3.0]),
+            initial_balance=1000.0,
+        )
+        assert m["expectancy_raw"] == pytest.approx(10.0)
+        assert m["expectancy"] == pytest.approx((-1.5 - 1.5 + 40.0 - 3.0) / 4)
+
+    def test_expectancy_all_sub_3euro_wins_is_negative(self):
+        # El escenario R-1 del plan: "ganancias" <3€ → expectancy ≤ 0 aunque
+        # la media cruda sea positiva → el suelo absoluto del gate lo mata.
+        m = segment_metrics(
+            self._result(balance=1003.0, trades=2, wins=2, losses=0,
+                         win_rate=1.0, trade_pnls=[1.5, 1.5]),
+            initial_balance=1000.0,
+        )
+        assert m["expectancy_raw"] == pytest.approx(1.5)
+        assert m["expectancy"] == pytest.approx(-1.5)
+
+    def test_expectancy_requires_trade_pnls(self):
+        with pytest.raises(RuntimeError, match="trade_pnls"):
+            segment_metrics(
+                self._result(trade_pnls=None), initial_balance=1000.0,
+            )
 
     def test_zero_trades_expectancy_is_zero(self):
         m = segment_metrics(
@@ -356,6 +387,8 @@ def _fake_eval(reward_per_bar=0.1, model_rewards=None):
             # el gate antes de las reglas comparativas que aquí se prueban).
             "equity_curve": [1000.0, 1005.0, 1010.0],
             "step_rewards": [10.0],
+            # R-1: consistente con balance (+10) y win ≥3€ → expectancy +10
+            "trade_pnls": [10.0],
         }
 
     return fn, calls
