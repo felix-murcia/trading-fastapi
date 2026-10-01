@@ -1831,3 +1831,44 @@ El baseline (bundle activo) pasó de **−115.737 con `n_steps=3592`** (bancarro
 **Pre-registrado para exp #12 (antes de ejecutar):** única variable = **costes del env** (spread 1.5 → 0.17, comisión → 0.0, ancla de churn declarada 7.0). `RetrainConfig` de gate **intacto** (umbrales, folds, canario absoluto, regla 3 €, 100k steps); se dispara **un único retrain**; repetirlo hasta aprobar sigue prohibido. Proyección honesta y **no garantizada**: la fricción de pliegos pasaría de −717.9 € a ~−81 € (×0.113 del componente spread) sobre un mercado de +568.6 € — pero el gate decide con el candidato real, y el holdout adverso de #11 (−13.05 vs +22.58) sigue siendo una señal en contra.
 
 **Archivos:** `fastapi/ml/trading_env_v2.py`, `fastapi/services/auto_retrain.py`, `fastapi/ml/train_ppo_v3.py`, `scripts/diagnostico_expectancia.py`, `fastapi/tests/test_auto_retrain.py`, `fastapi/tests/test_trading_env_step.py`, `README.md`, `PROTOCOLO_ANTI_BUCLE.md`.
+
+### Exp #12 (retrain único pre-registrado con O-2): RECHAZADO por el suelo absoluto — holdout en positivo por primera vez (2026-10-01)
+
+**Ejecución:** `POST /api/v1/ai/retrain/force` a las 14:21:20, cerró 14:26:24 (~5 min). trigger=`forced`, snapshot `4ac33c8c7636` (29981 barras, ventana +3 h respecto a #11), split `train=20986 | 4×1494 | embargo=20 | holdout@26982 congelado`, 147 outcomes (peso 0.30), candidato (20,25) desde cero, costes O-2 verificados en log: `spread=0.17 pips, comisión_bróker=0.0000 €/lot, ancla_churn=7.00 €/lot`. `experiment_tracker #12 → status=rejected, reason=absolute_floor_sum_reward, sha=-` → **sin artefacto, sin promoción**. Bundle activo intacto: `4185451b` obs (20,24), `/health` ok (equity 467.35), único ERROR = `MODEL-BACKUP` GCS ambiental (fallback local OK).
+
+**Gate (íntegro, umbrales sin tocar):**
+
+| condición | umbral | #12 | veredicto |
+|---|---|---|---|
+| `total_openings` | ≥ `min_openings` | 1680 | ✓ |
+| floor `sum_reward` | > 0 | **−23.802** | **✗ → `absolute_floor_sum_reward`** |
+| floor `mean_sharpe` | > 0 | **−0.320** | ✗ |
+| floor `total_expectancy` | > 0 | **−3.182** | ✗ |
+| `sum_reward_strict` | > baseline | −23.80 > −80.39 | ✓ |
+| `fold_majority` | ≥ 3/4 | **3/4** | ✓ (era 2/4 en #11) |
+| `mean_sharpe_strict` | > baseline | −0.320 < −0.161 | ✗ |
+| holdout congelado (sólo reporte) | — | cand **+4.77** (sharpe 2.63) vs base +3.62 | **positivo y mejor que el baseline** |
+
+**#11 → #12 (candidato):**
+
+| métrica | #11 (O-1) | #12 (O-1+O-2) |
+|---|---|---|
+| `sum_reward` | −3.423 | **−23.802** |
+| `mean_sharpe` | +0.315 | **−0.320** |
+| `total_expectancy` | +0.108 | **−3.182** |
+| `total_openings` / `total_trades` | 753 / 398 | 1680 / 217 |
+| `fold_wins` | 2/4 | **3/4** |
+| `worst_max_dd` (cand) | — | 0.221 (baseline 0.448) |
+| holdout cand | −13.055 (adverso) | **+4.773** (sharpe 2.63) |
+| baseline `sum_reward` | −40.901 | **−80.390** |
+| motivo de rechazo | `absolute_floor_sum_reward` | `absolute_floor_sum_reward` |
+
+**Lectura honesta:**
+1. **Los indicadores relativos y de generalización mejoran** (fold_wins 3/4, holdout **+4.77 en positivo y por encima del baseline**, fold3 del candidato +6.01 con sharpe 1.84, `worst_max_dd` 0.221 vs 0.448 del baseline): el candidato gana donde el tiempo es reciente (fold3 + holdout = bloques 2026) y en el bloque congelado.
+2. **Los absolutos empeoran** (sum_reward −3.4 → −23.8, expectancy +0.108 → −3.18): con win_rate 0.20–0.38 en folds 0–2, la pierna SL sigue tóxica — la fricción de costes **no era la única causa** del diagnóstico (hallazgo #1: entradas que pierden por SL a ratio 5:1). Además contra #11 se movieron **tres variables a la vez**: costes O-2, re-fetch de snapshot (+3 h) y estocasticidad del entrenamiento — la atribución exacta del empeoramiento no es posible sin el artefacto del candidato (no guardado, correctamente), y el baseline también cayó (−40.9 → −80.4, la ancla de churn ahora castiga sus reentradas y el snapshot cambió).
+3. **La métrica `openings` sigue distorsionada** (1680 contados vs 217 trades reales; fold0: 403 vs 72) — backlog conocido, sin tocar (decisión de Félix).
+4. **Reglas respetadas:** un único retrain pre-registrado (no repetido), umbrales intactos, sin artefacto, bundle 24 sigue sirviendo. **Tres retraines consecutivos rechazados (#10, #11, #12) con el suelo intacto** — el MDP crudo aún no demuestra expectancia positiva en todo el walk-forward.
+
+**Opciones (decisión de Félix):** **O-4** (mantener bundle 24 + ventana shadow §6 desde 09-30 con ≥7 días o ≥50 candidatos — sin más retraines; recomendada para frenar la deriva de hipótesis consecutivas) · nueva hipótesis de diseño (cada una = UN retrain pre-registrado nuevo, con la advertencia honesta de testing secuencial acumulativo) · backlog de diagnóstico (integridad de `openings`; re-ejecutar el script de solo lectura sobre el snapshot `4ac33c8c` para descomposición del baseline).
+
+**Archivos:** `README.md`, `PROTOCOLO_ANTI_BUCLE.md` (sólo evidencia — el código O-2 ya estaba commiteado en `dc602f0`).
