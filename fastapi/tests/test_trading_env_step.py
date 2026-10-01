@@ -405,3 +405,87 @@ class TestFase3MemoryChurnAndThreeEuro:
         assert r_open == pytest.approx(
             (expected_balance - INITIAL) / INITIAL * 100.0 - risk_penalty
         )
+
+
+class TestPositionVetoParity:
+    """O-1 (diagnóstico 2026-10-01): el flip con posición abierta NO cierra
+    ni revierte en el env — paridad con serve (`position_rejected` → HOLD)
+    y con el EA (`rejected_position_open`, L407/L440/L475). Sólo SL/TP y la
+    acción FLAT terminan un trade."""
+
+    SHORT = np.array([-0.5, 0.4], dtype=np.float32)      # short, vol_norm=0.4
+    FLIP_SHORT = np.array([-0.5, 0.4], dtype=np.float32)  # flip con LONG
+    FLIP_LONG = np.array([0.5, 0.4], dtype=np.float32)    # flip con SHORT
+
+    @staticmethod
+    def _opened_short():
+        """Env con posición SHORT abierta (espejo de _make_opened_env)."""
+        env = _env(engineer_market_features(_raw_df()))
+        env.reset()
+        entry_row_close = float(env.df.iloc[env.current_step]["close"])
+        env.step(TestPositionVetoParity.SHORT)
+        assert env.position == -1
+        return env, entry_row_close - HALF_SPREAD
+
+    def test_flip_with_long_position_holds_without_closing(self):
+        env, entry = _make_opened_env()
+        _, _, terminated, truncated, info = env.step(self.FLIP_SHORT)
+
+        assert env.position == 1                      # ni cierra ni revierte
+        assert env.trade_count == 0
+        assert info["trade_pnls"] == []
+        assert env.volume == pytest.approx(VOL_OPEN, abs=1e-6)
+        assert env.entry_price == pytest.approx(entry)
+        assert terminated is False and truncated is False
+        # Mark-to-market del paso: equity = balance + no realizado (misma
+        # fórmula que un HOLD con dirección coincidente)
+        mark = 1.1000 - HALF_SPREAD
+        unrealized = VOL_OPEN * LOT * (mark - entry)
+        assert info["equity"] == pytest.approx(info["balance"] + unrealized)
+
+    def test_flip_with_short_position_holds_without_closing(self):
+        env, entry = self._opened_short()
+        _, _, terminated, truncated, info = env.step(self.FLIP_LONG)
+
+        assert env.position == -1                     # espejo: no revierte
+        assert env.trade_count == 0
+        assert info["trade_pnls"] == []
+        assert env.volume == pytest.approx(VOL_OPEN, abs=1e-6)
+        assert env.entry_price == pytest.approx(entry)
+        assert terminated is False and truncated is False
+
+    def test_flip_state_is_identical_to_same_direction_hold(self):
+        """El flip con posición abierta produce EXACTAMENTE el mismo estado
+        que mantener la misma dirección — en serve ambos casos terminan en
+        HOLD (`position_rejected` sólo convierte el flip a HOLD)."""
+        e_hold = _env(engineer_market_features(_raw_df()))
+        e_hold.reset()
+        e_hold.step(OPEN)                    # abre LONG
+        _, r_hold, term_h, trunc_h, info_h = e_hold.step(OPEN)  # misma dir → HOLD
+
+        e_flip = _env(engineer_market_features(_raw_df()))
+        e_flip.reset()
+        e_flip.step(OPEN)                    # abre LONG
+        _, r_flip, term_f, trunc_f, info_f = e_flip.step(self.FLIP_SHORT)
+
+        assert e_flip.position == e_hold.position == 1
+        assert e_flip.balance == e_hold.balance
+        assert e_flip.equity == e_hold.equity
+        assert e_flip.volume == e_hold.volume
+        assert e_flip.trade_count == e_hold.trade_count == 0
+        assert r_flip == pytest.approx(r_hold)          # misma delta → mismo reward
+        assert (term_f, trunc_f) == (term_h, trunc_h)
+        assert info_f["drawdown"] == pytest.approx(info_h["drawdown"])
+
+    def test_flat_action_still_closes_the_position(self):
+        """La otra mitad de la paridad: FLAT → CLOSE sí existe en producción
+        (EA L358-377) — el veto es sólo del flip."""
+        env, _entry = _make_opened_env()
+        _, _, _, _, info = env.step(FLAT)
+
+        assert env.position == 0
+        assert env.trade_count == 1
+        # cierre en flat con spread completo: −1.20 € de mercado − 0.56 € comm
+        assert info["trade_pnls"] == pytest.approx(
+            [VOL_OPEN * LOT * (-2 * HALF_SPREAD) - VOL_OPEN * COMM]
+        )

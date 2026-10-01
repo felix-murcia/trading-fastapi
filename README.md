@@ -1749,3 +1749,15 @@ Ahora, si las Bandas de Bollinger son inválidas o el ratio es insuficiente, el 
 **Opciones (decisión de Félix, todas requieren un reentreno único pre-registrado):** **O-1** modelar `position_veto` en el env (flip → mantener posición, mecánico y sin LLM — paridad de transiciones serve en el punto que más diverge,56/89 cierres sep); **O-2** calibrar la comisión real del broker (¿7.0 €/lot como `train_ppo_v3`? requiere confirmación del coste real) para activar la anti-churn como se especificó — con la advertencia honesta de que sube el coste por trade; **O-3** combinar O-1+O-2; **O-4** mantener bundle 24 + shadow §6 mientras se decide (estado actual). Ninguna promete pasar el suelo — eso es empírico y el gate sigue intacto.
 
 **Archivos:** `scripts/diagnostico_expectancia.py` (nuevo), `README.md`.
+
+### O-1 (diagnóstico 2026-10-01): paridad `position_veto` en el env — el flip con posición abierta no cierra (2026-10-01)
+
+**Contexto:** opción **O-1** de las presentadas tras el diagnóstico de expectancia, ejecutada bajo «continúa con la forma recomendada». Mecanismo: en producción un flip con posición abierta termina en **HOLD** — serve `position_rejected` → HOLD (`routers/ai.py` L579–586) y el EA lo rechaza en tres sitios (`rejected_position_open`, L407/L440/L475); en cambio el env cerraba **y** revertía en la sección 2 (`target_pos == 0 or target_pos == -self.position`). Evidencia del diagnóstico: **56 de 89** cierres sep-2026 eran flips imposibles en vivo, con los ciclos de reversión que arrastran la fricción (−1082 €/gate vs edge +212 €).
+
+**Cambio (1 fichero de código):** `fastapi/ml/trading_env_v2.py` — sección 2 del `step()`: `close_reason='agent'` sólo con `target_pos == 0` (**FLAT → CLOSE**, que sí existe en producción: EA L358–377); el flip cae al `elif position != 0` (mark-to-market), idéntico a un HOLD con dirección coincidente. Docstring del módulo actualizado con el contrato. **Contrato obs/acción intacto** (`(20,24)/(20,25)`, acción 2/4) → serve y bundle activo **no cambian**; SL/TP/trailing sin cambios; tras un SL/TP un flip del mismo paso puede reabrir (en producción `req.position==0` tras el cierre → BUY/SELL ejecuta, paridad conservada). La ventana anti-churn sigue aplicando a reabrir tras FLAT/SL/TP ≤2 velas (decisión de Félix intacta).
+
+**Pre-registrado para exp #11 (antes de ejecutar):** única variable = dinámica del env (position_veto). `RetrainConfig` **intacto** (umbrales de gate sin tocar, `commission=0.0001`, 100k steps, regla 3 €, canario absoluto); se dispara **un único retrain**. Repetirlo hasta aprobar sigue prohibido (múltiple testing).
+
+**Tests (2026-10-01):** `cd fastapi && pytest tests/ -q` → **638 passed** (634 + 4: `TestPositionVetoParity` — flip con LONG no cierra ni revierte; espejo con SHORT; flip ≡ mismo-dirección-HOLD **bit a bit** (posición, balance, equity, volumen, reward, drawdown); FLAT aún cierra con el round-trip de spread −1.76 €. Ningún test existente codificaba la reversión — la ruta estaba sin cubrir).
+
+**Archivos:** `fastapi/ml/trading_env_v2.py`, `fastapi/tests/test_trading_env_step.py`, `README.md`, `PROTOCOLO_ANTI_BUCLE.md`.

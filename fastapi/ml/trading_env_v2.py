@@ -23,6 +23,11 @@ ForexTradingEnv v3 — Arquitectura Óptima para RL (PPO)
   * Anti-churn (Félix, 2026-10-01): reabrir con ≤ CHURN_BARS velas desde el
     último cierre paga la fricción completa de ida+vuelta
     (volume × commission × 2) como penalización de reward.
+- O-1 / paridad `position_veto` (diagnóstico 2026-10-01): un flip de dirección
+  con posición abierta NO cierra ni revierte — el env mantiene la posición,
+  igual que producción (serve: `position_rejected` → HOLD; EA:
+  `rejected_position_open` L407/L440/L475). Sólo SL/TP (incl. trailing) y la
+  acción FLAT (→ CLOSE) terminan un trade.
 """
 
 from datetime import datetime
@@ -498,10 +503,16 @@ class ForexTradingEnvV2(gym.Env):
                 exit_price = self.tp_price
 
         # -------------------------------------------------------------
-        # 2. Cierre discrecional del agente o reversión de posición
+        # 2. Cierre discrecional del agente (FLAT → CLOSE)
         # -------------------------------------------------------------
+        # O-1 / paridad position_veto (diagnóstico 2026-10-01): un flip
+        # (target == -position) NO cierra ni revierte. En serve el flip con
+        # posición abierta es `position_rejected` → HOLD (routers/ai.py) y el
+        # EA lo rechaza en tres sitios (rejected_position_open): la posición
+        # vive hasta SL/TP/CLOSE. Antes el env cerraba y revertía aquí mismo —
+        # 56 de 89 cierres de sep-2026 eran flips imposibles en producción.
         if close_reason is None and self.position != 0:
-            if target_pos == 0 or target_pos == -self.position:
+            if target_pos == 0:
                 close_reason = 'agent'
                 exit_price = close_price - (self.spread / 2.0) if self.position == 1 else close_price + (self.spread / 2.0)
 
