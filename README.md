@@ -1689,3 +1689,17 @@ Ahora, si las Bandas de Bollinger son inválidas o el ratio es insuficiente, el 
 **Evidencia (2026-09-30):** suite **617 passed** (sin variación — `scripts/` no se importa desde la app), 24.2 s. Ejecución host: venv `.venv312`, env de `.env` por sustitución de shell (nunca emitida) → informe regenerado de principio a fin (idéntico entre ejecuciones salvo timestamp) y CSV con 2050 filas (un por ciclo). Verificado en vivo que la config serve no cambió: trazas de deliberación posteriores siguen `config_version=1.0.0`, todos los criterios OFF.
 
 **Archivos:** `scripts/replay_strategist.py` (nuevo), `README.md`, `PROTOCOLO_ANTI_BUCLE.md`.
+
+### Fase 2 (plan §6): activación de C2 — STRATEGIST_VERSION 1.1.0 (2026-10-01)
+
+**Contexto:** informe de replay `doc/replay-estratega.md` (2026-09-30, commit `fa27a59`) → **Félix aprueba C2** (2026-10-01). Activación escalonada plan §6.5: un criterio por PR, config versionada + entrada en README.
+
+**Cambio (2 ficheros):**
+- `fastapi/services/strategist.py` — `C2_executable_size.active: false → true` con `justified_by` actualizado a la evidencia del replay (46 trades analizados: **0 bloqueos en train 23 ni test 23**; umbral `settings.min_volume` = contrato broker, no tuneable); `STRATEGIST_VERSION 1.0.0 → 1.1.0` (bump obligatorio por activación); docstring de contrato SHADOW reescrito para distinguir **activación de criterio** (puede entrar en `blocked_by` y virar ENTER→WAIT) de **poder de decisión de la capa** (`shadow: true` → el verdict NO se aplica a la respuesta — la ventana §6 ≥7 días / ≥50 candidatos sigue abierta y el corte lo ordena Félix).
+- `fastapi/tests/test_strategist_shadow.py` — `test_only_replay_approved_criteria_on_and_versioned` (v1.1.0, exactamente C2 ON y el resto OFF: un criterio activo sin evidencia de replay está prohibido), `test_clean_candidate_enters` (C2 pasa → ENTER), `test_c2_executable_size_against_broker_min` reforzado (`lots=0.005` → `verdict=WAIT` + `blocked_by=["C2_executable_size"]`).
+
+**Efecto:** C2 pasa a formar parte del verdict. Su caso de bloqueo (`lots < min_volume`) coincide 1:1 con `sizing_veto` ya activo en la cadena (S-1/S-2) → **delta de comportamiento sobre la respuesta: cero** (defensa en profundidad); lo que cambia es la **verdad de la traza**: el criterio afirmativo ya puede bloquear y ser attributable. Los otros 7 criterios siguen OFF (`justified_by=None` en los placeholder salvo C7).
+
+**Evidencia (2026-10-01):** suite **617 passed** (23.3 s). Deploy `docker compose up -d --build fastapi` → `/health` ok. Verificado en vivo en el primer ciclo post-deploy: `config_version=1.1.0`, `criteria.C2_executable_size.active=true`, `verdict=NO_CANDIDATE` (modelo HOLD), `decision=HOLD` intacta; 0 errores nuevos (solo los 2 GCS ADC conocidos, D-4). `rejected_position_open` = 0 desde el deploy de A-1.
+
+**Archivos:** `fastapi/services/strategist.py`, `fastapi/tests/test_strategist_shadow.py`, `README.md`, `PROTOCOLO_ANTI_BUCLE.md`.

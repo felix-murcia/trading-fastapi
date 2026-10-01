@@ -4,10 +4,12 @@ Fase 2 / D-5: CAPA ESTRATEGA SHADOW — deliberación por ciclo auditable.
 Contrato (plan 2026-09-30 §4-§6):
 - Estado narrativo (§4.1): último cierre con regla 3 €, tesis (trade_insights),
   racha, bars_since_close y movimiento desde el cierre.
-- Criterios C1–C8 (§4.2): config versionada, TODOS OFF (`active: false`) —
-  shadow = log-only; nada se activa sin informe de replay aprobado (§6).
-- Verdict ENTER/WAIT/NO_CANDIDATE registrado en `deliberation`; el shadow
-  tiene CERO poder de decisión (la respuesta nunca cambia por el estratega).
+- Criterios C1–C8 (§4.2): config versionada, **OFF por defecto** — activados
+  uno a PR con evidencia de replay aprobada (§6). Hoy C2 activo (v1.1.0,
+  aprobación Félix 2026-10-01); el resto OFF.
+- Verdict ENTER/WAIT/NO_CANDIDATE registrado en `deliberation`; la capa
+  SHADOW tiene CERO poder de decisión (la respuesta nunca cambia por el
+  estratega — `shadow: true`), activar un criterio solo cambia el verdict.
 - Fail-safe: criterio activo solo pasa con `pass is True` (duda → ESPERAR).
 - Vetos existentes integrados en la misma traza (`vetoes.fired` = lo que
   decidió `_veto_reason`, la autoridad de la cadena).
@@ -120,20 +122,26 @@ def _c(d, cid):
     return d["criteria"][cid]
 
 
-# ─── Config versionada, todo OFF ───────────────────────────────────────────────
+# ─── Config versionada, OFF por defecto (C2 activo v1.1.0) ────────────────────
 
 class TestConfigShadow:
-    def test_all_eight_criteria_off_and_versioned(self):
-        assert strategist.STRATEGIST_VERSION == "1.0.0"
+    def test_only_replay_approved_criteria_on_and_versioned(self):
+        """V1.1.0: solo C2 activo (replay aprobado 2026-10-01); el resto OFF."""
+        assert strategist.STRATEGIST_VERSION == "1.1.0"
         assert list(strategist.CRITERIA) == [
             "C1_direction", "C2_executable_size", "C3_quality", "C4_thesis_regime",
             "C5_change_since_exit", "C6_post_loss_evidence", "C7_costs_vs_edge",
             "C8_late_join",
         ]
         for cid, cfg in strategist.CRITERIA.items():
-            assert cfg["active"] is False, f"{cid} debe arrancar OFF (shadow)"
+            expected = cid == "C2_executable_size"
+            assert cfg["active"] is expected, (
+                f"{cid}: active={cfg['active']}, se esperaba {expected}"
+            )
             assert isinstance(cfg["justified_by"], (str, type(None))), cid
             assert cfg["metric"] and cfg["notes"], cid
+        # Un criterio activo SIN evidencia de replay está prohibido (§6.5)
+        assert strategist.CRITERIA["C2_executable_size"]["justified_by"]
 
     def test_unjustified_thresholds_are_marked(self):
         """Ningún umbral placeholder finge evidencia: solo C2 (contrato broker)
@@ -152,10 +160,11 @@ class TestConfigShadow:
 
 class TestVerdict:
     @pytest.mark.asyncio
-    async def test_clean_candidate_enters_with_all_criteria_off(self):
-        d = await _deliberate()
+    async def test_clean_candidate_enters(self):
+        d = await _deliberate()   # lots 0.05 ≥ min_volume → C2 (único activo) pasa
         assert d["verdict"] == "ENTER"
         assert d["blocked_by"] == []
+        assert _c(d, "C2_executable_size")["pass"] is True
         assert d["shadow"] is True
         assert d["config_version"] == strategist.STRATEGIST_VERSION
         assert len(d["criteria"]) == 8
@@ -255,6 +264,11 @@ class TestCriteria:
         assert _c(tiny, "C2_executable_size")["pass"] is False
         assert _c(tiny, "C2_executable_size")["threshold"] == pytest.approx(0.01)
         assert _c(ok, "C2_executable_size")["pass"] is True
+        # C2 ACTIVO (v1.1.0): el fallo entra en el verdict (aunque la capa
+        # sigue shadow — la respuesta no cambia, lo comprueba el router)
+        assert tiny["verdict"] == "WAIT"
+        assert tiny["blocked_by"] == ["C2_executable_size"]
+        assert ok["verdict"] == "ENTER"
 
     @pytest.mark.asyncio
     async def test_c3_quality_uses_its_own_threshold_not_the_veto(self):
@@ -525,7 +539,7 @@ class TestRouterDeliberation:
         data = audit_mock.await_args.args[1]
 
         d = data["deliberation"]
-        assert d["verdict"] == "ENTER"          # candidato sin veto, criterios OFF
+        assert d["verdict"] == "ENTER"   # candidato sin veto; C2 (activo) pasa
         assert d["shadow"] is True
         assert d["config_version"] == strategist.STRATEGIST_VERSION
         assert set(d["criteria"]) == set(strategist.CRITERIA)

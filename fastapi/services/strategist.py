@@ -7,8 +7,10 @@ En CADA ciclo /predict que llega a la cadena de decisión se evalúa:
 - **Estado narrativo** (§4.1): último cierre (regla 3 €), tesis del trade
   (trade_insights), racha de pérdidas, bars_since_close y movimiento desde el
   cierre en pips, más los inputs de límites de riesgo.
-- **Criterios C1–C8** (§4.2): TODOS OFF por defecto, en una config versionada
-  (`STRATEGIST_VERSION`) embebida en cada traza.
+- **Criterios C1–C8** (§4.2): **OFF por defecto** — se activan uno a uno con
+  evidencia de replay aprobada (§6, un criterio por PR) en la config
+  versionada (`STRATEGIST_VERSION`). Hoy: **C2 activo** (aprobación de Félix
+  2026-10-01), el resto OFF.
 - **Vetos existentes**: los mismos inputs de la cadena de `routers/ai.py`,
   sin duplicar su precedencia — `vetoes.fired` lo decide `_veto_reason`
   (autoridad de la cadena).
@@ -17,8 +19,11 @@ El resultado se embebe en `audit_log.ai_predict_cycle.data.deliberation`:
 **autonomía ≠ opacidad** — si el sistema decide ESPERAR, la traza dice por qué.
 
 Contrato SHADOW (plan §6 — nada se activa sin informe de replay aprobado):
-- `shadow: true` y `CRITERIA[*].active = false` → el verdict **no se aplica
-  nunca** a la decisión final (cero poder de decisión).
+- `shadow: true` → el verdict **no se aplica** a la decisión final: la capa
+  sigue log-only hasta que se cierre la ventana de sombra (§6: ≥ 7 días o
+  ≥ 50 candidatos) y Félix ordene el corte. `active` decide qué criterios
+  PUEDEN bloquear el verdict (entrar en `blocked_by` y virar ENTER→WAIT) —
+  **activación de un criterio ≠ poder de decisión de la capa**.
 - Un criterio activo solo pasa con `pass is True` (duda → ESPERAR, fail-safe).
 - `justified_by` documenta la evidencia que permite activarlo; `None` =
   umbral placeholder aún injustificado por replay.
@@ -63,16 +68,18 @@ logger = logging.getLogger(__name__)
 
 # Versión de la config de criterios — cada activación debe venir con bump aquí
 # + entrada en README (plan §6: un criterio por PR, config versionada).
-STRATEGIST_VERSION = "1.0.0"
+# 1.1.0 (2026-10-01): C2 activo con evidencia de replay aprobada por Félix;
+# resto de criterios intactos (OFF).
+STRATEGIST_VERSION = "1.1.0"
 
 # C7: muestras vivas de spread por par — μ+kσ con k=2 (plan §4.2).
 SPREAD_WINDOW = 288        # ≈ 24 h de ciclos de 5 min
 MIN_SPREAD_SAMPLES = 30    # mínimo para que μ+σ sea señal y no ruido
 SPREAD_K = 2.0
 
-# ─── Criterios C1–C8 (plan §4.2) — TODOS OFF POR DEFECTO ──────────────────────
-# `active: false` = shadow (log-only). `justified_by` = evidencia de replay
-# que justifica el umbral; `None` = placeholder pendiente de replay (§6).
+# ─── Criterios C1–C8 (plan §4.2) — OFF POR DEFECTO (C2 activo, ver. 1.1.0) ─────
+# `active: false` = trazado sin poder sobre el verdict. `justified_by` =
+# evidencia de replay que justifica el umbral; `None` = placeholder pendiente.
 CRITERIA: dict[str, dict] = {
     "C1_direction": {
         "active": False,
@@ -85,9 +92,14 @@ CRITERIA: dict[str, dict] = {
         ),
     },
     "C2_executable_size": {
-        "active": False,
+        "active": True,
         "threshold": "min_volume",
-        "justified_by": "contrato broker: settings.min_volume (no es umbral tuneable)",
+        "justified_by": (
+            "replay doc/replay-estratega.md (informe del 2026-09-30, aprobado "
+            "por Félix 2026-10-01): 0 bloqueos en train (23) ni test (23) de 46 "
+            "trades analizados; umbral = settings.min_volume, contrato broker "
+            "(no tuneable) — sin coste observable"
+        ),
         "metric": "lots",
         "notes": (
             "Equiv. vol_norm ≥ ≈0.11 según plan §4.2; se mide contra el lote "
