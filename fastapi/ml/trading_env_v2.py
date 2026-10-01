@@ -20,9 +20,14 @@ ForexTradingEnv v3 — Arquitectura Óptima para RL (PPO)
     contrato legado de un bundle pre-memoria (transición).
   * R-1 / regla 3 €: un close con pnl ∈ (0, 3 €) es PÉRDIDA también en la
     recompensa (su aporte se invierte; el balance de dinero no se toca).
-  * Anti-churn (Félix, 2026-10-01): reabrir con ≤ CHURN_BARS velas desde el
-    último cierre paga la fricción completa de ida+vuelta
-    (volume × commission × 2) como penalización de reward.
+  * Anti-churn (Félix, 2026-10-01; ancla declarada O-2, 2026-10-01): reabrir
+    con ≤ CHURN_BARS velas desde el último cierre paga la fricción completa
+    de ida+vuelta (volume × churn_friction_per_lot × 2) como penalización de
+    reward. El ancla (7 €/lot, plan §5 «fricción solo comisión») va SEPARADA
+    de la comisión del bróker: es un parámetro de política, y la comisión
+    real del EURUSD es 0 (271/271 deals sin commission/fee, evidencia
+    2026-10-01) — antes la comisión decidía el recargo y con la unidad v1
+    (0.0001) quedaba inerte.
 - O-1 / paridad `position_veto` (diagnóstico 2026-10-01): un flip de dirección
   con posición abierta NO cierra ni revierte — el env mantiene la posición,
   igual que producción (serve: `position_rejected` → HOLD; EA:
@@ -59,7 +64,8 @@ EXTRA_STATE_FEATURES = 7  # [entry_norm, pos, unrealized_pnl, balance_norm, dist
 # Fase 3: +1 canal opcional `bars_since_close` (obs 25) — ver memory_channel.
 
 # Anti-churn: reabrir con <= CHURN_BARS velas H1 completas desde el último
-# cierre paga la fricción completa de ida+vuelta (commission × 2 por lot).
+# cierre paga la fricción completa de ida+vuelta (churn_friction_per_lot × 2
+# por lot) — ancla de política declarada, no coste de bróker (ver O-2).
 CHURN_BARS = 2
 
 
@@ -264,7 +270,8 @@ class ForexTradingEnvV2(gym.Env):
         risk_pct: float = 0.03,       # P2-2: espejo de settings.ppo_risk_pct (tope de riesgo/trade)
         pip_size: float = 0.0001,
         spread_pips: float = 1.5,
-        commission_per_lot: float = 7.0,
+        commission_per_lot: float = 7.0,   # comisión de bróker €/lot/lado (EURUSD real = 0, evidencia O-2 2026-10-01)
+        churn_friction_per_lot: float = 7.0,  # ancla de política anti-churn (decisión Félix "fricción completa", 7 €/lot)
         max_episode_steps: int = 1000,
         max_holding_steps: int = 120,
         reward_scale: float = 100.0,
@@ -288,6 +295,7 @@ class ForexTradingEnvV2(gym.Env):
         self.pip_size = pip_size
         self.spread = spread_pips * pip_size
         self.commission_per_lot = commission_per_lot
+        self.churn_friction_per_lot = churn_friction_per_lot
         self.max_episode_steps = max_episode_steps
         self.max_holding_steps = max_holding_steps
         self.reward_scale = reward_scale
@@ -580,12 +588,15 @@ class ForexTradingEnvV2(gym.Env):
             if new_volume > 0.0:
                 # Anti-churn (Félix 2026-10-01): reabrir habiendo pasado ≤
                 # CHURN_BARS velas desde el último cierre paga la fricción
-                # completa de ida+vuelta (commission × 2 por lot) — el
-                # re-entry inmediato sólo se hace si el edge lo justifica.
+                # completa de ida+vuelta (churn_friction_per_lot × 2 por lot)
+                # — el re-entry inmediato sólo se hace si el edge lo justifica.
+                # O-2 (2026-10-01): el recargo usa el ancla DECLARADA aparte de
+                # la comisión del bróker (real = 0 → antes el recargo era ≈0
+                # y la decisión "fricción completa" no cobraba nada).
                 # Sin cierre previo en el episodio (ever_closed) no aplica.
                 if self.ever_closed and self.bars_since_close <= CHURN_BARS:
                     churn_penalty = (
-                        2.0 * self.commission_per_lot * new_volume
+                        2.0 * self.churn_friction_per_lot * new_volume
                         / self.initial_balance
                     ) * self.reward_scale
 

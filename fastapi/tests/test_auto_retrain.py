@@ -84,6 +84,13 @@ class TestRetrainConfig:
         assert config.trades_before_retrain == 20
         assert config.n_epochs == 5
 
+    def test_costs_are_real_broker_values(self):
+        """O-2 (2026-10-01): comisión bróker real = 0 (271/271 deals sin
+        commission/fee) y ancla anti-churn declarada aparte = 7 €/lot."""
+        config = RetrainConfig()
+        assert config.commission == 0.0
+        assert config.churn_friction_per_lot == 7.0
+
 
 class TestGetState:
     """Tests for get_state function."""
@@ -195,8 +202,10 @@ def _env_cfg(df: pd.DataFrame, **over) -> dict:
         max_lot=settings.max_volume,
         risk_pct=settings.ppo_risk_pct,
         pip_size=0.0001,
-        spread_pips=1.5,
-        commission_per_lot=0.0001,
+        # O-2 (2026-10-01): espejo de producción — costes reales del bróker
+        spread_pips=0.17,
+        commission_per_lot=0.0,
+        churn_friction_per_lot=7.0,
         max_episode_steps=50,
         max_holding_steps=20,
         reward_scale=100.0,

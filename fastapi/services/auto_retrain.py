@@ -77,7 +77,13 @@ class RetrainConfig:
     lookback_by_symbol: ClassVar[dict] = {"GBPUSD": 30000, "EURUSD": 30000}
     retrain_window_size: int = 20         # Window size del entorno
     initial_balance: float = 1000.0
-    commission: float = 0.0001            # 0.01% por trade (MT5 typical)
+    commission: float = 0.0              # comisión bróker €/lot/lado — O-2 (2026-10-01):
+                                         # 271/271 deals sep→oct commission=0 y fee=0 → 0.0.
+                                         # (era 0.0001 = convención fraccional v1; alimentaba
+                                         # el campo €/lot de v2 → bug de unidades)
+    churn_friction_per_lot: float = 7.0  # ancla anti-churn (decisión Félix "fricción completa";
+                                         # plan: fricción 7 €/lot) — parámetro de política,
+                                         # NO coste de bróker (separado desde O-2)
     n_epochs: int = 3                    # Epochs de entrenamiento (compatibilidad/auditoría)
     total_timesteps: int = 100_000      # PPO steps por retrain; 1.500 era insuficiente
     learning_rate: float = 3e-4
@@ -784,8 +790,12 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int, symbol: str = TRAINING
         max_lot=settings.max_volume,
         risk_pct=settings.ppo_risk_pct,
         pip_size=0.0001,
-        spread_pips=1.5,
+        # O-2 (2026-10-01): costes reales del bróker — spread medio 1.73 pt
+        # (0.173 pip) sobre las 30000 H1 del propio snapshot vía rates del
+        # bróker (p50=0, p90=8); antes 1.5 pips = 8.7× la real.
+        spread_pips=0.17,
         commission_per_lot=cfg.commission,
+        churn_friction_per_lot=cfg.churn_friction_per_lot,
         max_episode_steps=1000,
         max_holding_steps=120,
         reward_scale=100.0,
@@ -803,6 +813,11 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int, symbol: str = TRAINING
         # canal 8º bars_since_close → obs (20,25). El eval de cada modelo
         # pisa este flag según el observation_space del modelo evaluado.
         memory_channel=True,
+    )
+    logger.warning(
+        "[RETRAIN] Costes del env (O-2): spread=%.2f pips, comisión_bróker=%.4f €/lot, ancla_churn=%.2f €/lot",
+        env_cfg["spread_pips"], env_cfg["commission_per_lot"],
+        env_cfg["churn_friction_per_lot"],
     )
 
     from stable_baselines3 import PPO

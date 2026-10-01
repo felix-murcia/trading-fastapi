@@ -1807,3 +1807,27 @@ El baseline (bundle activo) pasó de **−115.737 con `n_steps=3592`** (bancarro
 **Reglas respetadas:** un único retrain pre-registrado (no repetido), umbrales intactos, sin artefacto promovido, bundle 24 sigue sirviendo. **Siguiente paso a decisión de Félix:** O-2 (calibrar comisión real del broker + arreglar unidades de la anti-churn → un retrain único nuevo pre-registrado) u O-4 (mantener bundle 24 + shadow §6).
 
 **Archivos:** `README.md`, `PROTOCOLO_ANTI_BUCLE.md` (sólo evidencia; sin cambio de código — suite **638 passed** intacta en `06b6e4e`).
+
+### O-2 (costes reales del bróker + anti-churn con ancla declarada): calibración con evidencia (2026-10-01)
+
+**Contexto:** opción **O-2** ejecutada bajo «continúa con la forma recomendada»: calibrar el coste real del bróker y arreglar las unidades de la anti-churn. Tres fuentes de evidencia (solo lectura, contra el bróker real):
+
+1. **`GET /api/v1/history/deals`** — 271 deals (2026-09-02 → 2026-10-01, EURUSD, cuenta EUR real): `commission = 0.0` en **271/271** y `fee = 0.0` en **271/271** → el bróker **no cobra comisión**.
+2. **`GET /api/v1/market/symbol/info/EURUSD`** — `spread = 0–1` punto en muestreo (0.0–0.1 pip), `spread_float = true`; `swap_long = −0.7 / swap_short = −1.0` (único coste real de hold overnight; el env no lo modela — observado, fuera de alcance de O-2).
+3. **Rates H1 del propio bróker** (`MqlRates.spread`, 30000 barras = ventana exacta del snapshot 2021-12-06 → 2026-10-01): media **1.733 pt = 0.173 pip**; p50=0, p75=2, p90=8, p99=15, máx=112; medias anuales 0.2–4.8 pt (2025 el más ancho).
+
+**Hallazgo:** el env cobraba `spread_pips = 1.5` = **8.7× la media real**, mientras `commission = 0.0001` (bug de unidades v1) quedaba ≈ 0 — que *coincidía* con la comisión real 0 pero por el motivo equivocado (unidad errónea, anti-churn inerte).
+
+**Decisión de diseño (por qué la comisión sola no basta):** la decisión de Félix «fricción completa = `volume × commission × 2`» ejecutada con la comisión **real** (0) daría **0** → la anti-churn seguiría muerta y el problema §5 (re-exposición, 90.4 % de reentradas ≤2 h en vivo) quedaría sin castigo. Resolución: **desacoplar el ancla del coste de bróker** — `churn_friction_per_lot = 7.0` (la fricción de diseño que el propio plan documenta: «fricción solo comisión (7 €/lot)») se aplica **solo** al recargo de reentrada ≤2 velas, y `commission_per_lot = 0.0` (valor real) se cobra en trades normales. Coherencia numérica: una reentrada churn paga ancla 2×7 = 14 €/lot + su spread natural (~0.17 pip) ≈ **15.7 €/lot ≈ la fricción completa de ida+vuelta** que el diseño asumía (1.5 pip + 7×2 = 15.5 €/lot) — la intención de la decisión se ejecuta con la magnitud prevista, sin cobrar una comisión fantasma a los trades normales.
+
+| parámetro | antes | ahora | evidencia |
+|---|---|---|---|
+| `spread_pips` (env_cfg retrain) | 1.5 | **0.17** | media 1.733 pt / 30000 H1 del snapshot |
+| `RetrainConfig.commission` (€/lot bróker) | 0.0001 (bug fraccional v1) | **0.0** | 271/271 deals commission=fee=0 |
+| `churn_friction_per_lot` (ancla de política) | inerte (≈ comisión ≈ 0) | **7.0 declarado** | plan §problema-5 + decisión Félix 2026-10-01 |
+
+**Tests (2026-10-01):** `cd fastapi && pytest tests/ -q` → **641 passed** (638 + 3: `test_costs_are_real_broker_values` pin de `RetrainConfig`; `test_churn_anchor_is_decoupled_from_broker_commission` — recargo íntegro con comisión bróker 0 y sin recargo con ancla 0; `test_zero_broker_commission_debits_nothing` — round-trip con comisión real = solo spread −1.2 €). El test de churn preexistente se actualizó para leer `churn_friction_per_lot` (misma magnitud: 7.0 → mismos números).
+
+**Pre-registrado para exp #12 (antes de ejecutar):** única variable = **costes del env** (spread 1.5 → 0.17, comisión → 0.0, ancla de churn declarada 7.0). `RetrainConfig` de gate **intacto** (umbrales, folds, canario absoluto, regla 3 €, 100k steps); se dispara **un único retrain**; repetirlo hasta aprobar sigue prohibido. Proyección honesta y **no garantizada**: la fricción de pliegos pasaría de −717.9 € a ~−81 € (×0.113 del componente spread) sobre un mercado de +568.6 € — pero el gate decide con el candidato real, y el holdout adverso de #11 (−13.05 vs +22.58) sigue siendo una señal en contra.
+
+**Archivos:** `fastapi/ml/trading_env_v2.py`, `fastapi/services/auto_retrain.py`, `fastapi/ml/train_ppo_v3.py`, `scripts/diagnostico_expectancia.py`, `fastapi/tests/test_auto_retrain.py`, `fastapi/tests/test_trading_env_step.py`, `README.md`, `PROTOCOLO_ANTI_BUCLE.md`.

@@ -150,8 +150,13 @@ def main():
         # importa config para seguir siendo ejecutable standalone).
         'risk_pct': 0.03,
         'pip_size': 0.0001,
-        'spread_pips': 1.5,
-        'commission_per_lot': 7.0,
+        # O-2 (2026-10-01): costes reales del bróker — comisión/fee = 0
+        # (271/271 deals sep→oct) y spread medio 1.73 pt = 0.173 pip sobre
+        # las 30000 H1 del snapshot (p50=0, p90=8). El ancla anti-churn va
+        # aparte (churn_friction_per_lot, decisión de Félix).
+        'spread_pips': 0.17,
+        'commission_per_lot': 0.0,
+        'churn_friction_per_lot': 7.0,
         'max_episode_steps': 1000,
         'max_holding_steps': 120,
         'random_reset': True,   # Descorrelaciona episodios en train

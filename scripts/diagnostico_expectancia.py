@@ -53,12 +53,12 @@ SNAPSHOT = (
 )
 LIVE_FROM = "2024-09-02"   # primera salida real (trade_outcomes)
 JSON_OUT = os.environ.get("DIAG_JSON", "/tmp/opencode/diagnostico_expectancia.json")
-SPREAD = 1.5 * 0.0001       # spread_pips=1.5 del env_cfg del gate
-COMM = RetrainConfig.commission  # commission_per_lot=0.0001 (ver hallazgo)
+SPREAD = 0.17 * 0.0001      # spread_pips=0.17 del env_cfg del gate (O-2 calibrado)
+COMM = RetrainConfig.commission  # commission_per_lot=0.0 (comisión bróker real, O-2)
 
 
 def make_env_cfg(df: pd.DataFrame) -> dict:
-    """Réplica verbatim de auto_retrain._do_retrain_core env_cfg (L777-804)."""
+    """Réplica verbatim de auto_retrain._do_retrain_core env_cfg (L783-815)."""
     cfg = RetrainConfig
     from config import settings
     return dict(
@@ -69,8 +69,9 @@ def make_env_cfg(df: pd.DataFrame) -> dict:
         max_lot=settings.max_volume,
         risk_pct=settings.ppo_risk_pct,
         pip_size=0.0001,
-        spread_pips=1.5,
+        spread_pips=0.17,
         commission_per_lot=cfg.commission,
+        churn_friction_per_lot=cfg.churn_friction_per_lot,
         max_episode_steps=1000,
         max_holding_steps=120,
         reward_scale=100.0,

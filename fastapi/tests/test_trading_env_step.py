@@ -363,10 +363,11 @@ class TestFase3MemoryChurnAndThreeEuro:
         assert r_close > 0.0
 
     @staticmethod
-    def _churn_scenario(open_delay: int):
+    def _churn_scenario(open_delay: int, **over):
         """Cierra y reabre `open_delay` velas después (1..CHURN_BARS =
-        recargo; CHURN_BARS+1 = sin recargo). Devuelve (env, reward_apertura)."""
-        env = _env(engineer_market_features(_raw_df()))
+        recargo; CHURN_BARS+1 = sin recargo). Devuelve (env, reward_apertura).
+        `over` se pasa al env (para el desacoplamiento ancla/comisión O-2)."""
+        env = _env(engineer_market_features(_raw_df()), **over)
         env.reset()
         env.step(FLAT)                # paso 1
         env.step(OPEN)                # paso 2: abre
@@ -382,7 +383,9 @@ class TestFase3MemoryChurnAndThreeEuro:
         env_free, r_free = self._churn_scenario(open_delay=CHURN_BARS + 1)
         assert env_free.ever_closed
         vol = env_free.volume
-        churn_expected = (2.0 * COMM * vol / INITIAL) * 100.0
+        # O-2: el recargo sale del ancla declarada (churn_friction_per_lot),
+        # no de la comisión del bróker
+        churn_expected = (2.0 * env_free.churn_friction_per_lot * vol / INITIAL) * 100.0
         assert churn_expected > 0.0
 
         for delay in (1, 2):   # ≤ CHURN_BARS → fricción completa
@@ -405,6 +408,41 @@ class TestFase3MemoryChurnAndThreeEuro:
         assert r_open == pytest.approx(
             (expected_balance - INITIAL) / INITIAL * 100.0 - risk_penalty
         )
+
+    def test_churn_anchor_is_decoupled_from_broker_commission(self):
+        """O-2 (2026-10-01): el recargo anti-churn usa el ancla declarada
+        (churn_friction_per_lot), NO la comisión del bróker — que en el
+        EURUSD real es 0 (271/271 deals sin commission/fee)."""
+        # comisión bróker 0 (valor real) → el recargo sigue siendo el ancla
+        env_free, r_free = self._churn_scenario(
+            open_delay=CHURN_BARS + 1, commission_per_lot=0.0)
+        env_churn, r_c = self._churn_scenario(
+            open_delay=1, commission_per_lot=0.0)
+        assert env_churn.churn_friction_per_lot == 7.0   # ancla por defecto
+        vol = env_churn.volume
+        anchor_expected = (2.0 * env_churn.churn_friction_per_lot * vol / INITIAL) * 100.0
+        assert anchor_expected > 0.0
+        assert env_churn.volume == pytest.approx(env_free.volume)
+        assert r_c == pytest.approx(r_free - anchor_expected)
+
+        # ancla 0 → sin recargo aunque la comisión del bróker sea 7.0
+        env_free2, r_free2 = self._churn_scenario(
+            open_delay=CHURN_BARS + 1, churn_friction_per_lot=0.0)
+        env_na, r_na = self._churn_scenario(
+            open_delay=1, churn_friction_per_lot=0.0)
+        assert r_na == pytest.approx(r_free2)
+
+    def test_zero_broker_commission_debits_nothing(self):
+        """O-2 (2026-10-01): con la comisión real del bróker (0) apertura y
+        cierre no pagan comisión — el round-trip sólo paga el spread (−1.2 €),
+        no los −1.76 € del fixture con comisión 7 €/lot."""
+        env = _env(engineer_market_features(_raw_df()), commission_per_lot=0.0)
+        env.reset()
+        env.step(OPEN)
+        assert env.balance == pytest.approx(INITIAL)      # sin comisión de apertura
+        _, _, _, _, info = env.step(FLAT)
+        assert info["trade_pnls"] == pytest.approx([-1.2])
+        assert info["balance"] == pytest.approx(INITIAL - 1.2)
 
 
 class TestPositionVetoParity:
