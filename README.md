@@ -1598,6 +1598,8 @@ Ahora, si las Bandas de Bollinger son inválidas o el ratio es insuficiente, el 
 
 ### Config: `RETRAIN_AUTO_APPROVE=true` — el umbral de cierres dispara retrain sin cola humana (2026-09-29)
 
+> **SUPERSEDED (2026-10-01):** este flag se revirtió a `false` tras los retrains automáticos #13/#14 — ver **O-4** más abajo (la promoción nunca estuvo automática; el gate walk-forward estaba y sigue intacto).
+
 **Cambio de despliegue (decisión de Félix, 2026-09-29):** `.env` añade `RETRAIN_AUTO_APPROVE=true`. El default en `config.py` permanece `False` — la inversión es explícita por entorno, no en código.
 
 **Efecto:** con el flag en true, `record_trade_outcome` dispara `_spawn_retrain_task("trade_count", symbol=…)` en cuanto `filled_count ≥ min_trades_for_retrain (5)` y `check_scheduled_retrain` dispara `scheduled` al llegar el intervalo (168h), ambos sin pasar por `POST /retrain/approve`. **La promoción NO se automática:** todo retrain sigue atravesando walk-forward + gate (comparativo si hay baseline, canario absoluto si no) — el flag elimina la cola humana de aprobación del *intento*, nunca el gate de *promoción*.
@@ -1872,3 +1874,37 @@ El baseline (bundle activo) pasó de **−115.737 con `n_steps=3592`** (bancarro
 **Opciones (decisión de Félix):** **O-4** (mantener bundle 24 + ventana shadow §6 desde 09-30 con ≥7 días o ≥50 candidatos — sin más retraines; recomendada para frenar la deriva de hipótesis consecutivas) · nueva hipótesis de diseño (cada una = UN retrain pre-registrado nuevo, con la advertencia honesta de testing secuencial acumulativo) · backlog de diagnóstico (integridad de `openings`; re-ejecutar el script de solo lectura sobre el snapshot `4ac33c8c` para descomposición del baseline).
 
 **Archivos:** `README.md`, `PROTOCOLO_ANTI_BUCLE.md` (sólo evidencia — el código O-2 ya estaba commiteado en `dc602f0`).
+
+### O-4 — fin de los retrains automáticos: exps #13/#14 (disparo `trade_count`) RECHAZADOS + `RETRAIN_AUTO_APPROVE=false` (2026-10-01)
+
+**Contexto:** O-4 aprobado por Félix («continúa con la forma recomendada»): **sin más retraines**, mantener el bundle `4185451b` (20,24) sirviendo y correr la ventana shadow §6. Pero `.env` seguía con `RETRAIN_AUTO_APPROVE=true` (decisión de despliegue de 2026-09-29, sección superior) → el trigger `trade_count` seguía vivo: `record_trade_outcome` spawnea un retrain en cuanto `filled_count ≥ min_trades_for_retrain (5)`. **Y `filled_count` no se reinicia al rechazar** (sólo al promocionar) → tras el forced #12, **cada cierre EURUSD spawneaba otro retrain**.
+
+**Incidente (2 retraines automáticos no deseados, ambos inofensivos):**
+
+| exp | ventana (UTC) | trigger | snap | gate | holdout cand vs base | resultado |
+|---|---|---|---|---|---|---|
+| **#13** | 14:47:13 → 14:52:06 | `trade_count` | `dd1ede681270` | cand `sum_reward=−31.44`, `sharpe=−0.104`, `expectancy=−1.22`, `opens=1326`, `trades=350`, `fold_wins=3/4` \| base `−80.39` | **+10.12** (sharpe 2.44) vs +3.62 | **RECHAZADO `absolute_floor_sum_reward`** |
+| **#14** | 15:33:13 → 15:38:06 | `trade_count` | `bf8a37531d46` | cand `sum_reward=−63.48`, `sharpe=−0.286`, `expectancy=−2.92`, `opens=826`, `trades=413`, `fold_wins=1/4` \| base `−78.32` | −14.02 vs +2.37 | **RECHAZADO `absolute_floor_sum_reward`** |
+
+Ambas con el entorno O-1+O-2 (costes reales), `status=rejected`, `sha=-` → **sin artefacto, sin promoción, bundle activo intacto** (`git status fastapi/ml` sin marcador nuevo, cron no-op).
+
+**Respuesta (O-4): `.env RETRAIN_AUTO_APPROVE=true → false`.** El default en `config.py` ya era `False` (P0-1: el intento nunca implícito por código); la inversión era sólo de despliegue. Contenedor recreado (`docker compose up -d fastapi`) y verificado: `docker exec trading-fastapi printenv RETRAIN_AUTO_APPROVE` → `false`, settings de Pydantic → `False`, `/health` → `ok` (equity=436.89, MCP connected). Efecto observable: con `filled_count ≥ 5` el siguiente cierre loguea `[RETRAIN] Auto-retrain bloqueado: retrain_auto_approve=false…` y **no spawnea**; el calendario 168 h (último intento #14 15:38 → ~10-08) queda `scheduled_due` **pendiente de aprobación** vía `POST /api/v1/ai/retrain/approve`. Reactivar exige decisión explícita (`true` + recreate).
+
+**Disciplina estadística:** #10–#14 = **5 rechazos consecutivos** con el suelo intacto; repetir hasta aprobar = múltiple testing, **prohibido**. Con O-4 activo ambos triggers quedan bloqueados/pendientes: nueva hipótesis sólo por orden de Félix (un único retrain pre-registrado). La **promoción** nunca estuvo automática: gate walk-forward (suelo absoluto + canario) sin tocar.
+
+**Evidencia (2026-10-01):** flip verificado en contenedor (printenv/settings/health, arriba); `training_experiments` #13/#14 `rejected/absolute_floor_sum_reward` con `gate_metrics` citados al dígito; suite **641 passed** en el momento del flip (sólo cambio de despliegue, sin código). **Archivos:** `.env` (no versionado), `README.md`, `PROTOCOLO_ANTI_BUCLE.md`.
+
+### Backlog O-4 — integridad de la métrica `openings`: aperturas REALES en el env (2026-10-01)
+
+**Contexto (hallazgo 7 del diagnóstico):** `_evaluate_model` contaba la **intención pre-step** de la política con umbral `0.33`, mientras el env decodifica con zona muerta `±0.05` (`decode_v3_direction`) — y sumaba un intento **en cada paso** en que `size_ppo_position` denegaba el volumen (`position` seguía en 0 → el "previo" nunca subía) → métrica inflada y, a la vez, aperturas reales pequeñas (0.05–0.33) **sin contar**: exp #12 `1680 contadas vs 217 trades`; exp #14 `826 vs 413`; fold0 de #13 `374 vs 81`. La masa `total_openings` no era masa real.
+
+**Cambios (TDD: 6 RED → 6 GREEN):**
+- **`fastapi/ml/trading_env_v2.py`** — `self.opening_count` (init + reset) incrementado **sólo en el sitio único de apertura** del env (`0 → posición` con `new_volume > 0.0`), expuesto como **`info["openings"]`**.
+- **`fastapi/services/auto_retrain.py`** — `_evaluate_model` lee `int(info["openings"])` (**clave directa**: si el env no la expone, `KeyError` propaga — sin `.get` silencioso a 0); eliminado el conteo de intención (`target_position` 0.33 / `previous_position`).
+- **`scripts/diagnostico_expectancia.py`** — espejo del gate actualizado al mismo origen (`metric_openings = info["openings"]`); conserva el cross-check `actual_opens` por transición de posición (ambos deben coincidir y ahora coinciden).
+
+**Umbrales intactos** (`min_validation_openings=20`, `CANARY_MIN_OPENINGS=200`): la masa **real** es menor que la inflada → el check queda **más estricto, nunca más laxo** (dirección contraria a "tunar para que pase"). Registros históricos de `gate_metrics` no se reescriben. Referencia: con aperturas reales, #12 habría tenido `total_openings ≈ 221` (217 trades + 4 que quedan abiertas por pliegue) — sigue ≥200 pero el canario ya exige masa genuina; #14 `826 → ~417`.
+
+**Tests (5 nuevos + 1 extendido):** `TestOpeningsCounter` (3): apertura real cuenta 1 y mantener no reabre · intención `dir=1.0, vol=0.0` cuenta 0 · contador se reinicia con el episodio; `test_info_exposes_money_keys_for_gate` (+clave `openings`); `TestOpeningsMetricIntegrity` (2): modelo de volumen denegado → `openings==0` · modelo `dir=0.2` (bajo el legacy 0.33) → `openings ≥ 1` con invariante `openings ≤ trades+1`. Los tests de la política de ceros (`openings == 0`) siguen en verde.
+
+**Evidencia (2026-10-01):** TDD verificado (`6 failed` en RED → `6 passed` en GREEN); suite completa **646 passed** (641 + 5, exit 0, 24.2 s); `py_compile` del script OK; sin cambio MQL5 → **sin bump de versión EA**. **Archivos:** `fastapi/ml/trading_env_v2.py`, `fastapi/services/auto_retrain.py`, `fastapi/tests/test_trading_env_step.py`, `fastapi/tests/test_auto_retrain.py`, `scripts/diagnostico_expectancia.py`, `README.md`, `PROTOCOLO_ANTI_BUCLE.md`.
