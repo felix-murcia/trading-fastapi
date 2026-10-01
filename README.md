@@ -1598,7 +1598,7 @@ Ahora, si las Bandas de Bollinger son inválidas o el ratio es insuficiente, el 
 
 ### Config: `RETRAIN_AUTO_APPROVE=true` — el umbral de cierres dispara retrain sin cola humana (2026-09-29)
 
-> **SUPERSEDED (2026-10-01):** este flag se revirtió a `false` tras los retrains automáticos #13/#14 — ver **O-4** más abajo (la promoción nunca estuvo automática; el gate walk-forward estaba y sigue intacto).
+> **Historial del flag:** `true` (2026-09-29) → `false` (2026-10-01, O-4, tras las exps #13/#14 automáticas) → **`true` de nuevo (2026-10-01, decisión de Félix — ver «RETRAIN_AUTO_APPROVE reactivado» más abajo)**. El estado vigente vive en `.env`; el default de `config.py` nunca cambió (`False`).
 
 **Cambio de despliegue (decisión de Félix, 2026-09-29):** `.env` añade `RETRAIN_AUTO_APPROVE=true`. El default en `config.py` permanece `False` — la inversión es explícita por entorno, no en código.
 
@@ -1894,6 +1894,8 @@ Ambas con el entorno O-1+O-2 (costes reales), `status=rejected`, `sha=-` → **s
 
 **Evidencia (2026-10-01):** flip verificado en contenedor (printenv/settings/health, arriba); `training_experiments` #13/#14 `rejected/absolute_floor_sum_reward` con `gate_metrics` citados al dígito; suite **641 passed** en el momento del flip (sólo cambio de despliegue, sin código). **Archivos:** `.env` (no versionado), `README.md`, `PROTOCOLO_ANTI_BUCLE.md`.
 
+> **UPDATE (2026-10-01, tarde):** el flag fue reactivado a `true` por decisión de Félix al cerrar el informe O-4 — ver sección siguiente.
+
 ### Backlog O-4 — integridad de la métrica `openings`: aperturas REALES en el env (2026-10-01)
 
 **Contexto (hallazgo 7 del diagnóstico):** `_evaluate_model` contaba la **intención pre-step** de la política con umbral `0.33`, mientras el env decodifica con zona muerta `±0.05` (`decode_v3_direction`) — y sumaba un intento **en cada paso** en que `size_ppo_position` denegaba el volumen (`position` seguía en 0 → el "previo" nunca subía) → métrica inflada y, a la vez, aperturas reales pequeñas (0.05–0.33) **sin contar**: exp #12 `1680 contadas vs 217 trades`; exp #14 `826 vs 413`; fold0 de #13 `374 vs 81`. La masa `total_openings` no era masa real.
@@ -1908,3 +1910,15 @@ Ambas con el entorno O-1+O-2 (costes reales), `status=rejected`, `sha=-` → **s
 **Tests (5 nuevos + 1 extendido):** `TestOpeningsCounter` (3): apertura real cuenta 1 y mantener no reabre · intención `dir=1.0, vol=0.0` cuenta 0 · contador se reinicia con el episodio; `test_info_exposes_money_keys_for_gate` (+clave `openings`); `TestOpeningsMetricIntegrity` (2): modelo de volumen denegado → `openings==0` · modelo `dir=0.2` (bajo el legacy 0.33) → `openings ≥ 1` con invariante `openings ≤ trades+1`. Los tests de la política de ceros (`openings == 0`) siguen en verde.
 
 **Evidencia (2026-10-01):** TDD verificado (`6 failed` en RED → `6 passed` en GREEN); suite completa **646 passed** (641 + 5, exit 0, 24.2 s); `py_compile` del script OK; **re-ejecución en vivo del espejo** (`scripts/diagnostico_expectancia.py`, solo lectura, pin `a0f03c07` con el env O-1+O-2 actual): en los **18 segmentos** (4 folds + holdout + ventanas reales) `metric_openings == opens_reales` **exacto** (fold0 120=120, ventana [11000:12000] 125=125, …) — la métrica del gate y la detección por transición son ahora la misma cosa, antes divergían (intención 0.33 vs aperturas reales; p. ej. exp #12: 1680 vs 217 trades). Los números absolutos de esa corrida (trades/rewards por fold) difieren del diagnóstico original porque el env ya incluye O-1+O-2; el pin de snapshot no cambia. Sin cambio MQL5 → **sin bump de versión EA**. **Archivos:** `fastapi/ml/trading_env_v2.py`, `fastapi/services/auto_retrain.py`, `fastapi/tests/test_trading_env_step.py`, `fastapi/tests/test_auto_retrain.py`, `scripts/diagnostico_expectancia.py`, `README.md`, `PROTOCOLO_ANTI_BUCLE.md`.
+
+### Cierre de O-4 — decisiones de Félix: auto-retrain reactivado + power switch aprobado al cierre de §6 (2026-10-01)
+
+**Decisión (Félix, 2026-10-01, al recibir el informe O-4):**
+
+1. **`RETRAIN_AUTO_APPROVE` reactivado a `true`.** `.env: false → true`, contenedor recreado y verificado: `docker exec trading-fastapi printenv RETRAIN_AUTO_APPROVE` → `true`, `settings.retrain_auto_approve` → `True`, `/health` → `ok` (equity=438.89, MCP connected). Historial del flag: 09-29 `true` → 10-01 `false` (O-4) → 10-01 `true`; el default en `config.py` sigue `False` (el estado real vive en `.env`).
+2. **Power switch del estratega APROBADO para el cierre de la ventana §6** (2026-10-07 19:00 UTC o ≥50 candidatas — hoy 12/50): al cierre se activa escalonado por criterio (§6.5: un criterio por PR, config versionada + entrada en README) sobre la evidencia de las trazas shadow acumuladas (§6.4). Si en el cierre los criterios de §6.4 **no** se cumplen, se informa en lugar de activar — el plan aprobado es evidencia-primero, no activación a ciegas.
+3. **Fin del bucle de análisis:** el diagnóstico anclado a `4ac33c8c` (#12) queda descartado; comienza **semana de observación** — ventana §6, verdicts del estratega (`ENTER/WAIT/NO_CANDIDATE`) y retrains automáticos con el gate intacto.
+
+**Consecuencia conocida, documentada ANTES del despliegue (decisión tomada con esa información):** `filled_count` sólo se reinicia al **promocionar** (`auto_retrain.py` L954; la ruta de rechazo ancla el calendario con `last_retrain_time` pero no el contador) → con `filled_count=12 ≥ min_trades=5`, **cada cierre EURUSD dispara un intento de retrain** hasta que uno promocione (rechazo → contador sigue → siguiente cierre → nuevo intento). Estado verificado en `retrain_state`: EURUSD `filled_count=12`, `retrain_in_progress=false`, `scheduled_due=false`; calendario anclado por el intento #14 (15:38:06 UTC) → próximo `scheduled` **2026-10-08 15:38 UTC**. El gate walk-forward (suelo absoluto + canario) sigue siendo la **única** vía de promoción y todos los intentos quedan en `training_experiments`.
+
+**Evidencia (2026-10-01):** flip verificado (printenv/settings/health, arriba); `retrain_state` leído de la BD (`filled_count=12`, ancla #14); suite **646 passed** (sin cambio de código: sólo `.env` + docs). **Archivos:** `.env` (no versionado), `README.md`, `PROTOCOLO_ANTI_BUCLE.md`.
