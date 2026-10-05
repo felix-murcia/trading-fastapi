@@ -1937,3 +1937,22 @@ Ambas con el entorno O-1+O-2 (costes reales), `status=rejected`, `sha=-` → **s
 **Registro (fondo de la orden de Félix):** hallazgos H1–H13 + backlog priorizado **P0** (entrada con confianza + filtro de momento; SL/TP estructural por swing/liquidez) · **P1** (time-stop/breakeven intraposición; cooldown de re-entrada en serve espejo de `CHURN_BARS`) · **P2** (parser de calidad Qwen, higiene de datos: duplicados 106–111, drift sin baseline, `smc_signals` obsoleto, coste del bucle de retrain) → **`doc/backlog-auditoria-2026-10-02.md`**. **Nada se ejecuta hasta que termine la ventana §6 (2026-10-07) y Félix emita la orden pre-registrada correspondiente**; los umbrales de `walk_forward.py` siguen intocados y #10–#18 = rechazos consecutivos (repetir hasta aprobar = múltiple testing, prohibido).
 
 **Evidencia (2026-10-02):** suite **646 passed** (25.8 s, verificación previa a este registro — cambio sólo documental); sin cambio MQL5 → sin bump EA. **Archivos:** `doc/backlog-auditoria-2026-10-02.md` (nuevo), `README.md`, `PROTOCOLO_ANTI_BUCLE.md`.
+
+### Incidente EA — Err 4014 / HTTP -1: WebRequest URL reseteada en MT5 (2026-10-05)
+
+**Contexto:** el EA reportó `HTTP -1` / Err 4014 al comunicar el cierre de la posición 58747168430 (cerrada por SL en broker a las 04:23 UTC del 10-05). **Causa raíz confirmada por Félix:** la URL del WebRequest había sido reseteada en MT5 (no estaba en la allowlist de Tools→Options→Expert Advisors) — **no es un bug de código**. El outbox del EA retuvo el cierre y reintentó; al restaurar la URL la llamada se completó.
+
+**Alcance del blackout (medido en BD, solo lectura):** última llamada EA→backend exitosa el **10-02 20:55:18** (`ai_predict_cycle`/`ea_decision`); primera tras el fix el **10-05 11:12:08** (`order_filled` del outbox) → **~62 h sin ningún ciclo predict/shadow** (en el hueco `audit_log` solo contiene 3 `drift_report` internos del backend; el backend estuvo vivo todo el tiempo).
+
+**Integridad verificada (sin pérdida de datos):**
+- Cierre tardío persistido **una sola vez**: `trade_outcomes` id 231 (posición 58747168430, SL, **−11.26 €**, `exit_time` 10-05 04:23:42), `created_at` 10-05 11:12:08, `count=1` (sin duplicados) → **regla 8 cumplida**.
+- Orden 29 `pending → filled` (catch-all O-1 al llegar el cierre).
+- Cadencia de predict restaurada desde 10-05 11:17 (ciclos cada 5 min continuos); Qwen `unavailable` solo en los 3 primeros ciclos (reintentos post-reconexión, latencia ~20 s), recuperado a las 11:20.
+- Retrain **#19** disparado por el cierre (10-05 11:12:17) → **rechazado 11:17:17 `absolute_floor_sum_reward`** — comportamiento correcto del gate (19 exps totales, 18 rechazadas; `retrain_in_progress=false`, `filled_count=17`; umbrales intactos).
+- `/health` ok (equity 426.69, MCP conectado); suite **646 passed** (25.0 s).
+
+**Impacto en la ventana §6 (anomalía a decidir al cierre):** hueco de ~62 h (**37 % de la ventana**) sin trazas shadow; candidatos **18/50** (13 BUY + 5 SELL) → el ≥50 no se alcanzará antes del corte. **Decisión de Félix al cierre (10-07 19:00 UTC):** aceptar la evidencia §6.4 con el hueco o extender la ventana.
+
+**Otras anomalías registradas (solo informe, sin cambios):** (a) **full-dump de `docker logs` no fiable** — el volcado completo (9199 líneas) termina en 10-03 10:25 y no ve el 10-04/10-05 mientras `--tail` sí; `--since` devuelve 0 → para forense usar `audit_log` (correcto) o `docker logs --tail N`; (b) **3 `ai_predict_cycle` duplicados a las 11:17:38** por reintentos con latencia ~20 s (el histórico ya tenía duplicados similares; sin impacto: HOLD con veto; 0 duplicados BUY/SELL en el mismo segundo → sin efecto en el conteo §6); (c) **orden 30** (BUY 10-05 11:35, posición abierta `position=1`) sigue `pending` hasta que llegue su cierre — mismo patrón que la orden 29, no es regresión.
+
+**Evidencia (2026-10-05):** consultas `SELECT` sobre `audit_log`/`orders`/`trade_outcomes`/`retrain_state` + `docker logs` (solo lectura, sin cambio de código); suite **646 passed** (25.0 s, verificada antes de este registro — cambio solo documental); sin cambio MQL5 → sin bump de versión EA. **Archivos:** `README.md`, `PROTOCOLO_ANTI_BUCLE.md`, `doc/backlog-auditoria-2026-10-02.md`.
