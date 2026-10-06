@@ -63,6 +63,9 @@ FOREX_MARKET_FEATURE_COUNT = len(MARKET_FEATURES)
 EXTRA_STATE_FEATURES = 7  # [entry_norm, pos, unrealized_pnl, balance_norm, dist_sl, dist_tp, holding_time]
 # Fase 3: +1 canal opcional `bars_since_close` (obs 25) — ver memory_channel.
 
+# Filtro de volatilidad para evitar mercados de ruido (P2: mejora de selectividad)
+MIN_ATR_FOR_ENTRY = 0.0004 
+
 # Anti-churn: reabrir con <= CHURN_BARS velas H1 completas desde el último
 # cierre paga la fricción completa de ida+vuelta (churn_friction_per_lot × 2
 # por lot) — ancla de política declarada, no coste de bróker (ver O-2).
@@ -610,6 +613,10 @@ class ForexTradingEnvV2(gym.Env):
                 # métrica `openings` del gate cuenta APERTURAS REALES aquí,
                 # no la intención de la política (fix 2026-10-01, O-4).
                 self.opening_count += 1
+                
+                # Penalización por volatilidad insuficiente (Félix, 2026-10-06: mejora de selectividad)
+                if float(candle["atr"]) < MIN_ATR_FOR_ENTRY:
+                    risk_penalty += 0.05
 
                 # Aplicar spread al precio de entrada
                 if self.position == 1:
