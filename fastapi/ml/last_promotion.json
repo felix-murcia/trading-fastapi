@@ -1,0 +1,7 @@
+{
+  "symbol": "EURUSD",
+  "model": "ppo_trading_bot_v3.zip",
+  "model_sha256": "bb70b5822de63139def2e4f21bb071536aec70e115e04a3ae054e9545112faf9",
+  "reason": "walk_forward_improved",
+  "created_at": "2026-10-07T06:30:46.701511+00:00"
+}
