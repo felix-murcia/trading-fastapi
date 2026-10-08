@@ -48,6 +48,7 @@ def _post_predict(action, monkeypatch, position=0):
     with patch("main.init_pool", AsyncMock()), \
          patch("main.close_pool", AsyncMock()), \
          patch("routers.ai.is_news_blackout", AsyncMock(return_value=(False, None))), \
+         patch("routers.ai.fetch_bars_since_close", AsyncMock(return_value=None)), \
          patch("routers.ai.get_pool", return_value=MagicMock(execute=AsyncMock())), \
          patch("routers.ai.PPO.load", return_value=model), \
          patch("services.news_scraper.get_macro_news", AsyncMock(return_value="No macro news")), \

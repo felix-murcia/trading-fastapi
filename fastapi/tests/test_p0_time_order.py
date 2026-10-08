@@ -182,7 +182,9 @@ class TestPredictServesNewestCandle:
         model = MagicMock()
         model.predict.return_value = (np.array([0.60, 0.18, 0.15, 0.15],
                                                 dtype=np.float32), None)
-        model.observation_space = Box(-np.inf, np.inf, shape=(20, 24),
+        # Bundle EURUSD activo = memoria (manifest obs_shape [20,25]) → el mock
+        # debe coincidir con el manifest real que validate_bundle certifica.
+        model.observation_space = Box(-np.inf, np.inf, shape=(20, 25),
                                       dtype=np.float32)
         model.action_space = Box(-1.0, 1.0, shape=(4,), dtype=np.float32)
         dist = MagicMock()
@@ -198,6 +200,7 @@ class TestPredictServesNewestCandle:
              patch("main.close_pool", AsyncMock()), \
              patch("routers.ai.is_news_blackout",
                    AsyncMock(return_value=(False, None))), \
+             patch("routers.ai.fetch_bars_since_close", AsyncMock(return_value=None)), \
              patch("routers.ai.get_pool",
                    return_value=MagicMock(execute=AsyncMock())), \
              patch("routers.ai.PPO.load", return_value=model), \

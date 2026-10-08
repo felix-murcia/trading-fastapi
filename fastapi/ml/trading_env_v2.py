@@ -55,6 +55,12 @@ MARKET_FEATURES = (
     "rsi14", "bb_pos", "lag_return_1", "lag_return_2",
     "lag_return_3", "lag_return_5",
 )
+# Fase 3 (SL/TP estructural, backlog H3/P0): swing_high/low, last_swing_*,
+# resistance/support_level, dist_* y adx se calculan en `engineer_market_features`
+# como columnas del df y alimentan `production_stops()`/Qwen por AMBOS lados del
+# contrato, pero NO entran en el obs: el contrato de observación sigue siendo
+# 17 features de mercado (plan §7 Fase 3: (20,24)→(20,25) sólo con el canal de
+# memoria; añadir canales exige retrain pre-registrado de por medio).
 
 # Ancho base del tensor: canales de mercado + 7 de estado. El contrato Fase 3
 # añade +1 (bars_since_close) → obs (20, 25); 24 canales = bundle pre-memoria.
@@ -122,6 +128,22 @@ def engineer_market_features(df: pd.DataFrame) -> pd.DataFrame:
     result["tr"] = tr_components.max(axis=1) / (close + 1e-10)
     result["atr"] = result["tr"].rolling(14).mean()
 
+    # ADX (Average Directional Index) — fuerza de la tendencia
+    # +DI = 100 * EMA((high - prev_high).clip(lower=0)) / ATR
+    # -DI = 100 * EMA((prev_low - low).clip(lower=0)) / ATR
+    # DX = 100 * |+DI - -DI| / (+DI + -DI)
+    # ADX = EMA(DX, 14)
+    prev_high = high.shift(1)
+    prev_low = low.shift(1)
+    plus_dm = (high - prev_high).clip(lower=0)
+    minus_dm = (prev_low - low).clip(lower=0)
+    plus_di = 100 * (plus_dm.rolling(14, min_periods=1).mean() / (result["atr"] + 1e-10))
+    minus_di = 100 * (minus_dm.rolling(14, min_periods=1).mean() / (result["atr"] + 1e-10))
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-10)
+    result["adx"] = dx.rolling(14, min_periods=1).mean() / 100.0  # normalizado [0, 1]
+    # Rellenar NaN iniciales con valor neutral (0.5) para no perder filas
+    result["adx"] = result["adx"].fillna(0.5)
+
     # RSI normalizado en rango [0, 1]
     delta = close.diff()
     gain = delta.clip(lower=0).rolling(14).mean()
@@ -137,7 +159,84 @@ def engineer_market_features(df: pd.DataFrame) -> pd.DataFrame:
     for lag in (1, 2, 3, 5):
         result[f"lag_return_{lag}"] = result["returns"].shift(lag).fillna(0.0)
 
-    return result.dropna().reset_index(drop=True)
+    # ============================================================
+    # Swing High/Low Detection (Fase 3: SL/TP Estructural)
+    # ============================================================
+    # Swing High: high mayor que los 2 vecinos a cada lado
+    # Swing Low: low menor que los 2 vecinos a cada lado
+    swing_window = 2
+    result["swing_high"] = (
+        (result["high"] > result["high"].shift(1)) &
+        (result["high"] > result["high"].shift(2)) &
+        (result["high"] > result["high"].shift(-1)) &
+        (result["high"] > result["high"].shift(-2))
+    ).astype(float)
+    result["swing_low"] = (
+        (result["low"] < result["low"].shift(1)) &
+        (result["low"] < result["low"].shift(2)) &
+        (result["low"] < result["low"].shift(-1)) &
+        (result["low"] < result["low"].shift(-2))
+    ).astype(float)
+
+    # Propagar el último swing high/low conocido hacia adelante (forward fill)
+    # para saber el swing relevante actual en cada vela
+    result["last_swing_high"] = result["high"].where(result["swing_high"] == 1).ffill()
+    result["last_swing_low"] = result["low"].where(result["swing_low"] == 1).ffill()
+
+    # ============================================================
+    # Liquidity Zones / Support/Resistance (Fase 3: TP Estructural)
+    # ============================================================
+    # Niveles donde el precio ha reaccionado múltiples veces
+    # Usamos clusters de swing highs/lows como proxy de liquidez
+    liquidity_window = 50
+    def _resistance(x):
+        if len(x) == 0:
+            return np.nan
+        max_val = np.nanmax(x)
+        count = np.sum(x == max_val)
+        return max_val if count >= 1 else np.nan
+    
+    def _support(x):
+        if len(x) == 0:
+            return np.nan
+        min_val = np.nanmin(x)
+        count = np.sum(x == min_val)
+        return min_val if count >= 1 else np.nan
+    
+    result["resistance_level"] = result["high"].rolling(liquidity_window, min_periods=1).apply(_resistance, raw=True)
+    result["support_level"] = result["low"].rolling(liquidity_window, min_periods=1).apply(_support, raw=True)
+    
+    # Rellenar cualquier NaN residual con forward/backward fill
+    result["resistance_level"] = result["resistance_level"].ffill().bfill()
+    result["support_level"] = result["support_level"].ffill().bfill()
+
+    # Distancias normalizadas a niveles clave (para features)
+    result["dist_resistance"] = (result["resistance_level"] - close) / (close + 1e-10)
+    result["dist_support"] = (close - result["support_level"]) / (close + 1e-10)
+
+    # Rellenar NaN iniciales - usar ffill/bfill para mantener filas.
+    # fillna final: en un mercado plano NO se detecta ningún swing y una
+    # columna totalmente NaN vaciaría el dropna — se rellena con el propio
+    # high/low (distancia estructural < 10 pips → production_stops cae al
+    # fallback ATR igual que sin datos estructurales).
+    result["last_swing_high"] = result["last_swing_high"].bfill().ffill().fillna(high)
+    result["last_swing_low"] = result["last_swing_low"].bfill().ffill().fillna(low)
+    result["resistance_level"] = result["resistance_level"].bfill().ffill()
+    result["support_level"] = result["support_level"].bfill().ffill()
+    result["dist_resistance"] = result["dist_resistance"].fillna(0)
+    result["dist_support"] = result["dist_support"].fillna(0)
+
+    # Rellenar NaN iniciales (ADX ya hecho arriba)
+    result["adx"] = result["adx"].fillna(0.5)
+
+    # Descartar sólo las filas de warmup de los indicadores de ventana fija
+    # (SMA20/std20 → 19 filas; ATR/RSI → 13, cubiertas por esas 19) y sólo
+    # DESPUÉS de ordenar ascendente: se descartan las velas MÁS VIEJAS, nunca
+    # las nuevas (P0: test_p0_time_order). dropna exige cero NaN en el resto:
+    # por eso cada feature (ADX, swings, liquidez) se rellena arriba.
+    result = result.dropna().reset_index(drop=True)
+
+    return result
 
 
 def get_market_features(df: pd.DataFrame) -> list[str]:
@@ -236,24 +335,79 @@ def decode_v3_direction(direction: float, current_position: int) -> Tuple[int, s
     return target_pos, decision
 
 
-def production_stops(atr_norm: float, pip_size: float) -> Tuple[float, float]:
-    """Stops de producción (P2-1): única fuente de verdad del cálculo SL/TP.
+def production_stops(
+    atr_norm: float,
+    pip_size: float,
+    # Fase 3: Parámetros opcionales para SL/TP estructural
+    swing_high: Optional[float] = None,
+    swing_low: Optional[float] = None,
+    resistance_level: Optional[float] = None,
+    support_level: Optional[float] = None,
+    current_price: Optional[float] = None,
+    entry_price: Optional[float] = None,
+    position: int = 0,
+) -> Tuple[float, float]:
+    """Stops de producción (P2-1 + Fase 3): única fuente de verdad del cálculo SL/TP.
 
     La usan AMBOS lados del contrato train/serve:
     - el env al abrir posiciones (entrenamiento y evaluación walk-forward), y
     - `/api/v1/ai/predict` al proponer `sl_pips`/`tp_pips` de la decisión.
 
-    Regla (idéntica a la que ya usaba /predict, sin cambios en serve):
-    pips ATR = atr_norm / pip_size; SL = clamp(pips × 1.5, 10, 50); TP = 2 × SL.
+    Regla Fase 3 (SL/TP Estructural):
+    - SL: Swing Low (LONG) / Swing High (SHORT) ± buffer ATR
+    - TP: Resistance (LONG) / Support (SHORT) ± buffer ATR
+    - Fallback a ATR si no hay datos estructurales: pips ATR = atr_norm / pip_size; 
+      SL = clamp(pips × 1.5, 10, 50); TP = 2 × SL.
 
-    Nota: `atr_norm` es adimensional (max(rango)/close, ver
-    `engineer_market_features`); la conversión `atr/pip_size` escala bien en
-    EURUSD (precio ≈ 1) y el clamp [10, 50] cubre el resto. Se replica tal cual
-    para no alterar el comportamiento ya desplegado.
+    Buffer ATR: 0.5 × ATR para dar espacio al ruido.
     """
+    # Fallback ATR-based calculation
     atr_pips = atr_norm / pip_size
-    sl_pips = max(10.0, min(50.0, atr_pips * 1.5))
-    tp_pips = sl_pips * 2.0
+    atr_pips_clamped = max(1.0, min(100.0, atr_pips))  # clamp razonable
+    buffer_pips = max(5.0, atr_pips * 0.5)  # Buffer = 0.5 ATR, mínimo 5 pips
+    
+    sl_pips = 0.0
+    tp_pips = 0.0
+    
+    if position == 1:  # LONG
+        # SL: Swing Low - buffer
+        if swing_low is not None and swing_low > 0:
+            structural_sl = (current_price - swing_low) / pip_size - buffer_pips
+            sl_pips = max(10.0, min(50.0, structural_sl)) if structural_sl >= 10.0 else max(10.0, min(50.0, atr_pips * 1.5))
+        else:
+            sl_pips = max(10.0, min(50.0, atr_pips * 1.5))  # Fallback ATR
+        
+        # TP: Resistance + buffer — mínimo 2:1 R:R
+        if resistance_level is not None and resistance_level > current_price:
+            structural_tp = (resistance_level - current_price) / pip_size + buffer_pips
+            # Usar TP estructural solo si respeta mínimo 2:1 R:R
+            tp_pips = max(sl_pips * 2.0, structural_tp) if structural_tp >= sl_pips * 2.0 else sl_pips * 2.0
+        else:
+            tp_pips = sl_pips * 2.0  # Fallback 2:1 R:R
+            
+    elif position == -1:  # SHORT
+        # SL: Swing High + buffer
+        if swing_high is not None and swing_high > 0:
+            structural_sl = (swing_high - current_price) / pip_size - buffer_pips
+            sl_pips = max(10.0, min(50.0, structural_sl)) if structural_sl >= 10.0 else max(10.0, min(50.0, atr_pips * 1.5))
+        else:
+            sl_pips = max(10.0, min(50.0, atr_pips * 1.5))
+        
+        # TP: Support - buffer — mínimo 2:1 R:R
+        if support_level is not None and support_level < current_price:
+            structural_tp = (current_price - support_level) / pip_size + buffer_pips
+            tp_pips = max(sl_pips * 2.0, structural_tp) if structural_tp >= sl_pips * 2.0 else sl_pips * 2.0
+        else:
+            tp_pips = sl_pips * 2.0
+    else:
+        # Flat - fallback ATR
+        sl_pips = max(10.0, min(50.0, atr_pips * 1.5))
+        tp_pips = sl_pips * 2.0
+    
+    # Clamp final
+    sl_pips = max(10.0, min(100.0, sl_pips))
+    tp_pips = max(15.0, min(200.0, tp_pips))
+    
     return sl_pips, tp_pips
 
 
@@ -576,7 +730,13 @@ class ForexTradingEnvV2(gym.Env):
             # P2-1: mismos stops que /predict (production_stops) — el modelo ya
             # no elige SL/TP (D3): el MDP entrenado usa los stops ejecutados.
             sl_pips_c, tp_pips_c = production_stops(
-                float(candle["atr"]), self.pip_size
+                float(candle["atr"]), self.pip_size,
+                swing_high=float(candle.get("last_swing_high", 0)) or None,
+                swing_low=float(candle.get("last_swing_low", 0)) or None,
+                resistance_level=float(candle.get("resistance_level", 0)) or None,
+                support_level=float(candle.get("support_level", 0)) or None,
+                current_price=close_price,
+                position=target_pos,
             )
             # P2-2: sizing delegado en position_sizing.size_ppo_position (misma
             # función que /predict): la cabeza `volume` modula el riesgo
@@ -657,6 +817,15 @@ class ForexTradingEnvV2(gym.Env):
         # -------------------------------------------------------------
         delta_equity = self.equity - self.prev_equity
         reward = (delta_equity / self.initial_balance) * self.reward_scale - risk_penalty
+
+        # --- Detección de régimen (ADX) ---
+        # ADX < 0.25 → mercado lateral/rango (sin tendencia clara)
+        # ADX > 0.25 → tendencia direccional
+        # Si ADX es NaN (datos insuficientes) → asumir NO ranging (conservador)
+        current_adx = float(candle.get("adx", 0.0))
+        if np.isnan(current_adx):
+            current_adx = 0.5  # neutral: no penalizar por falta de datos
+        is_ranging = current_adx < 0.25  # umbral estándar ADX < 25 → rango
 
         # R-1 / regla 3 € (plan D-2): un close con pnl ∈ (0, 3 €) NO es una
         # ganancia — la recompensa lo trata como PÉRDIDA (el aporte se invierte:

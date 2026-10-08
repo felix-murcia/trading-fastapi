@@ -108,7 +108,8 @@ def test_ai_predict_e2e_flow():
     # Espacios Box REALES: si el bundle certificado declara vec_norm, el startup
     # construye DummyVecEnv(_DummyEnv(obs_space, action_space)) y SB3 valida los
     # spaces (un MagicMock falla con 'Unsupported structured space').
-    model.observation_space = Box(-np.inf, np.inf, shape=(20, 24), dtype=np.float32)
+    # Bundle EURUSD activo = memoria (manifest obs_shape [20,25]) → mock = manifest.
+    model.observation_space = Box(-np.inf, np.inf, shape=(20, 25), dtype=np.float32)
     model.action_space = Box(-1.0, 1.0, shape=(4,), dtype=np.float32)
 
     dist = MagicMock()
@@ -119,6 +120,7 @@ def test_ai_predict_e2e_flow():
     with patch("main.init_pool", AsyncMock()), \
          patch("main.close_pool", AsyncMock()), \
          patch("routers.ai.is_news_blackout", AsyncMock(return_value=(False, None))), \
+         patch("routers.ai.fetch_bars_since_close", AsyncMock(return_value=None)), \
          patch("routers.ai.get_pool", return_value=MagicMock(execute=AsyncMock())), \
          patch("routers.ai.PPO.load", return_value=model), \
          patch("services.news_scraper.get_macro_news", AsyncMock(return_value="No macro news")), \
@@ -180,8 +182,27 @@ def test_predict_memory_contract_adds_normalized_bars_since_close(monkeypatch):
     fetch_bars = AsyncMock(return_value=60)
     base_headers = {"x-internal-token": "test-token"}
 
+    # El manifest real certifica el bundle de memoria [20,25] (promoción
+    # 2026-10-07); este paso arranca con el modelo pre-memoria (20,24), así que
+    # el manifest parcheado declara (a) obs_shape [20,24] y (b) SIN vec_norm:
+    # el pkl real está guardado con obs (20,25) y SB3 (set_venv →
+    # check_shape_equal) rechazaría un DummyVecEnv (20,24).
+    legacy_manifest = {
+        "schema_version": 1,
+        "model_file": "ppo_trading_bot_v3.zip",
+        "model_sha256": "test" * 16,
+        "obs_shape": [20, 24],
+        "vec_norm_file": None,
+        "vec_norm_sha256": None,
+        "features": None,
+        "source": "test_legacy_contract",
+        "extra": {},
+    }
+
     with patch("main.init_pool", AsyncMock()), \
          patch("main.close_pool", AsyncMock()), \
+         patch("services.model_registry.validate_bundle",
+               return_value=legacy_manifest), \
          patch("routers.ai.is_news_blackout", AsyncMock(return_value=(False, None))), \
          patch("routers.ai.get_pool", return_value=MagicMock(execute=AsyncMock())), \
          patch("routers.ai.PPO.load", return_value=model_legacy), \

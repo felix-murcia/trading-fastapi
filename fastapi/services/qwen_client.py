@@ -90,7 +90,7 @@ def _classify_session(hour: int) -> str:
     17-23h como "Asia" (es la tarde de Nueva York) y 23-7h como
     "Weekend/Closed" (entre semana el mercado abre 24h: son Sydney/Tokio).
     La ventana 12-16 UTC es el solape Londres/NY — máxima liquidez — y merece
-    etiqueta propia: es cuando el veto decide sobre la señal más forte del día.
+    etiqueta propia: es cuando el veto decide sobre la señal más fuerte del día.
     """
     if 0 <= hour < 7:
         return "Asia"                # Tokio + Sídney (00-07 UTC)
@@ -147,6 +147,13 @@ async def query_qwen_unified(
     cycle_id: str,
     logger: logging.Logger,
     recent_insights: Optional[list[dict]] = None,
+    # Context injection (Fase 2: Qwen Context Awareness)
+    adx: Optional[float] = None,
+    sma200_dist: Optional[float] = None,
+    sma200_slope: Optional[float] = None,
+    regime: Optional[str] = None,
+    support_level: Optional[float] = None,
+    resistance_level: Optional[float] = None,
 ) -> dict:
     """
     Unified Qwen query — single call per candle.
@@ -160,38 +167,61 @@ async def query_qwen_unified(
         - regime: TRENDING/RANGING/VOLATILE/BREAKOUT
     """
     session = _classify_session(hour)
-    regime = _classify_regime(bb_pos, atr_pct, macd_hist)
+    if regime is None:
+        regime = _classify_regime(bb_pos, atr_pct, macd_hist)
+
+    # ADX-based regime detection (Fase 2: Qwen Context Awareness)
+    if adx is not None and adx < 0.25:
+        regime = "RANGING"
+    elif regime == "RANGING" and adx is not None and adx >= 0.25:
+        regime = "TRENDING"
 
     sl_pips = sl_proposed * 100.0
     tp_pips = tp_proposed * 200.0
     news_context = " ".join(str(news).split())[:600] or "Unavailable"
 
-    prompt = f"""Analyze this {symbol} H1 setup. Use the candle sequence as context.
+    # Build context injection for Qwen (Fase 2: Context Awareness)
+    context_lines = [
+        f"Context:",
+        f"- Symbol: {symbol} H1 setup",
+        f"- RSI(14): {rsi:.1f}",
+        f"- ATR: {atr:.5f} ({atr_pct:.2%} of price)",
+        f"- MACD histogram: {macd_hist:.6f}",
+        f"- Bollinger position: {bb_pos:.2f}",
+        f"- Range: {range_pct:.2%} of price",
+        f"- Last return: {last_ret:.3%}",
+        f"- Session: {session}",
+        f"- Regime: {regime}",
+        (f"- ADX: {adx:.3f}" if adx is not None else "- ADX: Unavailable"),
+    ]
 
-Context:
-- RSI(14): {rsi:.1f}
-- ATR: {atr:.5f} ({atr_pct:.2%} of price)
-- MACD histogram: {macd_hist:.6f}
-- Bollinger position: {bb_pos:.2f}
-- Range: {range_pct:.2%} of price
-- Last return: {last_ret:.3%}
-- Session: {session}
-- Regime: {regime}
-- Candles: {candle_context}
+    # Add SMA200 context if available (trend structure)
+    if sma200_dist is not None and sma200_slope is not None:
+        trend_dir = "ABOVE" if sma200_dist > 0 else "BELOW"
+        slope_dir = "RISING" if sma200_slope > 0 else "FALLING" if sma200_slope < 0 else "FLAT"
+        context_lines.append(f"- SMA200: Price {trend_dir} ({sma200_dist:.4f}), SMA200 {slope_dir} ({sma200_slope:+.4f})")
 
-News:
-{news_context}
+    if support_level is not None and resistance_level is not None:
+        context_lines.append(f"- Support: {support_level:.5f} | Resistance: {resistance_level:.5f}")
 
-ML Signal: {decision} with ML confidence {ml_prob:.3f}
+    context_lines.extend([
+        f"- Candles: {candle_context}",
+        "",
+        f"News: {news_context[:400] if news_context != 'Unavailable' else 'Unavailable'}",
+        "",
+        f"ML Signal: {decision} with ML confidence {ml_prob:.3f}",
+        "",
+        "Return EXACTLY JSON, no extra text:",
+        '{"quality": 7.5, "reason": "brief reason", "bias": "NEUTRAL", "confidence_modifier": 1.0,'
+        '  "sl_ok": true, "tp_ok": true, "sl_adjusted": 0.2000, "tp_adjusted": 0.4000,'
+        '  "regime": "TRENDING"}',
+        "",
+        "Fields: quality 0-10; reason max 12 words; bias BULLISH/BEARISH/NEUTRAL;",
+        "confidence_modifier 0.5-1.5; sl_ok/tp_ok booleans; adjusted SL 0.15-0.30,",
+        "TP 0.125-0.30 with TP:SL >=1.5; regime TRENDING/RANGING/VOLATILE/BREAKOUT.",
+    ])
 
-Return EXACTLY JSON, no extra text:
-{{"quality": 7.5, "reason": "brief reason", "bias": "NEUTRAL", "confidence_modifier": 1.0,
-  "sl_ok": true, "tp_ok": true, "sl_adjusted": {sl_proposed:.4f}, "tp_adjusted": {tp_proposed:.4f},
-  "regime": "{regime}"}}
-
-Fields: quality 0-10; reason max 12 words; bias BULLISH/BEARISH/NEUTRAL;
-confidence_modifier 0.5-1.5; sl_ok/tp_ok booleans; adjusted SL 0.15-0.30,
-TP 0.125-0.30 with TP:SL >=1.5; regime TRENDING/RANGING/VOLATILE/BREAKOUT."""
+    prompt = "\n".join(context_lines)
 
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:

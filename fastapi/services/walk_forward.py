@@ -357,6 +357,10 @@ def gate_walk_forward(report: WalkForwardReport, min_openings: int) -> GateDecis
     Con baseline (modelo activo existente): comparativo estricto — sin
     cambios. Sin baseline (primer modelo del par): umbrales canario
     absolutos (P3-3) — la vía que valida GBPUSD u otros pares nuevos.
+
+    NUEVO: Holdout POSITIVO OBLIGATORIO — el candidato debe ser > 0 en holdout
+    (y opcionalmente > baseline en holdout si existe). Esto evita promocionar
+    modelos que solo overfittean los folds (overfitting a folds).
     """
     cand = report.candidate
     details = {
@@ -389,6 +393,41 @@ def gate_walk_forward(report: WalkForwardReport, min_openings: int) -> GateDecis
         details["absolute_floor"] = absolute_floor
         failed_floor = next(k for k, v in absolute_floor.items() if not v)
         return GateDecision(False, f"absolute_floor_{failed_floor}", details)
+
+    # --- NUEVO: Holdout POSITIVO OBLIGATORIO ---
+    holdout_cand = report.holdout.get("candidate")
+    if holdout_cand is None:
+        return GateDecision(False, "holdout_missing", details)
+    
+    # segment_metrics devuelve "reward" y "expectancy" para holdout
+    holdout_sum_reward = holdout_cand.get("reward", 0.0)
+    holdout_expectancy = holdout_cand.get("expectancy", 0.0)
+    
+    # Holdout debe ser positivo en sum_reward y expectancy
+    holdout_floor = {
+        "sum_reward": holdout_sum_reward > 0.0,
+        "total_expectancy": holdout_expectancy > 0.0,
+    }
+    details["holdout"] = {
+        "candidate": holdout_cand,
+        "floor": holdout_floor,
+    }
+    
+    if not all(holdout_floor.values()):
+        failed_holdout = next(k for k, v in holdout_floor.items() if not v)
+        return GateDecision(False, f"holdout_floor_{failed_holdout}", details)
+
+    # Si hay baseline, también exigir holdout > baseline en holdout
+    if report.baseline is not None:
+        holdout_base = report.holdout.get("baseline")
+        if holdout_base is not None:
+            base_holdout_sum = holdout_base.get("reward", 0.0)
+            if not (holdout_sum_reward > base_holdout_sum):
+                details["holdout"]["candidate_vs_baseline"] = {
+                    "candidate_sum_reward": holdout_sum_reward,
+                    "baseline_sum_reward": base_holdout_sum,
+                }
+                return GateDecision(False, "holdout_vs_baseline_sum_reward", details)
 
     if report.baseline is None:
         if cand["total_openings"] < CANARY_MIN_OPENINGS:

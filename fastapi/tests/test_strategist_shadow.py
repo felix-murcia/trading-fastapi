@@ -550,6 +550,7 @@ def _post_predict(action, monkeypatch, position=0, *, deliberate_side_effect=Non
         stack.enter_context(patch("main.init_pool", AsyncMock()))
         stack.enter_context(patch("main.close_pool", AsyncMock()))
         stack.enter_context(patch("routers.ai.is_news_blackout", AsyncMock(return_value=(False, None))))
+        stack.enter_context(patch("routers.ai.fetch_bars_since_close", AsyncMock(return_value=None)))
         stack.enter_context(patch("routers.ai.get_pool", return_value=MagicMock(execute=AsyncMock())))
         stack.enter_context(patch("routers.ai.PPO.load", return_value=model))
         stack.enter_context(patch("services.news_scraper.get_macro_news", AsyncMock(return_value="No macro news")))

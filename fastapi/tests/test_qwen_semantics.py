@@ -119,8 +119,10 @@ def _mock_ppo_model():
     model.predict.return_value = (
         np.array([0.80, 0.18, 0.15, 0.15], dtype=np.float32), None
     )
-    # Espacios Box REALES: SB3 valida los spaces si el bundle declara vec_norm
-    model.observation_space = Box(-np.inf, np.inf, shape=(20, 24), dtype=np.float32)
+    # Espacios Box REALES: SB3 valida los spaces si el bundle declara vec_norm.
+    # Bundle EURUSD activo = memoria (manifest obs_shape [20,25], promoción
+    # 2026-10-07 06:30) → el mock debe coincidir con el manifest real.
+    model.observation_space = Box(-np.inf, np.inf, shape=(20, 25), dtype=np.float32)
     model.action_space = Box(-1.0, 1.0, shape=(4,), dtype=np.float32)
     dist = MagicMock()
     dist.distribution.mean.numpy.return_value = np.array(
@@ -138,6 +140,7 @@ def _post_predict(http_client_cls, monkeypatch):
     with patch("main.init_pool", AsyncMock()), \
          patch("main.close_pool", AsyncMock()), \
          patch("routers.ai.is_news_blackout", AsyncMock(return_value=(False, None))), \
+         patch("routers.ai.fetch_bars_since_close", AsyncMock(return_value=None)), \
          patch("routers.ai.get_pool", return_value=MagicMock(execute=AsyncMock())), \
          patch("routers.ai.PPO.load", return_value=_mock_ppo_model()), \
          patch("services.news_scraper.get_macro_news", AsyncMock(return_value="No macro news")), \

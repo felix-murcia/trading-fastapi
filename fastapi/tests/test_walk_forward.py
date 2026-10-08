@@ -203,7 +203,11 @@ def _report(cand, base=None, fold_wins=None, n_folds=4, folds=None):
         embargo_bars=20,
         train_bars=350,
         folds=folds if folds is not None else [],
-        holdout={"bars": 50, "candidate": {}, "baseline": None},
+        holdout={
+            "bars": 50, 
+            "candidate": {"reward": 5.0, "expectancy": 1.0}, 
+            "baseline": None
+        },
         candidate=cand,
         baseline=base,
         fold_wins=fold_wins,
@@ -456,4 +460,5 @@ class TestEvaluateWalkForward:
         assert report.fold_wins == 0
         decision = gate_walk_forward(report, min_openings=1)
         assert decision.ok is False
-        assert "sum_reward_strict" in decision.reason
+        # Con el nuevo gate, holdout se verifica primero: CAND peor que BASE en holdout → rechazo
+        assert decision.reason == "holdout_vs_baseline_sum_reward"

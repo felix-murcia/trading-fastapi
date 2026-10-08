@@ -461,9 +461,17 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     current_atr = float(df['atr'].iloc[-1]) if 'atr' in df.columns else 0.0001
     entry_p = req.entry_price if env_position != 0 and req.entry_price > 0 else current_price
 
-    # P2-1: mismos stops que el env de entrenamiento (production_stops) —
+# P2-1: mismos stops que el env de entrenamiento (production_stops) —
     # única fuente de verdad del contrato train/serve.
-    sl_pips, tp_pips = production_stops(current_atr, pip_size)
+    sl_pips, tp_pips = production_stops(
+        current_atr, pip_size,
+        swing_high=float(df['last_swing_high'].iloc[-1]) if 'last_swing_high' in df.columns else None,
+        swing_low=float(df['last_swing_low'].iloc[-1]) if 'last_swing_low' in df.columns else None,
+        resistance_level=float(df['resistance_level'].iloc[-1]) if 'resistance_level' in df.columns else None,
+        support_level=float(df['support_level'].iloc[-1]) if 'support_level' in df.columns else None,
+        current_price=current_price,
+        position=env_position,
+    )
     sl_distance_price = sl_pips * pip_size
 
     if env_position != 0 and req.entry_price > 0:
@@ -568,6 +576,8 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         cycle_id=cycle_id,
         logger=logger,
         recent_insights=recent_insights,
+        # Fase 2: Context injection for Qwen
+        adx=float(df['adx'].iloc[-1]) if 'adx' in df.columns else None,
     )
 
     final_decision = decision

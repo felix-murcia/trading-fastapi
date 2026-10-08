@@ -671,7 +671,8 @@ class TestDoRetrainPromotion:
         ar._log_retrain_event.assert_awaited_once()
         assert ar._log_retrain_event.await_args.args[0] == "retrain_rejected"
         reason = ar._log_retrain_event.await_args.args[1]["reason"]
-        assert reason.startswith("failed:")
+        # Con el nuevo gate, holdout se verifica primero: empate en holdout → rechazo
+        assert reason == "holdout_vs_baseline_sum_reward"
 
 
 class TestExperimentLifecycle:
@@ -720,7 +721,8 @@ class TestExperimentLifecycle:
         finish = ar.experiment_tracker.finish_experiment
         finish.assert_awaited_once()
         assert finish.await_args.args == (42, "rejected")
-        assert finish.await_args.kwargs["gate_reason"].startswith("failed:")
+        # Con el nuevo gate, holdout se verifica primero
+        assert finish.await_args.kwargs["gate_reason"] == "holdout_vs_baseline_sum_reward"
         assert finish.await_args.kwargs.get("model_sha256") is None
 
     @pytest.mark.asyncio
