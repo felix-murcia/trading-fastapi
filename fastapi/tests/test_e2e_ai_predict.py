@@ -559,11 +559,12 @@ class TestP1TimeStopAndCooldownServe:
 
     def test_p1_boundaries_pin_confirmed_parameters(self):
         from ml.trading_env_v2 import CHURN_BARS, TIME_STOP_BARS
-        from routers.ai import _TIME_STOP_M5_BARS
+        from routers.ai import _M5_PER_H1
 
         assert CHURN_BARS == 2                    # fronteras 2/3 del cooldown
         assert TIME_STOP_BARS == 12               # 12 velas H1 = fronteras 143/144
-        assert _TIME_STOP_M5_BARS == TIME_STOP_BARS * 12 == 144
+        assert _M5_PER_H1 == 12                   # conversión edad EA (M5) → H1
+        assert TIME_STOP_BARS * _M5_PER_H1 == 144 # frontera en pasos M5 que mide el EA
 
     def test_time_stop_sends_close_at_144_m5_steps(self):
         with self._serve(self._model()) as (client, audit):
@@ -592,6 +593,37 @@ class TestP1TimeStopAndCooldownServe:
         trace = self._cycle_audit(audit)
         assert trace["time_stop"] is False
         assert trace["veto_reason"] is None
+
+    def test_holding_norm_converts_m5_steps_to_h1_domain(self, monkeypatch):
+        """holding_norm (fix de unidades, Félix 2026-10-08): el EA mide
+        `steps_in_trade` en pasos M5 y el canal lo normaliza contra
+        max_holding_steps=120 H1 → serve convierte M5→H1 (//_M5_PER_H1)
+        ANTES de build_v3_observation. 60 M5 (1 h) → 5/120 ≈ 0.042; sin la
+        conversión el canal daba 0.5 a la 1.ª hora y saturaba a 1.0 a las 2 h,
+        mientras el env entrena con barras H1 (paridad restaurada)."""
+        from routers.ai import Brain
+
+        model = self._model()
+        with self._serve(model) as (client, audit):
+            # Brain SIN VecNormalize → assertamos el obs CRUDO que construye
+            # serve (el contrato de unidades, no las stats de normalización).
+            monkeypatch.setitem(routers.ai._BRAINS, "EURUSD", Brain(
+                model=model, vec_norm=None, memory_channel=True,
+                bundle={"model_sha256": "b" * 64, "vec_norm_sha256": None,
+                        "source": "test", "loaded_at": "2026-10-08T00:00:00+00:00"},
+            ))
+            response = self._predict(client, {
+                "position": 1, "entry_price": 1.1000, "sl_price": 1.0985,
+                "tp_price": 1.1030, "steps_in_trade": 60,
+            })
+
+        assert response.status_code == 200, response.text
+        obs = model.predict.call_args[0][0]
+        # 17 market features + holding_norm (6º canal de estado) = col 23
+        assert obs[0, 23] == pytest.approx(5 / 120)
+        trace = self._cycle_audit(audit)
+        assert trace["steps_in_trade_h1"] == 5       # traza en el dominio entrenado
+        assert trace["time_stop"] is False           # 5 < 12: aún lejos del cierre
 
     @pytest.mark.parametrize("bars", [0, 1, 2])
     def test_cooldown_blocks_entry_within_churn_window(self, bars):

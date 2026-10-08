@@ -83,13 +83,15 @@ QWEN_URL = getattr(settings, "qwen_url", "http://100.90.16.33:8080/v1/chat/compl
 QUALITY_THRESHOLD = 5.0
 RANGING_VETO = True
 
-# P1 / H4 (parámetro confirmado por Félix 2026-10-08): time-stop = 12 velas
-# H1 — `TIME_STOP_BARS` es la fuente única (env de entrenamiento). El EA mide
-# la edad de la posición en pasos M5 ((TimeCurrent−pTime)/PeriodSeconds(M5),
-# L310), así que el umbral serve se expresa en M5: 12 × PeriodSeconds(H1)/
-# PeriodSeconds(M5) = 144. Paridad en reloj: env cierra en la barra H1 12,
-# serve ordena CLOSE en el primer ciclo ≥ 12 h (desfase ≤ 5 min + barra).
-_TIME_STOP_M5_BARS = TIME_STOP_BARS * 12
+# holding_norm + time-stop — conversión de unidades (Félix 2026-10-08): el EA
+# mide la edad de la posición en pasos M5 ((TimeCurrent−pTime)/
+# PeriodSeconds(M5), L310) y env/obs trabajan en velas H1 (max_holding_steps
+# = 120, TIME_STOP_BARS=12) → serve convierte M5→H1 UNA vez y usa el dominio
+# entrenado en obs, time-stop y traza. Sin la conversión, holding_norm del
+# bundle saturaba a la 1.ª hora (60/120=0.5) frente a las 120 h del env.
+# Paridad en reloj: env cierra en la barra H1 12, serve ordena CLOSE en el
+# primer ciclo con edad ≥ 12 h (desfase ≤ 5 min + barra).
+_M5_PER_H1 = 12
 SL_MIN_NORM = 0.05
 SL_MAX_NORM = 0.30
 TP_MIN_NORM = 0.05
@@ -521,6 +523,8 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     bars_norm = None
     if brain.memory_channel:
         bars_norm = 1.0 if bars_since_close is None else min(1.0, bars_since_close / max_holding_steps)
+    # Unidad única para edad/obs/time-stop: velas H1 (ver _M5_PER_H1).
+    steps_h1 = req.steps_in_trade // _M5_PER_H1
     raw_obs = build_v3_observation(
         market_values=market_slice,
         expected_market_features=len(features_list),
@@ -530,7 +534,7 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         sl_price=sl_p,
         tp_price=tp_p,
         current_atr=current_atr,
-        steps_in_trade=req.steps_in_trade,
+        steps_in_trade=steps_h1,
         max_holding_steps=max_holding_steps,
         balance=equity_val,
         initial_balance=10000.0,
@@ -608,16 +612,15 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
 
     final_decision = decision
     # P1 / H4 (Félix 2026-10-08): TIME-STOP — posición abierta ≥ 12 velas H1
-    # (_TIME_STOP_M5_BARS pasos M5, la unidad que mide el EA en L310) →
-    # cierre forzado. Es una SALIDA mecánica: va POR DELANTE de toda la
-    # cadena de vetos (en el env sólo SL/TP —precio intra-vela— compiten
-    # antes, secciones 1/1b). El EA ya sabe ejecutar `CLOSE` (L358 →
-    # CloseAllPositions) y lo reporta como exit_reason "ea" en el watch dog.
-    time_stop = env_position != 0 and req.steps_in_trade >= _TIME_STOP_M5_BARS
+    # (edad convertida a H1, ver _M5_PER_H1) → cierre forzado. Es una SALIDA
+    # mecánica: va POR DELANTE de toda la cadena de vetos (en el env sólo
+    # SL/TP —precio intra-vela— compiten antes, secciones 1/1b). El EA ya
+    # sabe ejecutar `CLOSE` (L358 → CloseAllPositions).
+    time_stop = env_position != 0 and steps_h1 >= TIME_STOP_BARS
     if time_stop:
         logger.warning(
-            "[%s] TIME-STOP ║ posición abierta %d pasos M5 ≥ %d (12 H1) → CLOSE",
-            cycle_id, req.steps_in_trade, _TIME_STOP_M5_BARS,
+            "[%s] TIME-STOP ║ posición abierta %d H1 ≥ %d → CLOSE",
+            cycle_id, steps_h1, TIME_STOP_BARS,
         )
         final_decision = "CLOSE"
     # P1 / H6: COOLDOWN de re-entrada — espejo serve del anti-churn del env
@@ -764,10 +767,12 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             # P1: traza de las salidas/vetos nuevos — `time_stop` es SALIDA
             # (aunque el veto mecánico de arriba sea true: el modelo dijo otra
             # cosa); `bars_since_close` justifica el cooldown (None = sin
-            # cierre reciente → sin cooldown).
+            # cierre reciente → sin cooldown); `steps_in_trade_h1` = edad de
+            # la posición en el dominio entrenado (H1, post-conversión).
             "time_stop": time_stop,
             "churn_cooldown": churn_cooldown,
             "bars_since_close": bars_since_close,
+            "steps_in_trade_h1": steps_h1,
             "deliberation": deliberation,
             "mt5_time": mt5_ts,
         },
