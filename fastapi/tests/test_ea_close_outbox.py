@@ -48,10 +48,11 @@ class TestCloseOutbox:
         src = _ea_source()
         assert "OUTBOX_MAX_PER_FLUSH" in src, "Falta límite de reintentos por ciclo"
 
-    def test_ea_version_bumped_to_13_2(self):
+    def test_ea_version_bumped_to_13_3(self):
         src = _ea_source()
-        assert re.search(r'#property\s+version\s+"13\.2"', src), "Falta bump a 13.2"
-        assert re.search(r'#define\s+EA_VERSION\s+"13\.2"', src)
+        # v13.3: P1 intraposición — ManageBreakeven (SL→entrada al +1R)
+        assert re.search(r'#property\s+version\s+"13\.3"', src), "Falta bump a 13.3"
+        assert re.search(r'#define\s+EA_VERSION\s+"13\.3"', src)
 
     def test_ea_filters_opening_deals_v13_2(self):
         # v13.2: OnTradeTransaction descarta DEAL_ENTRY_IN — el deal de

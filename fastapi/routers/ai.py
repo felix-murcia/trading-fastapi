@@ -23,9 +23,11 @@ from core.container import build_registry_from_settings
 from core.pair import PairRegistry, default_model_path
 from db.connection import get_pool
 from ml.trading_env_v2 import (
+    CHURN_BARS,
     EXTRA_STATE_FEATURES,
     FOREX_MARKET_FEATURE_COUNT,
     MARKET_FEATURES,
+    TIME_STOP_BARS,
     build_v3_observation,
     decode_v3_direction,
     engineer_market_features,
@@ -80,6 +82,14 @@ QWEN_URL = getattr(settings, "qwen_url", "http://100.90.16.33:8080/v1/chat/compl
 
 QUALITY_THRESHOLD = 5.0
 RANGING_VETO = True
+
+# P1 / H4 (parámetro confirmado por Félix 2026-10-08): time-stop = 12 velas
+# H1 — `TIME_STOP_BARS` es la fuente única (env de entrenamiento). El EA mide
+# la edad de la posición en pasos M5 ((TimeCurrent−pTime)/PeriodSeconds(M5),
+# L310), así que el umbral serve se expresa en M5: 12 × PeriodSeconds(H1)/
+# PeriodSeconds(M5) = 144. Paridad en reloj: env cierra en la barra H1 12,
+# serve ordena CLOSE en el primer ciclo ≥ 12 h (desfase ≤ 5 min + barra).
+_TIME_STOP_M5_BARS = TIME_STOP_BARS * 12
 SL_MIN_NORM = 0.05
 SL_MAX_NORM = 0.30
 TP_MIN_NORM = 0.05
@@ -99,9 +109,16 @@ def _veto_reason(
     qwen: dict,
     sizing_rejected: bool = False,
     position_rejected: bool = False,
+    time_stop: bool = False,
+    churn_rejected: bool = False,
 ) -> str | None:
     if original == final:
         return None
+    # P1 / H4: el time-stop no es un veto del modelo — es una SALIDA mecánica
+    # (posición ≥ 12 H1 → CLOSE). Explica un final CLOSE que ningún veto de
+    # la cadena puede justificar, así que va por delante de todo.
+    if time_stop:
+        return "time_stop"
     # A-1: el veto de posición es el más mecánico de todos — el EA lo ejecuta
     # en 3 puntos (L407/L440/L475) con MISMA variable pre-request, así que su
     # flag es autoridad absoluta: se declara antes que sizing y cualquier
@@ -115,6 +132,13 @@ def _veto_reason(
     # motivo (antes, 21 rechazos de sizing se atribuían a ranging/unknown_veto).
     if sizing_rejected:
         return "sizing_veto"
+    # P1 / H6: cooldown de re-entrada (espejo serve del CHURN_BARS del env).
+    # Declarado ANTES de los inferidos de Qwen: con final=HOLD y régimen
+    # RANGING, el ranging_veto de abajo se lo atribuiría indebidamente.
+    # Mutuamente excluyente con position_veto (position==0) y con sizing
+    # (la cadena ya revirtió a HOLD → sizing_below_min no se activa).
+    if churn_rejected:
+        return "churn_cooldown"
     if final == "HOLD" and qwen.get("regime") == "RANGING":
         return "ranging_veto"
     if final == "HOLD" and qwen.get("quality", 10) < QUALITY_THRESHOLD:
@@ -483,18 +507,20 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         tp_p = entry_p + tp_pips * pip_size if env_position == 1 else entry_p - tp_pips * pip_size
 
     market_slice = df[features_list].iloc[-20:].values
-    # Fase 3: contrato del obs según el bundle — con memoria (20,25) el
-    # canal bars_since_close se normaliza IGUAL que en el env
-    # (min(1, bars/max_holding_steps); 1.0 = sin cierre registrado o salida
-    # anterior a la ventana, idéntico al arranque del env). Bundle
-    # pre-memoria → sin canal (20,24), contrato intacto.
+    # Fase 3 / P1: UNA sola consulta de velas desde el último cierre —
+    # alimenta el canal de memoria del obs (bundle (20,25)) Y el veto de
+    # cooldown de re-entrada (espejo CHURN_BARS, H6). Con el bundle activo
+    # la memoria ya se consultaba en cada ciclo; para bundles legados pasa
+    # a consultarse también (el veto cooldown no depende del contrato del
+    # obs). `None` = sin cierre registrado o salida anterior a la ventana →
+    # normalización 1.0 y SIN cooldown, idéntico al env sin `ever_closed`.
+    bars_since_close = await fetch_bars_since_close(
+        sym, df=df, current_price=current_price, pip_size=pip_size,
+    )
     max_holding_steps = 120
     bars_norm = None
     if brain.memory_channel:
-        bars = await fetch_bars_since_close(
-            sym, df=df, current_price=current_price, pip_size=pip_size,
-        )
-        bars_norm = 1.0 if bars is None else min(1.0, bars / max_holding_steps)
+        bars_norm = 1.0 if bars_since_close is None else min(1.0, bars_since_close / max_holding_steps)
     raw_obs = build_v3_observation(
         market_values=market_slice,
         expected_market_features=len(features_list),
@@ -581,6 +607,28 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     )
 
     final_decision = decision
+    # P1 / H4 (Félix 2026-10-08): TIME-STOP — posición abierta ≥ 12 velas H1
+    # (_TIME_STOP_M5_BARS pasos M5, la unidad que mide el EA en L310) →
+    # cierre forzado. Es una SALIDA mecánica: va POR DELANTE de toda la
+    # cadena de vetos (en el env sólo SL/TP —precio intra-vela— compiten
+    # antes, secciones 1/1b). El EA ya sabe ejecutar `CLOSE` (L358 →
+    # CloseAllPositions) y lo reporta como exit_reason "ea" en el watch dog.
+    time_stop = env_position != 0 and req.steps_in_trade >= _TIME_STOP_M5_BARS
+    if time_stop:
+        logger.warning(
+            "[%s] TIME-STOP ║ posición abierta %d pasos M5 ≥ %d (12 H1) → CLOSE",
+            cycle_id, req.steps_in_trade, _TIME_STOP_M5_BARS,
+        )
+        final_decision = "CLOSE"
+    # P1 / H6: COOLDOWN de re-entrada — espejo serve del anti-churn del env
+    # (CHURN_BARS=2): ≤ 2 velas H1 desde el último cierre de trade_outcomes →
+    # sin entradas nuevas. Mutuamente excluyente con position_rejected
+    # (aquí position==0) y con time_stop (aquí position!=0).
+    churn_cooldown = (
+        env_position == 0
+        and bars_since_close is not None
+        and bars_since_close <= CHURN_BARS
+    )
     # A-1: flip con posición abierta → el EA lo rechaza siempre en ejecución
     # (L407/L440/L475: rejected_position_open) porque la salida es exclusiva
     # SL/TP. El backend lo declara AQUÍ, antes de la cadena Qwen y del sizing,
@@ -592,6 +640,12 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             "[%s] VETO POSICION ║ flip %s con posición abierta (pos=%d) → HOLD "
             "(coherente con EA: salida solo SL/TP)",
             cycle_id, final_decision, req.position,
+        )
+        final_decision = "HOLD"
+    elif churn_cooldown and final_decision in ("BUY", "SELL"):
+        logger.warning(
+            "[%s] VETO COOLDOWN ║ %d velas H1 desde el último cierre ≤ CHURN_BARS=%d → HOLD",
+            cycle_id, bars_since_close, CHURN_BARS,
         )
         final_decision = "HOLD"
     elif RANGING_VETO and qwen.get("regime") == "RANGING" and final_decision in ("BUY", "SELL"):
@@ -639,6 +693,8 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         decision, final_decision, qwen,
         sizing_rejected=sizing_below_min,
         position_rejected=position_rejected,
+        time_stop=time_stop,
+        churn_rejected=churn_cooldown,
     )
     try:
         deliberation = await deliberate(
@@ -705,6 +761,13 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             "veto": decision != final_decision,
             "veto_reason": veto_reason,
             "sizing_below_min": sizing_below_min,
+            # P1: traza de las salidas/vetos nuevos — `time_stop` es SALIDA
+            # (aunque el veto mecánico de arriba sea true: el modelo dijo otra
+            # cosa); `bars_since_close` justifica el cooldown (None = sin
+            # cierre reciente → sin cooldown).
+            "time_stop": time_stop,
+            "churn_cooldown": churn_cooldown,
+            "bars_since_close": bars_since_close,
             "deliberation": deliberation,
             "mt5_time": mt5_ts,
         },

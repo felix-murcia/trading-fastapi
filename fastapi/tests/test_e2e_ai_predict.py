@@ -1,11 +1,13 @@
 import json
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import numpy as np
 import pandas as pd
+import pytest
 from fastapi.testclient import TestClient
 from gymnasium.spaces import Box
 
@@ -162,7 +164,10 @@ def test_ai_predict_e2e_flow():
 def test_predict_memory_contract_adds_normalized_bars_since_close(monkeypatch):
     """Fase 3: bundle con memoria (20,25) → el obs lleva bars_since_close
     normalizado IGUAL que el env (min(1, bars/max_holding); None → 1.0);
-    el bundle pre-memoria (20,24) sigue sin canal y sin consultar la BD."""
+    el bundle pre-memoria (20,24) sigue sin canal en el obs (contrato
+    intacto). Desde P1 la consulta de velas desde el cierre se hace para
+    TODOS los bundles: la necesita el veto de cooldown (H6), agnóstico
+    del contrato del obs."""
     model_legacy = MagicMock()
     model_legacy.predict.return_value = (np.array([0.80, 0.18], dtype=np.float32), None)
     model_legacy.observation_space = Box(-np.inf, np.inf, shape=(20, 24), dtype=np.float32)
@@ -210,8 +215,10 @@ def test_predict_memory_contract_adds_normalized_bars_since_close(monkeypatch):
          patch("services.news_scraper.get_macro_news", AsyncMock(return_value="No macro news")), \
          patch("httpx.AsyncClient", FakeAsyncClient):
         with TestClient(app) as client:
-            # 1) arranque con el bundle pre-memoria real → obs (20,24) y
-            #    NINGUNA consulta de velas desde el cierre
+            # 1) arranque con el bundle pre-memoria real → obs (20,24), sin
+            #    canal en el obs (contrato intacto). La consulta de velas
+            #    desde el cierre ocurre igualmente (P1: la necesita el veto
+            #    de cooldown H6); bars=60 > CHURN_BARS → sin cooldown.
             r1 = client.post(
                 "/api/v1/ai/predict",
                 json={"symbol": "EURUSD", "timeframe": "H1", "position": 0},
@@ -220,7 +227,7 @@ def test_predict_memory_contract_adds_normalized_bars_since_close(monkeypatch):
             assert r1.status_code == 200, r1.text
             obs = model_legacy.predict.call_args[0][0]
             assert obs.shape == (20, 24)
-            fetch_bars.assert_not_awaited()
+            fetch_bars.assert_awaited_once()
 
             # 2) swap a un bundle con memoria (contrato (20,25)) → consulta
             #    las velas desde el cierre y normaliza como el env: 60/120
@@ -490,3 +497,133 @@ def test_v3_direction_decoding_preserves_buy_sell_hold_mapping():
     assert decode_v3_direction(0.0, current_position=0) == (0, "FLAT")
     assert decode_v3_direction(0.8, current_position=1) == (1, "HOLD")
     assert decode_v3_direction(-0.8, current_position=-1) == (-1, "HOLD")
+
+
+class TestP1TimeStopAndCooldownServe:
+    """P1 (Félix 2026-10-08): time-stop serve + cooldown de re-entrada (H6).
+
+    - time-stop: posición abierta ≥ 12 H1 = 144 pasos M5 (la unidad que mide
+      el EA: (TimeCurrent−pTime)/PeriodSeconds(M5)) → `decision=CLOSE` con
+      `time_stop=True` y `veto_reason=time_stop`: es una SALIDA mecánica,
+      gana a toda la cadena Qwen/vetos.
+    - cooldown: ≤ CHURN_BARS=2 velas H1 desde el último cierre de
+      `trade_outcomes` → BUY/SELL revertido a HOLD (`churn_cooldown`):
+      espejo serve del anti-churn del env entrenado.
+    - audit_log (ai_predict_cycle) lleva `time_stop`, `churn_cooldown` y
+      `bars_since_close` para que la traza distinga cada salida/veto."""
+
+    @staticmethod
+    def _model(direction=0.80, volume=0.18):
+        model = MagicMock()
+        model.predict.return_value = (
+            np.array([direction, volume, 0.15, 0.15], dtype=np.float32), None,
+        )
+        # Bundle EURUSD activo = memoria (manifest obs_shape [20,25])
+        model.observation_space = Box(-np.inf, np.inf, shape=(20, 25), dtype=np.float32)
+        model.action_space = Box(-1.0, 1.0, shape=(4,), dtype=np.float32)
+        dist = MagicMock()
+        dist.distribution.mean.numpy.return_value = np.array([0.1, 0.1, 0.1, 0.1], dtype=np.float32)
+        dist.distribution.stddev.numpy.return_value = np.array([0.5, 0.5, 0.5, 0.5], dtype=np.float32)
+        model.policy.get_distribution.return_value = dist
+        return model
+
+    @staticmethod
+    @contextmanager
+    def _serve(model, bars=None):
+        with patch("main.init_pool", AsyncMock()), \
+             patch("main.close_pool", AsyncMock()), \
+             patch("routers.ai.is_news_blackout", AsyncMock(return_value=(False, None))), \
+             patch("routers.ai.fetch_bars_since_close", AsyncMock(return_value=bars)), \
+             patch("routers.ai.get_pool", return_value=MagicMock(execute=AsyncMock())), \
+             patch("routers.ai.PPO.load", return_value=model), \
+             patch("services.news_scraper.get_macro_news", AsyncMock(return_value="No macro news")), \
+             patch("routers.ai.log_to_audit", AsyncMock()) as audit, \
+             patch("httpx.AsyncClient", FakeAsyncClient):
+            with TestClient(app) as client:
+                yield client, audit
+
+    @staticmethod
+    def _predict(client, body):
+        payload = {"symbol": "EURUSD", "timeframe": "M5", **body}
+        return client.post(
+            "/api/v1/ai/predict",
+            json=payload,
+            headers={"x-internal-token": "test-token", "x-cycle-id": "p1-serve"},
+        )
+
+    @staticmethod
+    def _cycle_audit(audit_mock):
+        calls = [c for c in audit_mock.await_args_list if c.args[0] == "ai_predict_cycle"]
+        assert calls, "sin traza ai_predict_cycle en audit_log"
+        return calls[-1].args[1]
+
+    def test_p1_boundaries_pin_confirmed_parameters(self):
+        from ml.trading_env_v2 import CHURN_BARS, TIME_STOP_BARS
+        from routers.ai import _TIME_STOP_M5_BARS
+
+        assert CHURN_BARS == 2                    # fronteras 2/3 del cooldown
+        assert TIME_STOP_BARS == 12               # 12 velas H1 = fronteras 143/144
+        assert _TIME_STOP_M5_BARS == TIME_STOP_BARS * 12 == 144
+
+    def test_time_stop_sends_close_at_144_m5_steps(self):
+        with self._serve(self._model()) as (client, audit):
+            response = self._predict(client, {
+                "position": 1, "entry_price": 1.1000, "sl_price": 1.0985,
+                "tp_price": 1.1030, "steps_in_trade": 144,
+            })
+
+        assert response.status_code == 200, response.text
+        assert response.json()["decision"] == "CLOSE"
+        trace = self._cycle_audit(audit)
+        assert trace["time_stop"] is True
+        assert trace["veto_reason"] == "time_stop"
+        assert trace["churn_cooldown"] is False
+
+    @pytest.mark.parametrize("steps_in_trade", [0, 143])
+    def test_no_time_stop_below_threshold(self, steps_in_trade):
+        with self._serve(self._model()) as (client, audit):
+            response = self._predict(client, {
+                "position": 1, "entry_price": 1.1000, "sl_price": 1.0985,
+                "tp_price": 1.1030, "steps_in_trade": steps_in_trade,
+            })
+
+        assert response.status_code == 200, response.text
+        assert response.json()["decision"] == "HOLD"   # modelo long + posición long
+        trace = self._cycle_audit(audit)
+        assert trace["time_stop"] is False
+        assert trace["veto_reason"] is None
+
+    @pytest.mark.parametrize("bars", [0, 1, 2])
+    def test_cooldown_blocks_entry_within_churn_window(self, bars):
+        assert bars <= 2                            # frontera = CHURN_BARS
+        with self._serve(self._model(), bars=bars) as (client, audit):
+            response = self._predict(client, {"position": 0, "steps_in_trade": 0})
+
+        assert response.status_code == 200, response.text
+        assert response.json()["decision"] == "HOLD"
+        trace = self._cycle_audit(audit)
+        assert trace["churn_cooldown"] is True
+        assert trace["veto_reason"] == "churn_cooldown"
+        assert trace["bars_since_close"] == bars
+
+    @pytest.mark.parametrize("bars", [3, None])
+    def test_cooldown_releases_outside_window_or_without_history(self, bars):
+        with self._serve(self._model(), bars=bars) as (client, audit):
+            response = self._predict(client, {"position": 0, "steps_in_trade": 0})
+
+        assert response.status_code == 200, response.text
+        assert response.json()["decision"] == "BUY"
+        trace = self._cycle_audit(audit)
+        assert trace["churn_cooldown"] is False
+        assert trace["veto_reason"] is None
+
+    def test_veto_reason_time_stop_and_churn_are_authority(self):
+        from routers.ai import _veto_reason
+
+        ranging = {"regime": "RANGING", "quality": 9.0, "bias": "NEUTRAL"}
+        # La salida por time-stop va por delante de cualquier veto de Qwen
+        assert _veto_reason("HOLD", "CLOSE", ranging, time_stop=True) == "time_stop"
+        # El cooldown va por delante del ranging INFERIDO (final=HOLD+RANGING)
+        assert _veto_reason("BUY", "HOLD", ranging, churn_rejected=True) == "churn_cooldown"
+        # Sin flags: el inferido sigue siendo la autoridad (sin regresión)
+        assert _veto_reason("BUY", "HOLD", ranging) == "ranging_veto"

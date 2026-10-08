@@ -31,7 +31,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from ml.trading_env_v2 import CHURN_BARS, ForexTradingEnvV2, engineer_market_features
+from ml.trading_env_v2 import (
+    CHURN_BARS,
+    TIME_STOP_BARS,
+    ForexTradingEnvV2,
+    engineer_market_features,
+)
 
 INITIAL = 1000.0
 LOT = 100000.0
@@ -574,3 +579,125 @@ class TestPositionVetoParity:
         assert info["trade_pnls"] == pytest.approx(
             [VOL_OPEN * LOT * (-2 * HALF_SPREAD) - VOL_OPEN * COMM]
         )
+
+
+class TestP1TimeStopAndBreakeven:
+    """P1 intraposición (backlog H4, 2026-10-02; parámetros confirmados por
+    Félix 2026-10-08): time-stop = 12 velas H1, breakeven = 1R.
+
+    El EA ejecuta estas salidas en producción (CLOSE por time-stop enviado
+    desde /predict; ManageBreakeven a tick) — el env debe modelar la misma
+    regla para que el retrain coordinado entrene en el mundo que se despliega
+    (D3: el MDP entrenado es el MDP ejecutado)."""
+
+    # dir 0.5 → target=1 = HOLD con la posición long; vol 0 → size_ppo_position
+    # devuelve 0.0 → NUNCA reabre si un cierre deja la posición plana (así un
+    # cierre por time-stop/SL queda observable en position/trade_count).
+    HOLD_LONG = np.array([0.5, 0.0], dtype=np.float32)
+
+    def test_p1_boundaries_pin_confirmed_parameters(self):
+        assert TIME_STOP_BARS == 12   # fronteras 11/12 de esta clase
+
+    def test_time_stop_keeps_position_alive_at_11_bars(self):
+        env, _ = _make_opened_env()
+        for _ in range(11):
+            env.step(self.HOLD_LONG)
+
+        assert env.position == 1
+        assert env.steps_in_trade == 11
+        assert env.trade_count == 0
+
+    def test_time_stop_closes_exactly_at_12_h1_bars(self):
+        env, entry = _make_opened_env()
+        for _ in range(11):
+            env.step(self.HOLD_LONG)
+
+        _, _, _, _, info = env.step(self.HOLD_LONG)   # 12.ª vela: time-stop
+
+        assert env.position == 0
+        assert env.trade_count == 1
+        # salida al mark del cierre (entry + spread completo): −1.76 €
+        expected_pnl = VOL_OPEN * LOT * (-2 * HALF_SPREAD) - VOL_OPEN * COMM
+        assert env.trade_pnls[0] == pytest.approx(expected_pnl)
+        assert info["balance"] == pytest.approx(
+            INITIAL - VOL_OPEN * COMM + expected_pnl
+        )
+        # regla 3 €: cerrar en −1.76 € (o en +2 €) es pérdida en simulación
+        assert env.wins == 0 and env.losses == 1
+
+    def test_time_stop_yields_to_sl_when_both_coincide_on_bar_12(self):
+        """Prioridad documentada: SL/TP (precio, intra-vela) > time-stop.
+        En la vela 12 el low toca el SL → se sale AL SL (−12.56 €), no al
+        mark del time-stop (−1.76 €): los pnl distinguen la rama.
+
+        El low se inyecta DESPUÉS de engineer: inyectarlo en el crudo
+        dispara el bfill de `last_swing_low` y cambia la SL estructural de
+        la apertura (15 p → 10 p, vol 0.08 → 0.12) — contrato del fixture."""
+        env = _env(engineer_market_features(_raw_df()))
+        env.reset()
+        env.df.loc[17, "low"] = 1.0985                 # idx17 = orig36 = vela 12
+        env.step(OPEN)                                # abre en 1.1000 (15 p/0.08)
+        assert env.sl_pips == pytest.approx(SL_PIPS) and env.volume == VOL_OPEN
+        for _ in range(11):
+            env.step(self.HOLD_LONG)                  # mantiene
+        assert env.position == 1 and env.steps_in_trade == 11
+
+        env.step(self.HOLD_LONG)                      # low ≤ SL y edad 12
+
+        assert env.position == 0
+        assert env.trade_pnls[0] == pytest.approx(
+            VOL_OPEN * LOT * (-SL_PIPS * 0.0001) - VOL_OPEN * COMM
+        )
+
+    def test_breakeven_moves_sl_to_entry_at_1r_with_trailing_disabled(self):
+        # Salto +20 pips → mark−entry = 18.5 p ≥ R (15 p) → SL := entrada.
+        # trailing_enabled=False: el breakeven es independiente del trailing
+        # (paridad con EnableBreakeven del EA, input separado).
+        env = _env(
+            engineer_market_features(_df_step_move(0.0020)),
+            trailing_enabled=False,
+        )
+        env.reset()
+        env.step(OPEN)                                # abre en 1.1000
+        env.step(self.HOLD_LONG)                      # mantiene (1.1000)
+        assert env.position == 1 and env.sl_price < env.entry_price
+
+        env.step(self.HOLD_LONG)                      # salto +20 pips → +1R
+
+        assert env.position == 1
+        assert env.sl_price == pytest.approx(env.entry_price)
+        assert env.sl_pips == pytest.approx(0.0)      # recalculado al mover
+        # edad: 2 velas completas desde la de apertura (sin time-stop)
+        assert env.steps_in_trade == 2
+
+    def test_breakeven_ignores_move_below_1r(self):
+        # Salto +10 pips → mark−entry = 8.5 p < R (15 p): nada se mueve.
+        env = _env(engineer_market_features(_df_step_move(0.0010)))
+        env.reset()
+        env.step(OPEN)
+        env.step(self.HOLD_LONG)
+        sl_before = env.sl_price
+
+        env.step(self.HOLD_LONG)                      # salto +10 pips
+
+        assert env.position == 1
+        assert env.sl_price == pytest.approx(sl_before)
+        assert env.sl_price < env.entry_price
+
+    def test_breakeven_keeps_sl_already_raised_by_trailing(self):
+        # trailing_atr_mult=0 → minTrail fijo 15 p: el trailing gana la
+        # carrera en el salto (activación también +1R → SL := entry+0.0015)
+        # y riskDist queda ≤ 0 → el breakeven no lo rebaja a la entrada.
+        env = _env(
+            engineer_market_features(_df_step_move(0.0020)),
+            trailing_atr_mult=0.0,
+        )
+        env.reset()
+        env.step(OPEN)
+        env.step(self.HOLD_LONG)
+
+        env.step(self.HOLD_LONG)                      # salto +20 pips
+
+        assert env.position == 1
+        assert env.sl_price == pytest.approx(env.entry_price + SL_PIPS * 0.0001)
+        assert env.sl_price > env.entry_price

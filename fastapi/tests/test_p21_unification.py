@@ -233,7 +233,11 @@ class TestTrailingMirrorsEA:
         assert env.sl_price < entry   # SL en beneficio (espejo BUY)
 
     def test_trailing_disabled_keeps_initial_sl(self):
-        env, entry = self._opened(trailing_enabled=False)
+        # P1: el env modela los DOS inputs independientes del EA
+        # (EnableTrailing / EnableBreakeven) — para aislar el trailing aquí se
+        # desactivan AMBOS: con breakeven activo, close = entry+23.8p (≥1R)
+        # movería la SL a la entrada.
+        env, entry = self._opened(trailing_enabled=False, breakeven_enabled=False)
         sl_before = env.sl_price
         env.df.loc[6, ["high", "low", "close"]] = [
             entry + 0.0025, entry - 0.0010, entry + 0.0023,

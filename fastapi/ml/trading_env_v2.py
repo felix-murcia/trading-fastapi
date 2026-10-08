@@ -77,6 +77,13 @@ MIN_ATR_FOR_ENTRY = 0.0004
 # por lot) — ancla de política declarada, no coste de bróker (ver O-2).
 CHURN_BARS = 2
 
+# P1 / H4 (backlog 2026-10-02; parámetro confirmado por Félix 2026-10-08):
+# time-stop — una posición abierta >= TIME_STOP_BARS velas H1 se cierra al
+# mark de esa vela (corta posiciones estancadas 12 h+, pierna SL tóxica).
+# Serve convierte a la unidad que mide el EA: TIME_STOP_BARS × 12 pasos M5
+# (PeriodSeconds(H1)/PeriodSeconds(M5)) — ver routers/ai.py `_TIME_STOP_M5_BARS`.
+TIME_STOP_BARS = 12
+
 
 def engineer_market_features(df: pd.DataFrame) -> pd.DataFrame:
     """Calcula indicadores técnicos normalizados y acotados para redes neuronales.
@@ -436,6 +443,7 @@ class ForexTradingEnvV2(gym.Env):
         real_outcomes: Optional[list] = None,
         real_outcome_weight: float = 0.1,
         trailing_enabled: bool = True,
+        breakeven_enabled: bool = True,
         trailing_percent: float = 0.25,
         trailing_min_pips: float = 15.0,
         trailing_atr_mult: float = 2.0,
@@ -463,6 +471,10 @@ class ForexTradingEnvV2(gym.Env):
         # (SYMBOL_TRADE_STOPS_LEVEL ≈ 1 pip). P2-1: el env modela lo que
         # el EA ejecuta.
         self.trailing_enabled = trailing_enabled
+        # P1: espejo del input independiente `EnableBreakeven` del EA — el EA
+        # puede activar el breakeven sin el trailing, y el env debe modelar
+        # esa combinación (paridad D3).
+        self.breakeven_enabled = breakeven_enabled
         self.trailing_percent = trailing_percent
         self.trailing_min_pips = trailing_min_pips
         self.trailing_atr_mult = trailing_atr_mult
@@ -646,6 +658,14 @@ class ForexTradingEnvV2(gym.Env):
         last_realized_pnl = 0.0
         churn_penalty = 0.0
 
+        # P1 / H4: la edad de la posición avanza ANTES del bloqueo de salidas
+        # para que el time-stop mida las velas completas al cierre de ESTA
+        # vela (apertura en T → cierre en T+TIME_STOP_BARS = 12 velas exactas).
+        # Estados finales idénticos al incremento antiguo (sección 6): todo
+        # cierre o apertura resetea steps_in_trade a 0 por delante.
+        if self.position != 0:
+            self.steps_in_trade += 1
+
         # -------------------------------------------------------------
         # 1. Chequeo de salidas intra-vela (High/Low)
         # -------------------------------------------------------------
@@ -668,6 +688,17 @@ class ForexTradingEnvV2(gym.Env):
             elif hit_tp:
                 close_reason = 'tp'
                 exit_price = self.tp_price
+
+        # -------------------------------------------------------------
+        # 1b. P1 / H4: TIME-STOP — posición >= TIME_STOP_BARS velas H1 →
+        #     cierre al mark de esta vela. Prioridad: SL/TP (precio,
+        #     intra-vela) gana sobre el cierre por tiempo; el FLAT del
+        #     agente (sección 2) queda DESPUÉS — con la misma edad decide
+        #     la salida por tiempo (cierra con cualquier acción).
+        # -------------------------------------------------------------
+        if close_reason is None and self.position != 0 and self.steps_in_trade >= TIME_STOP_BARS:
+            close_reason = 'time_stop'
+            exit_price = close_price - (self.spread / 2.0) if self.position == 1 else close_price + (self.spread / 2.0)
 
         # -------------------------------------------------------------
         # 2. Cierre discrecional del agente (FLAT → CLOSE)
@@ -798,7 +829,7 @@ class ForexTradingEnvV2(gym.Env):
                 risk_penalty = (capital_at_risk / self.balance) * 0.02
 
         elif self.position != 0:
-            self.steps_in_trade += 1
+            # (P1: la edad `steps_in_trade` ya avanzó al inicio del paso)
             # Mark-to-market con precio Bid/Ask de cierre
             mark_price = close_price - (self.spread / 2.0) if self.position == 1 else close_price + (self.spread / 2.0)
             unrealized = (self.volume * self.lot_size * (mark_price - self.entry_price)) if self.position == 1 else (self.volume * self.lot_size * (self.entry_price - mark_price))
@@ -808,9 +839,12 @@ class ForexTradingEnvV2(gym.Env):
         # 4b. Trailing stop espejo del EA (P2-1) — se calcula con el close de
         #     esta vela y rige desde la SIGUIENTE (sin lookahead: el EA lo hace
         #     con ticks dentro de la vela; se aproxima sin ver el futuro).
+        #     P1: el breakeven se evalúa DESPUÉS (paridad con el orden de
+        #     llamada del EA: ManageTrailingStop → ManageBreakeven).
         # -------------------------------------------------------------
         if self.position != 0:
             self._apply_trailing(close_price, float(candle["atr"]))
+            self._apply_breakeven(close_price)
 
         # -------------------------------------------------------------
         # 5. Cálculo del Reward Diferencial (Moody & Saffell)
@@ -897,6 +931,8 @@ class ForexTradingEnvV2(gym.Env):
         ASK/BID del EA. `sl_pips` se recalcula SOLO si el SL se movió (evita
         arrastrar ruido de coma flotante en el caso habitual).
         """
+        # P1: los dos mecanismos intraposición del EA son inputs INDEPENDIENTES
+        # (EnableTrailing / EnableBreakeven) — gates como en el OnTick del EA.
         if not self.trailing_enabled or self.position == 0 or self.sl_price == 0.0:
             return
 
@@ -941,6 +977,61 @@ class ForexTradingEnvV2(gym.Env):
                 and new_sl >= mark_price + min_stop_dist
             ):
                 self.sl_price = new_sl
+                moved = True
+
+        if moved:
+            self.sl_pips = abs(self.entry_price - self.sl_price) / self.pip_size
+
+    def _apply_breakeven(self, close_price: float) -> None:
+        """Breakeven a 1R (P1, parámetro confirmado por Félix 2026-10-08).
+
+        Espejo de `ManageBreakeven` del EA — se ejecuta DESPUÉS del trailing
+        (mismo orden de llamada) y con la misma estructura de guards:
+        - Sólo actúa si el SL sigue por DEBAJO de la entrada: si el trailing
+          ya lo movió por encima (su activación es también +1R), riskDist ≤ 0
+          y ambos retornan igual que el `return` del EA.
+        - Riesgo R = |entry − SL actual| (con el SL intacto = riesgo inicial).
+        - Disparo: mark (bid/ask con spread,≈ el precio que el EA lee con
+          BID/ASK) alcanza +1R → el SL pasa a la entrada.
+        - Guard de stops-level: el nuevo SL sólo aplica a ≥ min_stop_dist del
+          mark (mismo `newSL ≤/≥ precio ∓ minStopDist` del EA).
+        `sl_pips` se recalcula SÓLO si el SL se movió (convención de
+        `_apply_trailing`).
+        """
+        if (
+            not self.breakeven_enabled
+            or self.position == 0
+            or self.sl_price == 0.0
+            or self.entry_price == 0.0
+        ):
+            return
+
+        mark_price = (
+            close_price - (self.spread / 2.0) if self.position == 1
+            else close_price + (self.spread / 2.0)
+        )
+        min_stop_dist = self.min_stop_dist_pips * self.pip_size
+
+        moved = False
+        if self.position == 1:
+            risk = self.entry_price - self.sl_price
+            if risk <= 0:
+                return
+            if (
+                mark_price - self.entry_price >= risk
+                and self.entry_price <= mark_price - min_stop_dist
+            ):
+                self.sl_price = self.entry_price
+                moved = True
+        else:
+            risk = self.sl_price - self.entry_price
+            if risk <= 0:
+                return
+            if (
+                self.entry_price - mark_price >= risk
+                and self.entry_price >= mark_price + min_stop_dist
+            ):
+                self.sl_price = self.entry_price
                 moved = True
 
         if moved:

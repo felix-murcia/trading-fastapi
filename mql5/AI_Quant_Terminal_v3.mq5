@@ -6,10 +6,10 @@ Terminal de Ejecución y Telemetría para Cerebro Autónomo (FastAPI + PPO v3).
 - Rol del Servidor: Decisión direccional, dimensionamiento de lotes, SL, TP y gestión de riesgo.
 */
 #property copyright "AI Quant Terminal v3"
-#property version   "13.2"
+#property version   "13.3"
 #property strict
 
-#define EA_VERSION "13.2"
+#define EA_VERSION "13.3"
 
 #include <Trade\Trade.mqh>
 
@@ -33,6 +33,9 @@ input int    TrailingMinPips = 15;                      // Distancia mínima de 
 input int    TrailingATRMult  = 2;                      // Multiplicador ATR para distancia mínima dinámica
 input int    TrailingATRPeriod = 14;                    // Periodo ATR para trailing dinámico
 input int    TrailingManageEverySec = 5;                 // Cada cuántos segundos revisar trailing (0 = cada tick)
+
+input group "=== Breakeven ==="
+input bool   EnableBreakeven = true;                    // Mover SL a la entrada cuando el precio recupera 1R (P1)
 
 CTrade   trade;
 datetime lastCheckedBar = 0;
@@ -271,6 +274,13 @@ void OnTick()
    // 0. TRAILING STOP — se ejecuta cada tick (o cada N segundos) de forma independiente
    if(EnableTrailing)
       ManageTrailingStop();
+
+   // 0b. BREAKEVEN (P1) — SL a la entrada al +1R; se evalúa DESPUÉS del
+   // trailing, en el mismo orden que el env (_apply_trailing →
+   // _apply_breakeven): si el trailing ya puso el SL ≥ entrada, riskDist ≤ 0
+   // y ManageBreakeven no hace nada (paridad D3).
+   if(EnableBreakeven)
+      ManageBreakeven();
 
    // Ejecutar exclusivamente en la apertura de una nueva barra M5
    datetime currentBar = iTime(Symbol(), PERIOD_M5, 0);
@@ -614,6 +624,93 @@ void ManageTrailingStop()
             }
          }
       }
+  }
+
+
+//+------------------------------------------------------------------+
+//| Breakeven a 1R (P1): SL → entrada cuando el precio recupera el    |
+//| riesgo inicial. Se ejecuta DESPUÉS de ManageTrailingStop (OnTick)  |
+//| con los mismos guards que el env (`_apply_breakeven`, paridad D3): |
+//| riskDist ≤ 0 → return (SL ya ≥ entrada: trailing o breakeven       |
+//| previo) y guard de stops-level sobre el precio de cierre del       |
+//| lado (BID para BUY / ASK para SELL, el precio que cierra).        |
+//+------------------------------------------------------------------+
+void ManageBreakeven()
+  {
+   ulong ticket = 0;
+   double openPrice = 0.0;
+   double currentSL  = 0.0;
+   double currentTP  = 0.0;
+   long   posType = -1;
+   int digits = (int)SymbolInfoInteger(Symbol(), SYMBOL_DIGITS);
+   double point = SymbolInfoDouble(Symbol(), SYMBOL_POINT);
+   double pipSize = (digits == 3 || digits == 5) ? point * 10.0 : point;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong t = PositionGetTicket(i);
+      if(t <= 0) continue;
+      if(PositionGetString(POSITION_SYMBOL) != Symbol()) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
+
+      ticket = t;
+      posType = PositionGetInteger(POSITION_TYPE);
+      openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      currentSL  = PositionGetDouble(POSITION_SL);
+      currentTP  = PositionGetDouble(POSITION_TP);
+      break;
+     }
+
+   if(ticket == 0 || posType < 0) return;
+   if(currentSL <= 0)
+      return;   // sin SL colocado por el EA → nada que mover (igual que el trailing)
+
+   long stopsLevel = (long)SymbolInfoInteger(Symbol(), SYMBOL_TRADE_STOPS_LEVEL);
+   if(stopsLevel <= 0) stopsLevel = 10;
+   double minStopDist = stopsLevel * point;
+
+   if(posType == POSITION_TYPE_BUY)
+     {
+      double riskDist = openPrice - currentSL;
+      if(riskDist <= 0) return;   // SL ya en beneficio (trailing/breakeven previo)
+      double bid = SymbolInfoDouble(Symbol(), SYMBOL_BID);
+      // Disparo: beneficio ≥ 1R (bid − entrada ≥ riesgo). Guard: SL a la
+      // entrada exige al menos stopsLevel de distancia bajo el bid.
+      if((bid - openPrice) >= riskDist && (openPrice + minStopDist) <= bid)
+        {
+         double newSL = NormalizeDouble(openPrice, digits);
+         if(trade.PositionModify(ticket, newSL, currentTP))
+           {
+            PrintFormat("[BREAKEVEN] BUY ticket=%I64u SL -> entrada %.5f (risk=%.1f pips, bid=%.5f)",
+                        ticket, newSL, riskDist / pipSize, bid);
+           }
+         else
+           {
+            PrintFormat("[BREAKEVEN] BUY modify failed ret=%d SL=%.5f TP=%.5f", trade.ResultRetcode(), newSL, currentTP);
+           }
+        }
+     }
+   else if(posType == POSITION_TYPE_SELL)
+     {
+      double riskDist = currentSL - openPrice;
+      if(riskDist <= 0) return;   // SL ya en beneficio (trailing/breakeven previo)
+      double ask = SymbolInfoDouble(Symbol(), SYMBOL_ASK);
+      // Disparo: beneficio ≥ 1R (entrada − ask ≥ riesgo). Guard: SL a la
+      // entrada exige al menos stopsLevel de distancia sobre el ask.
+      if((openPrice - ask) >= riskDist && (openPrice - minStopDist) >= ask)
+        {
+         double newSL = NormalizeDouble(openPrice, digits);
+         if(trade.PositionModify(ticket, newSL, currentTP))
+           {
+            PrintFormat("[BREAKEVEN] SELL ticket=%I64u SL -> entrada %.5f (risk=%.1f pips, ask=%.5f)",
+                        ticket, newSL, riskDist / pipSize, ask);
+           }
+         else
+           {
+            PrintFormat("[BREAKEVEN] SELL modify failed ret=%d SL=%.5f TP=%.5f", trade.ResultRetcode(), newSL, currentTP);
+           }
+        }
+     }
   }
 
 
