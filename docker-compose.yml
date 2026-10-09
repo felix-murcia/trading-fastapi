@@ -26,6 +26,14 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # P2-H15 (2026-10-09): rotación de logs — sin esto el json-file crece sin
+    # límite y el volcado `docker logs` queda truncado/incompleto (H14/H15 de
+    # la auditoría: el blackout de 62h se detectó leyendo la BD, no por logs).
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
 
   postgres:
     image: postgres:16-alpine
@@ -42,6 +50,11 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./fastapi/db/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U trading -d trading"]
       interval: 5s

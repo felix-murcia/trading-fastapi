@@ -211,14 +211,29 @@ async def query_qwen_unified(
         "",
         f"ML Signal: {decision} with ML confidence {ml_prob:.3f}",
         "",
-        "Return EXACTLY JSON, no extra text:",
-        '{"quality": 7.5, "reason": "brief reason", "bias": "NEUTRAL", "confidence_modifier": 1.0,'
+        # P2-H2 (2026-10-09): el ejemplo único con quality=7.5/bias=NEUTRAL
+        # anclaba la respuesta en la plantilla (temperature=0.2 + modelo
+        # pequeño → quality_score constante 7.5 en 511+ ciclos = veto de
+        # calidad decorativo). Dos ejemplos con valores separados + rúbrica
+        # explícita: la propiedad ">=2 ejemplos distintos" la fija
+        # tests/test_qwen_prompt_anchoring.py.
+        "Return EXACTLY JSON, no extra text — ONE JSON object. Two FORMAT",
+        "examples with different scores; do NOT copy their values — judge THIS",
+        "setup on its own context:",
+        '{"quality": 8.5, "reason": "trend and ADX align", "bias": "BULLISH", "confidence_modifier": 1.3,'
         '  "sl_ok": true, "tp_ok": true, "sl_adjusted": 0.2000, "tp_adjusted": 0.4000,'
         '  "regime": "TRENDING"}',
+        '{"quality": 3.0, "reason": "range chop against signal", "bias": "BEARISH", "confidence_modifier": 0.7,'
+        '  "sl_ok": false, "tp_ok": true, "sl_adjusted": 0.1600, "tp_adjusted": 0.3200,'
+        '  "regime": "RANGING"}',
         "",
-        "Fields: quality 0-10; reason max 12 words; bias BULLISH/BEARISH/NEUTRAL;",
-        "confidence_modifier 0.5-1.5; sl_ok/tp_ok booleans; adjusted SL 0.15-0.30,",
-        "TP 0.125-0.30 with TP:SL >=1.5; regime TRENDING/RANGING/VOLATILE/BREAKOUT.",
+        "Fields: quality 0-10 — score on evidence: 7-10 only when trend/ADX/session",
+        "agree with the ML signal and structure is clean; 1-4 when ranging chop,",
+        "against-trend signal or unverified news; 4-7 when mixed. reason max 12 words;",
+        "bias BULLISH/BEARISH/NEUTRAL aligned with the setup; confidence_modifier",
+        "0.5-1.5 moving effective confidence the same direction; sl_ok/tp_ok booleans;",
+        "adjusted SL 0.15-0.30, TP 0.125-0.30 with TP:SL >=1.5; regime",
+        "TRENDING/RANGING/VOLATILE/BREAKOUT.",
     ])
 
     prompt = "\n".join(context_lines)

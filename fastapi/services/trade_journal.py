@@ -200,12 +200,15 @@ Was it:
 - "timing_error": entered at bad time (late/early)
 - "signal_quality_poor": original setup was low quality
 
-Respond EXACTLY JSON (no extra text):
-{{"insight": "momentum_fade", "confidence": 0.75, "regime": "RANGING", "quality_score": 3.5}}
+Respond EXACTLY JSON (no extra text) — ONE JSON object. Two FORMAT examples
+with different values; do NOT copy them — judge THIS trade on its own details:
+{{"insight": "trend_continuation", "confidence": 0.9, "regime": "TRENDING", "quality_score": 8.0}}
+{{"insight": "momentum_fade", "confidence": 0.3, "regime": "RANGING", "quality_score": 2.5}}
 
-confidence: how certain you are (0-1)
+confidence: how certain you are (0-1) — varies with how clear the pattern is
 regime: market regime at time of entry (TRENDING/RANGING/VOLATILE/BREAKOUT)
-quality_score: how good was the original setup (0-10)"""
+quality_score: how good was the original setup (0-10) — score on evidence:
+WIN with clean trend → higher, LOSS from chop or bad timing → lower"""
 
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:

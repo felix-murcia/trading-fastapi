@@ -105,6 +105,9 @@ async def lifespan(app: FastAPI):
     # P3-2d: calendario de retrain programado (revisión horaria).
     from services.auto_retrain import _retrain_schedule_loop
     _bg_tasks.add(asyncio.create_task(_retrain_schedule_loop()))
+    # P2-H14: watchdog de silencio de ai_predict_cycle (cada 5 min).
+    from services.predict_silence import _predict_silence_loop
+    _bg_tasks.add(asyncio.create_task(_predict_silence_loop()))
     yield
     for _task in _bg_tasks:
         _task.cancel()
