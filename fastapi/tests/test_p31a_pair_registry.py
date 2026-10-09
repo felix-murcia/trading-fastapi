@@ -210,8 +210,7 @@ class TestLateBinding:
                 hour=10,
                 news="none",
                 candle_context="h1",
-                sl_proposed=0.10,
-                tp_proposed=0.20,
+                # Paquete 1-4: sin sl_proposed/tp_proposed (contrato sin SL/TP)
                 cycle_id="cyc-1",
                 logger=logger,
             )
@@ -219,4 +218,8 @@ class TestLateBinding:
         assert m.await_args.kwargs["symbol"] == "EURUSD"
         assert m.await_args.kwargs["cycle_id"] == "cyc-1"
         assert m.await_args.kwargs["recent_insights"] is None
+        # El adapter delega TODO el contrato nuevo (contexto sin SL/TP)
+        assert m.await_args.kwargs["calendar_events"] is None
+        assert m.await_args.kwargs["sma200_dist"] is None
+        assert "sl_proposed" not in m.await_args.kwargs
         assert out == {"quality": 8.0}

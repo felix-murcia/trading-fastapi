@@ -42,7 +42,7 @@ from services.auto_retrain import (
     TRAINING_SYMBOL as _TRAINING_SYMBOL,
 )
 from services.market_time import utc_hour_from_candle
-from services.news_filter import is_news_blackout
+from services.news_filter import get_upcoming_news, is_news_blackout
 from services.performance_metrics import record_cycle_metrics
 from services.risk_guardian import observe_equity
 from services.risk_state_store import flush_risk_state
@@ -53,7 +53,7 @@ from services.position_sizing import (
     size_ppo_position,
 )
 from services.order_manager import mark_order_filled
-from services.qwen_client import query_qwen_unified, query_qwen_sltp_validator
+from services.qwen_client import query_qwen_unified
 from services.structured_logging import log_to_audit
 from services.strategist import (
     STRATEGIST_VERSION,
@@ -295,6 +295,29 @@ async def on_startup():
         load_inference_artifacts(ctx.config.symbol)
 
 
+def _sma200_context(raw_sorted: pd.DataFrame) -> tuple[Optional[float], Optional[float]]:
+    """(distancia, pendiente) del SMA200 sobre la serie ASCENDENTE completa.
+
+    Paquete 1-4 (Félix 2026-10-09): contexto de ESTRUCTURA de largo plazo para
+    el prompt de Qwen. Se calcula sobre la serie larga (hasta 240 velas) — las
+    features del modelo nunca la ven (siguen en las 120 recientes, obs
+    byte-idéntico).
+
+    Guardas — contexto de calidad, nunca inventado:
+      - sin columna `time` (serie sin orden fiable) → (None, None);
+      - < 205 velas (SMA200 + 5 velas de margen para la pendiente) → (None, None);
+      - NaN en los puntos que se leen (la media no está aún formada) → (None, None).
+    """
+    if "time" not in raw_sorted.columns or len(raw_sorted) < 205:
+        return None, None
+    close = raw_sorted["close"].astype(float)
+    sma = close.rolling(200).mean()
+    if pd.isna(sma.iloc[-1]) or pd.isna(sma.iloc[-6]):
+        return None, None
+    # dist: precio actual lejos de la media larga; slope: pendiente de 5 barras
+    return float(close.iloc[-1] - sma.iloc[-1]), float(sma.iloc[-1] - sma.iloc[-6])
+
+
 def _build_qwen_candle_context(df: pd.DataFrame, count: int = 10) -> str:
     """Compact candle sequence for Qwen: trend information without raw OHLC noise."""
     recent = df.tail(count).copy()
@@ -441,7 +464,10 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
                 timeout=2.0,
             )
             candles_task = client.get(
-                f"{settings.mt5_http_url}/api/v1/market/candles/latest?symbol_name={req.symbol}&timeframe=H1&count=120",
+                # Paquete 1-4: 240 velas para el SMA200 (contexto de estructura);
+                # las features del modelo se calculan sobre las 120 recientes
+                # (tail tras ordenar → obs byte-idéntico, ver test de wiring).
+                f"{settings.mt5_http_url}/api/v1/market/candles/latest?symbol_name={req.symbol}&timeframe=H1&count=240",
                 timeout=3.0,
             )
             equity_res, candles_res = await asyncio.gather(equity_task, candles_task)
@@ -483,7 +509,20 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     if raw_df.empty or len(raw_df) < 30:
         return PredictResponse(cycle_id=cycle_id, ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
 
-    df = engineer_market_features(raw_df)
+    # Paquete 1-4: la serie COMPLETA (hasta 240 velas) alimenta el contexto de
+    # estructura (SMA200); las features se calculan sólo sobre las 120 más
+    # recientes — idénticas al contrato de siempre (obs byte-idéntico con
+    # cualquier profundidad de fetch). Sin columna `time` → previo (sin orden
+    # fiable no hay SMA200 honesto).
+    if "time" in raw_df.columns:
+        raw_sorted = raw_df.sort_values("time").reset_index(drop=True)
+        sma200_dist, sma200_slope = _sma200_context(raw_sorted)
+        features_input = raw_sorted.tail(120)
+    else:
+        sma200_dist, sma200_slope = None, None
+        features_input = raw_df
+
+    df = engineer_market_features(features_input)
     features_list = get_market_features(df)
     # P0: leer de `df` (ordenada por engineer) — con raw_df (descendente del
     # MCP) el "reciente" eran las velas más ANTIGUAS y la hora de sesión la de
@@ -504,12 +543,16 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
 
 # P2-1: mismos stops que el env de entrenamiento (production_stops) —
     # única fuente de verdad del contrato train/serve.
+    # Paquete 1-4: niveles estructurales calculados UNA vez → reutilizados en
+    # stops Y en el prompt de Qwen (antes inline, sin ruta hacia el LLM).
+    support_level = float(df['support_level'].iloc[-1]) if 'support_level' in df.columns else None
+    resistance_level = float(df['resistance_level'].iloc[-1]) if 'resistance_level' in df.columns else None
     sl_pips, tp_pips = production_stops(
         current_atr, pip_size,
         swing_high=float(df['last_swing_high'].iloc[-1]) if 'last_swing_high' in df.columns else None,
         swing_low=float(df['last_swing_low'].iloc[-1]) if 'last_swing_low' in df.columns else None,
-        resistance_level=float(df['resistance_level'].iloc[-1]) if 'resistance_level' in df.columns else None,
-        support_level=float(df['support_level'].iloc[-1]) if 'support_level' in df.columns else None,
+        resistance_level=resistance_level,
+        support_level=support_level,
         current_price=current_price,
         position=env_position,
     )
@@ -612,6 +655,21 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         logger.warning("[%s] get_recent_insights falló: %s", cycle_id, e)
         recent_insights = []
 
+    # Paquete 1-4 (ítem 2): calendario económico en el prompt — ventana
+    # −120…+240 min (lo reciente ya reaccionado + lo próximo), orden
+    # ascendente y tope 3 (presupuesto de tokens). `None` con el filtro de
+    # noticias deshabilitado (el prompt lo dice explícitamente). Fetch DESPUÉS
+    # del bloque MT5: httpx está garantizado parcheado en la suite.
+    calendar_events: Optional[list[dict]] = None
+    if settings.news_filter_enabled:
+        upcoming = await get_upcoming_news([req.symbol])
+        calendar_events = [
+            ev for ev in upcoming
+            if -120.0 <= float(ev["minutes_until"]) <= 240.0
+        ]
+        calendar_events.sort(key=lambda ev: float(ev["minutes_until"]))
+        calendar_events = calendar_events[:3]
+
     # R1: contexto de re-entrada para el juicio del cerebro — sólo dentro
     # de la ventana y con entrada propuesta (lo único que el veto puede
     # bloquear); así la consulta extra al último cierre ocurre únicamente
@@ -641,13 +699,17 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         hour=utc_hour_from_candle(pd.to_datetime(df['time'].iloc[-1])),
         news=live_news,
         candle_context=candle_context,
-        sl_proposed=sl_pips_final / 100.0,
-        tp_proposed=tp_pips_final / 200.0,
         cycle_id=cycle_id,
         logger=logger,
         recent_insights=recent_insights,
         # Fase 2: Context injection for Qwen
         adx=float(df['adx'].iloc[-1]) if 'adx' in df.columns else None,
+        # Paquete 1-4: estructura de largo plazo + niveles S/R + calendario
+        sma200_dist=sma200_dist,
+        sma200_slope=sma200_slope,
+        support_level=support_level,
+        resistance_level=resistance_level,
+        calendar_events=calendar_events,
         # R1: juicio de re-entrada con el contexto del cierre reciente
         reentry=reentry,
     )

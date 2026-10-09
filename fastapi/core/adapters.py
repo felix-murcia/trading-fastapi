@@ -84,7 +84,12 @@ class AiModelStoreAdapter:
 
 
 class QwenLLMAdapter:
-    """`LLMPort` sobre `services.qwen_client`."""
+    """`LLMPort` sobre `services.qwen_client`.
+
+    Firma en paridad con `query_qwen_unified` (sin SL/TP — paquete 1-4 — y
+    con todo el contexto nuevo: ADX, régimen, SMA200, S/R, re-entrada y
+    calendario).
+    """
 
     async def query_unified(
         self,
@@ -101,11 +106,17 @@ class QwenLLMAdapter:
         hour: int,
         news: str,
         candle_context: str,
-        sl_proposed: float,
-        tp_proposed: float,
         cycle_id: str,
         logger: logging.Logger,
         recent_insights: Optional[list[dict]] = None,
+        adx: Optional[float] = None,
+        sma200_dist: Optional[float] = None,
+        sma200_slope: Optional[float] = None,
+        regime: Optional[str] = None,
+        support_level: Optional[float] = None,
+        resistance_level: Optional[float] = None,
+        reentry: Optional[dict] = None,
+        calendar_events: Optional[list[dict]] = None,
     ) -> dict:
         from services import qwen_client
         return await qwen_client.query_qwen_unified(
@@ -122,9 +133,15 @@ class QwenLLMAdapter:
             hour=hour,
             news=news,
             candle_context=candle_context,
-            sl_proposed=sl_proposed,
-            tp_proposed=tp_proposed,
             cycle_id=cycle_id,
             logger=logger,
             recent_insights=recent_insights,
+            adx=adx,
+            sma200_dist=sma200_dist,
+            sma200_slope=sma200_slope,
+            regime=regime,
+            support_level=support_level,
+            resistance_level=resistance_level,
+            reentry=reentry,
+            calendar_events=calendar_events,
         )

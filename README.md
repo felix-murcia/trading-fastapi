@@ -413,43 +413,77 @@ Se están implementando 5 capacidades progresivas para aprovechar Qwen 4B local:
 ### Ejemplo de prompt enviado a Qwen 4B
 
 En cada ciclo de predicción, FastAPI construye un prompt unificado con el
-contexto técnico actual, las noticias disponibles, la señal del PPO y los
-parámetros de riesgo propuestos. Por ejemplo:
+contexto técnico actual (incluido estructura de largo plazo: SMA200 y niveles
+S/R), las noticias, el calendario económico, el journal de cierres recientes,
+la señal del PPO y el contexto de re-entrada. Ejemplo real de la estructura
+(paquete 1-4, 2026-10-09):
 
 ```text
-Analyze this EURUSD H1 trading setup comprehensively.
-
-Market Context:
+Context:
+- Symbol: EURUSD H1 setup
 - RSI(14): 62.4
 - ATR: 0.00125 (0.11% of price)
-- MACD histogram: 0.000318
+- MACD histogram: 0.000150
 - Bollinger position: 0.74
 - Range: 0.16% of price
-- Last return: 0.08%
+- Last return: 0.080%
 - Session: London
 - Regime: TRENDING
-- Recent candles (oldest→newest):
-    1:r=+0.04% rng=0.12% body=0.03% d=U v=0.9x | 2:r=+0.08% rng=0.16% body=0.06% d=U v=1.2x | ... | 10:r=+0.02% rng=0.11% body=0.01% d=U v=1.1x
+- ADX: 0.310
+- SMA200: Price ABOVE (0.0041), SMA200 RISING (+0.0001)
+- Support: 1.08720 | Resistance: 1.09130
+- Candles: last 10 H1 candles (oldest→newest), return=+0.19%, up/down=7/3
+1:r=+0.04% rng=0.12% body=0.03% d=U v=0.9x | 2:r=+0.08% rng=0.16% body=0.06% d=U v=1.2x | ... | 10:r=+0.02% rng=0.11% body=0.01% d=U v=1.1x
 
-Live News:
-No high-impact news in the next 15 minutes.
+News: FOMC minutes released; no high-impact events in next 15 minutes.
+Calendar: 13:30 USD US CPI m/m (in 25 min) | 15:00 EUR ECB President Speech (in 120 min)
 
 ML Signal: BUY with ML confidence 0.781
 
-Provide a comprehensive analysis responding EXACTLY in JSON (no extra text):
-{"quality": 7.5, "reason": "brief reason", "bias": "NEUTRAL",
- "confidence_modifier": 1.0, "sl_ok": true, "tp_ok": true,
- "sl_adjusted": 0.20, "tp_adjusted": 0.28, "regime": "TRENDING"}
+Trade journal (recent closes) — context only — do NOT copy values:
+- 10-09 14:05 SHORT pnl=-1.34% exit=ea regime=RANGING: momentum_fade on London open — entry chased the 
 
-Fields:
-- quality: rate setup 0-10
-- reason: 1-2 sentence explanation
-- bias: BULLISH/BEARISH/NEUTRAL
-- confidence_modifier: continuous multiplier 0.5-1.5
-- sl_ok / tp_ok: whether proposed stops are reasonable
-- sl_adjusted / tp_adjusted: corrected normalized values if needed
-- regime: market regime classification
+Reentry check — a position was closed recently:
+- Bars since close: 1 H1
+- Last exit: SHORT (ea), PnL -0.08 EUR, at 2026-10-09T14:05:00+00:00
+- Price move since close: +2.5 pips
+- reentry_ok=false if re-opening the same trade moments after closing it
+  with no new evidence (churn); true if new information, structure/regime
+  change or fresh evidence justifies entering now.
+
+Return EXACTLY JSON, no extra text — ONE JSON object. Two FORMAT
+examples with different scores; do NOT copy their values — judge THIS
+setup on its own context:
+{"quality": 8.5, "reason": "trend and ADX align", "bias": "BULLISH", "confidence_modifier": 1.3,  "reentry_ok": true, "regime": "TRENDING"}
+{"quality": 3.0, "reason": "range chop against signal", "bias": "BEARISH", "confidence_modifier": 0.7,  "reentry_ok": false, "regime": "RANGING"}
+
+Fields: quality 0-10 — score on evidence: 7-10 only when trend/ADX/session
+agree with the ML signal and structure is clean; 1-4 when ranging chop,
+against-trend signal or unverified news; 4-7 when mixed. reason max 12 words;
+bias BULLISH/BEARISH/NEUTRAL aligned with the setup; confidence_modifier
+0.5-1.5 moving effective confidence the same direction; regime
+TRENDING/RANGING/VOLATILE/BREAKOUT; reentry_ok boolean per the Reentry
+check block above (true when there is no recent close).
 ```
+
+Notas del contrato de contexto (paquete 1-4):
+
+- **SMA200 / Support / Resistance** — la serie se pide a MT5 con
+  `count=240`; el SMA200 (distancia + pendiente de 5 barras) se calcula
+  sobre la serie COMPLETA y las features del modelo sobre las 120 más
+  recientes (`tail(120)` tras ordenar): el obs de PPO queda byte-idéntico
+  a cualquier profundidad de fetch. Guardas: sin `time`, <205 velas o NaN →
+  la línea no aparece (nunca contexto inventado).
+- **Calendar** — ventana −120…+240 min, orden ascendente, tope 3 eventos;
+  con `news_filter_enabled=false` la línea dice
+  `unavailable (news filter disabled)` (explícito, nunca silencioso).
+- **Trade journal** — esquema SIEMPRE constante (cabecera + filas o
+  `- none yet`), insight truncada a 48 chars, tope 5 filas, y SIN
+  `quality_score`/`qwen_confidence`: anclarían la respuesta en
+  puntuaciones pasadas (defensa anti-ancla H2).
+- **Sin campos de SL/TP** — `sl_ok/tp_ok/sl_adjusted/tp_adjusted` ya no se
+  piden ni se devuelven (Opción 1: `production_stops` es la única fuente
+  de stops); si el modelo los ecoa, el parse los descarta.
 
 ### Ejemplo de respuesta de Qwen 4B
 
@@ -461,49 +495,58 @@ Para el prompt anterior, una respuesta válida y compacta podría ser:
     "reason": "Bullish momentum with expanding range; setup is valid.",
     "bias": "BULLISH",
     "confidence_modifier": 1.08,
-    "sl_ok": true,
-    "tp_ok": true,
-    "sl_adjusted": 0.20,
-    "tp_adjusted": 0.30,
-    "regime": "TRENDING"
+    "regime": "TRENDING",
+    "reentry_ok": true
 }
 ```
 
 FastAPI interpreta esta respuesta así:
 
-- `quality=7.8`: el setup supera el umbral mínimo de `4.0`.
+- `quality=7.8`: el setup supera `QUALITY_THRESHOLD` (5.0, intocable).
 - `bias=BULLISH`: no contradice la señal `BUY` del PPO.
-- `confidence_modifier=1.08`: aumenta moderadamente la confianza efectiva.
-- `sl_adjusted` y `tp_adjusted`: se aplican después de validar los límites duros y el ratio TP:SL.
+- `confidence_modifier=1.08`: `effective_prob = ml_prob × confidence_modifier`.
+- `reentry_ok=true`: el cerebro aprueba la re-entrada dentro de la ventana
+  de churn (ausencia → fail-open `true` + WARNING `REENTRY-DEFAULT`).
 - `regime=TRENDING`: queda registrado en la respuesta y en los logs.
+- Si el modelo devolviera campos SL/TP, se descartan (no forman parte del
+  contrato; grep verificado: ningún consumidor de producción los leía).
 
-Si Qwen devuelve `quality < 4.0`, o `bias=BEARISH` para una señal `BUY`,
+Si Qwen devuelve `quality < 5.0`, o `bias=BEARISH` para una señal `BUY`,
 FastAPI convierte la decisión final en `HOLD`. Si devuelve JSON inválido o no
-responde, se utiliza el fallback local con calidad `5.0`, sesgo `NEUTRAL` y
-modificador `1.0`.
+responde, se aplica el safe-default degradado (calidad `0.0` fail-closed,
+sesgo `NEUTRAL`, modificador `1.0`) y `qwen_degraded=true` en audit_log +
+componente en `/pipeline/health`.
 
 La petición se envía al endpoint compatible con OpenAI de Qwen con
 `temperature=0.2`, `max_tokens=160` y `response_format={"type":"json_object"}`.
 Se incluyen las últimas 10 velas en formato compacto: retorno, rango, cuerpo,
 dirección y volumen relativo. Las noticias se normalizan y limitan a 600
-caracteres para evitar saturar el contexto de Qwen 4B en la Jetson.
-Los valores `sl_adjusted` y `tp_adjusted` se validan de nuevo en FastAPI con
-los límites duros de SL [15-30 pips], TP [25-60 pips] y ratio TP:SL mínimo de
-1.5:1. Si Qwen no está disponible, se aplica el fallback local.
+caracteres; el calendario (top 3), el journal (top 5 filas de 48 chars) y la
+línea SMA200/S-R son líneas cortas de presupuesto fijo: el prompt completo
+ronda ~1100 tokens de la ventana de 2048. Los stops NO pasan por Qwen:
+`production_stops` (env de entrenamiento = serve) calcula SL/TP con sus
+hard bounds [15-30 pips SL, 25-60 pips TP, TP:SL ≥ 1.5:1]. Si Qwen no está
+disponible, se aplica el safe-default degradado.
 
 ### Opción 1 — Quality Score ✅ (implementado)
-- **Qué**: Qwen recibe contexto completo de mercado (RSI, ATR, MACD, Bollinger, sesión, news) y retorna score 0-10 + reason + bias
+- **Qué**: Qwen recibe contexto completo de mercado (RSI, ATR, MACD, Bollinger, sesión, ADX, SMA200/S-R, noticias, calendario, journal y re-entrada) y retorna score 0-10 + reason + bias
 - **Trigger**: Cada candle (no solo BUY/SELL) — unificado en llamada única
-- **Acción**: Si `quality_score < 4.0` → decisión overriden a HOLD
+- **Acción**: Si `quality_score < QUALITY_THRESHOLD` (5.0, intocable) → decisión overriden a HOLD
 - **Respuesta**: `{quality_score, quality_reason}` en PredictResponse
 - **Logs**: `QWEN-UNIFIED` con score, reason, bias, conf_mod, regime
 
-### Opción 2 — SL/TP Validator ✅ (implementado)
-- **Qué**: Qwen valida que el SL y TP propuestos sean razonables para el régimen actual
-- **Trigger**: Solo cuando hay BUY/SELL
+### Opción 2 — SL/TP Validator ⚠️ (servicio implementado, NO cableado en /predict)
+- **Qué**: `query_qwen_sltp_validator` valida que el SL y TP propuestos sean razonables para el régimen actual
+- **Estado (paquete 1-4)**: el servicio y sus tests se CONSERVAN en
+  `services/qwen_client.py`, pero **no se invoca en `/predict`**: los stops
+  los calcula `production_stops` (misma fuente que el env de entrenamiento)
+  con hard bounds SL [15-30 pips], TP [25-60 pips], ratio TP:SL ≥ 1.5:1.
+  El prompt unificado ya no pide `sl_ok/tp_ok/sl_adjusted/tp_adjusted` (si
+  el modelo los ecoa, el parse los descarta). Cablear Opción 2 exige
+  evidencia fuera de muestra de que aporta sobre `production_stops`.
 - **Hard bounds**: SL [15-30 pips], TP [25-60 pips], ratio TP:SL ≥ 1.5:1
 - **Fallback**: Si Qwen no disponible → hard bounds aplicados
-- **Logs**: `SLTP-VALIDATOR`, `SLTP-REJECTED`
+- **Logs**: `SLTP-VALIDATOR`, `SLTP-REJECTED` (sólo si se cablea)
 
 ### Opción 3 — Confidence Modulation ✅ (implementado)
 - **Qué**: Qwen retorna modificador continuo [0.5, 1.5] que multiplica ml_prob
@@ -2042,3 +2085,18 @@ Relación **INVERSA**: con un gate armado ≥0.7 esa semana se habrían bloquead
 ### Trazabilidad Qwen — prompt de entrada + respuesta cruda en log (2026-10-09, orden de Félix «quiero ver en los logs una traza» — suite 727 passed = 724+3)
 
 **Cambio:** `services/qwen_client.py` emite por ciclo `/predict` dos líneas nuevas de traza en `docker logs`: **`QWEN-PROMPT ║`** con el mensaje COMPLETO enviado (system + user, construido desde la misma lista `messages` que viaja al POST — una sola fuente, sin divergencia entre lo logueado y lo enviado) **antes de la llamada** (visible también si la conexión falla), y **`QWEN-RESPONSE ║`** con el cuerpo crudo `res.text` **antes del parse** (visible también si el parse falla → respuesta malformada sigue trazable). Sin umbrales ni heurísticas: es observabilidad pura; `QUALITY_THRESHOLD` intocado. **TDD 3 RED → GREEN** (`TestPromptResponseTrace` en `test_qwen_client.py`: traza única de prompt con system+user+`Reentry check`, traza única de respuesta cruda, respuesta visible en malformada); refactor del helper fake `_mock_qwen_client`/`_prompt_from` a nivel de módulo (reutilizado por `TestReentryContext`) y el fake `_Resp` de `test_qwen_prompt_anchoring.py` completa `.text` (superficie real de httpx — sin `getattr` fallback, que el PROTOCOLO prohíbe). **Suite 727 passed / 0 failed.** Volumen: ~2,5 KB/ciclo cada 5 min (irrelevante frente a la rotación 50m×3). **Verificación live (10-09 ~17:12 UTC, commit `01a7958`):** ciclo 17:15:00 UTC con `QWEN-PROMPT ║` completo (SYSTEM + USER: contexto H1, noticias, ML Signal, bloque `Reentry check`, ejemplos, rúbrica) seguido de `QWEN-RESPONSE ║` con el cuerpo crudo del endpoint (`Qwen3-4B-Instruct` en el Jetson, `prompt_tokens=986`, `finish_reason=stop`) y el resumen `QWEN-UNIFIED`. Visto con: `docker logs trading-fastapi --since 10m | grep -A 45 'QWEN-PROMPT'` / `grep 'QWEN-RESPONSE'`. **Archivos:** `fastapi/services/qwen_client.py`, `fastapi/tests/test_qwen_client.py`, `fastapi/tests/test_qwen_prompt_anchoring.py`, `README.md`, `PROTOCOLO_ANTI_BUCLE.md`. Sin MQL5 → sin bump EA.
+
+### Paquete 1-4 — contexto completo en el prompt de Qwen (2026-10-09, orden de Félix «sí, ejecuta el paquete 1-4» — suite 760 passed = 727+33)
+
+**Contexto:** auditoría de optimización de prompt (traza `01a7958`/`05b8d38` en vivo, `prompt_tokens=986/2048`) que detectó **3 desechos** (campos muertos de SL/TP, query muerta `recent_insights`, refetch de calendario sin backoff) y **3 gaps** (SMA200/S-R calculados pero invisible para Qwen, sin calendario económico, journal inyectado pero nunca renderizado). Los 4 ítems del paquete:
+
+1. **SMA200 + Support/Resistance en el prompt** — `routers/ai.py` pide `count=240` (antes 120), ordena ascendente y calcula `_sma200_context` (distancia precio−SMA200 + pendiente de 5 barras) sobre la serie COMPLETA, mientras las features del modelo se calculan sobre `tail(120)` → **obs PPO byte-idéntico** a cualquier profundidad de fetch (test: el engineer recibe exactamente las 120 velas recientes). Guardas de honestidad: sin columna `time`, <205 velas o NaN → la línea no aparece (nunca contexto inventado). Los niveles S/R se izan a variables compartidas por `production_stops` y el prompt (una sola fuente). Líneas nuevas: `SMA200: Price ABOVE (0.0041), SMA200 RISING (+0.0001)` y `Support: 1.08720 | Resistance: 1.09130`.
+2. **Calendario económico** — bloque tras `News:` con eventos de `news_filter.get_upcoming_news` (fetch DESPUÉS del bloque MT5, httpx garantizado parcheado en la suite), ventana **−120…+240 min**, orden ascendente, tope 3; `news_filter_enabled=false` → `Calendar: unavailable (news filter disabled)` explícito, sin eventos → `Calendar: no events in next 4h`. Fix del backoff en `_fetch_calendar`: el gate ya no exige `_cache` (una caché caducada no fuerza refetch en cada llamada) y la excepción actualiza `_cache_ts` (un fetch fallido espera el TTL en vez de martillear el endpoint cada ciclo).
+3. **`recent_insights` renderizado** — la query muerta (ciclo a ciclo, resultado nunca usado) ahora inyecta el bloque `Trade journal (recent closes)` tras `ML Signal` y antes de `Reentry check`: esquema **SIEMPRE constante** (cabecera + filas o `- none yet`), fila `- MM-DD HH:MM DIR pnl=±X.XX% exit=… regime=…: insight[:48]`, tope 5, SIN `quality_score`/`qwen_confidence` (defensa anti-ancla H2: no anclar la respuesta en puntuaciones pasadas), insight truncada a 48 chars con centinela `_PAST48` en el test.
+4. **SL/TP fuera del contrato unificado** — `sl_proposed/tp_proposed` eliminados de la firma, ejemplos few-shot, rúbrica, parse, log y return de `query_qwen_unified`; `_degraded_unified(regime, ml_prob, reason)` ahora 3 args; el import de `query_qwen_sltp_validator` sale de `routers/ai.py` (**servicio + tests se conservan sin cablear** — Opción 2 documentada arriba como «servicio implementado, NO cableado»); si el modelo ecoa `sl_adjusted/tp_adjusted` el parse los descarta (tolerancia probada: los canned responses de los tests los siguen trayendo). `core/ports.py` (LLMPort) y `core/adapters.py` (QwenLLMAdapter) en paridad de firma verificada por `inspect.signature` (sin `self`).
+
+**Tests — TDD estricto:** `tests/test_pack_1_4_prompt_context.py` escrito PRIMERO como especificación (6 clases: helper SMA200 con verificación numérica 240-vela lineal, wiring del predict con spy del engineer + MT5 `count=240`, línea de calendario, bloque de journal con centinelas anti-ancla, contrato sin SL/TP con paridad de puertos, backoff del calendario) → **RED 32 failed / 1 passed** al entrar → GREEN. Contratos existentes actualizados: `test_qwen_client.py` (×22: base sin sl/tp, clamps → `test_echoed_sl_tp_fields_are_dropped`, canned con sl/tp como prueba de tolerancia, tests del validator intactos), `test_qwen_prompt_anchoring.py` (args sin sl/tp — propiedades anti-ancla sin cambios: ≥2 quality/bias distintos, do-not-copy, rúbrica, ONE JSON), `test_e2e_ai_predict.py` (canned honestos + degradado 3 args), `test_p31a` (adapter sin sl/tp + delegación del contrato nuevo), `test_p0_time_order.py` (`_qwen_ok()` sin campos muertos). **Suite 760 passed / 0 failed** (727 + 33).
+
+**Presupuesto de tokens:** objetivo ≈1100 t (base 986, <+10% latencia — Qwen 19.5–30.8 s/ciclo). Si el prompt live supera ~1150 t, recortar el journal `[:48]` es el ajuste pre-registrado. **Verificación live post-deploy:** `docker logs trading-fastapi --since 10m | grep -A 60 'QWEN-PROMPT'` — comprobar líneas `SMA200:`/`Support:`/`Calendar:`/`Trade journal` presentes y `prompt_tokens` en presupuesto.
+
+**Archivos:** `fastapi/routers/ai.py`, `fastapi/services/qwen_client.py`, `fastapi/services/news_filter.py`, `fastapi/core/ports.py`, `fastapi/core/adapters.py`, `fastapi/tests/test_pack_1_4_prompt_context.py` (nuevo), `fastapi/tests/test_qwen_client.py`, `fastapi/tests/test_qwen_prompt_anchoring.py`, `fastapi/tests/test_e2e_ai_predict.py`, `fastapi/tests/test_p31a_pair_registry.py`, `fastapi/tests/test_p0_time_order.py`, `README.md`, `PROTOCOLO_ANTI_BUCLE.md`. Sin MQL5 → sin bump EA.

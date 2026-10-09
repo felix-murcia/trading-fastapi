@@ -40,7 +40,13 @@ _cache_ts: float = 0
 async def _fetch_calendar() -> list[dict]:
     global _cache, _cache_ts
 
-    if time.time() - _cache_ts < _CACHE_TTL and _cache:
+    # Backoff por timestamp SIN exigir caché poblada: si el fallo no fija
+    # `_cache_ts` (bug de caché-fría), cada llamada dentro del TTL — el
+    # blackout y el prompt de /predict — reintentaría contra el servidor
+    # caído y pagaría el timeout de 15 s dos veces por ciclo. El fallo de
+    # abajo fija el timestamp → no se reintenta dentro del TTL; una
+    # descarga EXITOSA también cachea la lista (aunque sea vacía) 4 h.
+    if time.time() - _cache_ts < _CACHE_TTL:
         return _cache
 
     try:
@@ -73,6 +79,10 @@ async def _fetch_calendar() -> list[dict]:
 
     except Exception as exc:
         logger.error("[NEWS] Failed to fetch calendar: %s", exc)
+        # Backoff: el fallo arma el timestamp — sin esto, la caída del
+        # mirror reintentaba en CADA llamada (timeout ×2 por ciclo de
+        # /predict mientras durase). Sirve la caché vieja (fail-open).
+        _cache_ts = time.time()
         return _cache
 
 

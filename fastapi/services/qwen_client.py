@@ -61,9 +61,7 @@ def _record_failure(error: str) -> None:
     _QWEN_STATE.last_error = error[:200]
 
 
-def _degraded_unified(
-    regime: str, sl_proposed: float, tp_proposed: float, ml_prob: float, reason: str,
-) -> dict:
+def _degraded_unified(regime: str, ml_prob: float, reason: str) -> dict:
     """Safe defaults uniformes ante CUALQUIER fallo de Qwen.
 
     quality=0.0 es deliberadamente fail-closed: por debajo de QUALITY_THRESHOLD
@@ -76,10 +74,58 @@ def _degraded_unified(
         "bias": "NEUTRAL",
         "confidence_modifier": 1.0,
         "effective_prob": float(ml_prob),
-        "sl_adjusted": float(sl_proposed),
-        "tp_adjusted": float(tp_proposed),
         "regime": regime,
     }
+
+
+def _calendar_line(events: Optional[list[dict]]) -> str:
+    """Línea `Calendar:` del prompt (paquete 1-4): ventana −2 h…+4 h ya
+    filtrada/limitada en routers.ai (top 3, orden ascendente).
+
+    `None` = filtro de noticias deshabilitado (dicho explícitamente — sin
+    estado silencioso); `[]` = activo pero sin eventos en la ventana.
+    """
+    if events is None:
+        return "Calendar: unavailable (news filter disabled)"
+    if not events:
+        return "Calendar: no events in next 4h"
+    parts = []
+    for ev in events:
+        minutes = float(ev["minutes_until"])
+        when = (
+            f"in {int(round(minutes))} min" if minutes >= 0
+            else f"{int(round(-minutes))} min ago"
+        )
+        parts.append(
+            f"{str(ev['time_utc'])[11:16]} {ev['currency']} "
+            f"{str(ev['title'])[:40]} ({when})"
+        )
+    return "Calendar: " + " | ".join(parts)
+
+
+def _journal_lines(insights: Optional[list[dict]]) -> list[str]:
+    """Bloque «Trade journal» del prompt (paquete 1-4, ítem 3).
+
+    Esquema SIEMPRE constante (anti-ancla H2): cabecera + filas o `- none
+    yet` — el modelo ve el mismo bloque en todos los ciclos y sólo cambian
+    los datos. Muestra `pnl/dirección/salida/régimen/insight` de los últimos
+    cierres; NUNCA `quality_score`/`qwen_confidence` (anclarían la respuesta
+    en puntuaciones pasadas). Insight truncada a 48 chars y tope de 5 filas
+    (presupuesto de tokens del prompt)."""
+    lines = ["Trade journal (recent closes) — context only — do NOT copy values:"]
+    rows = (insights or [])[:5]
+    if not rows:
+        lines.append("- none yet")
+        return lines
+    for row in rows:
+        # Indexación estricta en columnas NOT-NULL (mismo contrato que el
+        # bloque de re-entrada); `regime` es nullable → .get con honesto 'n/a'.
+        lines.append(
+            f"- {row['created_at']:%m-%d %H:%M} {row['direction']} "
+            f"pnl={float(row['pnl_pct']) * 100:+.2f}% exit={row['exit_reason']} "
+            f"regime={row.get('regime') or 'n/a'}: {str(row['qwen_insight'])[:48]}"
+        )
+    return lines
 
 
 def _classify_session(hour: int) -> str:
@@ -142,8 +188,6 @@ async def query_qwen_unified(
     hour: int,
     news: str,
     candle_context: str,
-    sl_proposed: float,
-    tp_proposed: float,
     cycle_id: str,
     logger: logging.Logger,
     recent_insights: Optional[list[dict]] = None,
@@ -158,6 +202,10 @@ async def query_qwen_unified(
     # lo decide el CEREBRO con estos datos (ventana de churn, cierre reciente
     # y movimiento). `None` = fuera de ventana / sin entrada propuesta.
     reentry: Optional[dict] = None,
+    # Paquete 1-4 (Félix 2026-10-09): calendario económico ya filtrado por
+    # routers.ai (−120…+240 min, top 3). `None` = filtro de noticias
+    # deshabilitado; `[]` = activo sin eventos en la ventana.
+    calendar_events: Optional[list[dict]] = None,
 ) -> dict:
     """
     Unified Qwen query — single call per candle.
@@ -167,11 +215,16 @@ async def query_qwen_unified(
         - quality_reason: str
         - llm_bias: BULLISH/BEARISH/NEUTRAL
         - confidence_modifier: 0.5-1.5
-        - sl_adjusted / tp_adjusted: norm values
         - regime: TRENDING/RANGING/VOLATILE/BREAKOUT
         - reentry_ok: bool — juicio anti-churn de la re-entrada (R1); true
           si no hay cierre reciente o el cerebro considera legítima la
           entrada; false = churn (→ veto_reason=reentry_veto en serve)
+
+    Contrato sin SL/TP (paquete 1-4): los campos `sl_ok/tp_ok/sl_adjusted/
+    tp_adjusted` murieron con la Opción 1 (production_stops = única fuente
+    de stops); si el modelo los ecoa se DESCARTAN (no se piden, no se
+    devuelven). El validador Opción 2 (`query_qwen_sltp_validator`) se
+    conserva como servicio, sin cablear en /predict.
     """
     session = _classify_session(hour)
     if regime is None:
@@ -183,8 +236,6 @@ async def query_qwen_unified(
     elif regime == "RANGING" and adx is not None and adx >= 0.25:
         regime = "TRENDING"
 
-    sl_pips = sl_proposed * 100.0
-    tp_pips = tp_proposed * 200.0
     news_context = " ".join(str(news).split())[:600] or "Unavailable"
 
     # Build context injection for Qwen (Fase 2: Context Awareness)
@@ -248,8 +299,14 @@ async def query_qwen_unified(
         f"- Candles: {candle_context}",
         "",
         f"News: {news_context[:400] if news_context != 'Unavailable' else 'Unavailable'}",
+        # Paquete 1-4: calendario económico tras News (misma sección)
+        _calendar_line(calendar_events),
         "",
         f"ML Signal: {decision} with ML confidence {ml_prob:.3f}",
+        "",
+        # Paquete 1-4 (ítem 3): journal de cierres recientes — contexto de
+        # EXECUTION pasada, nunca de puntuación (sin quality/confidence).
+        *_journal_lines(recent_insights),
         "",
         *reentry_lines,
         "",
@@ -263,18 +320,15 @@ async def query_qwen_unified(
         "examples with different scores; do NOT copy their values — judge THIS",
         "setup on its own context:",
         '{"quality": 8.5, "reason": "trend and ADX align", "bias": "BULLISH", "confidence_modifier": 1.3,'
-        '  "sl_ok": true, "tp_ok": true, "sl_adjusted": 0.2000, "tp_adjusted": 0.4000,'
         '  "reentry_ok": true, "regime": "TRENDING"}',
         '{"quality": 3.0, "reason": "range chop against signal", "bias": "BEARISH", "confidence_modifier": 0.7,'
-        '  "sl_ok": false, "tp_ok": true, "sl_adjusted": 0.1600, "tp_adjusted": 0.3200,'
         '  "reentry_ok": false, "regime": "RANGING"}',
         "",
         "Fields: quality 0-10 — score on evidence: 7-10 only when trend/ADX/session",
         "agree with the ML signal and structure is clean; 1-4 when ranging chop,",
         "against-trend signal or unverified news; 4-7 when mixed. reason max 12 words;",
         "bias BULLISH/BEARISH/NEUTRAL aligned with the setup; confidence_modifier",
-        "0.5-1.5 moving effective confidence the same direction; sl_ok/tp_ok booleans;",
-        "adjusted SL 0.15-0.30, TP 0.125-0.30 with TP:SL >=1.5; regime",
+        "0.5-1.5 moving effective confidence the same direction; regime",
         "TRENDING/RANGING/VOLATILE/BREAKOUT; reentry_ok boolean per the Reentry",
         "check block above (true when there is no recent close).",
     ])
@@ -308,9 +362,7 @@ async def query_qwen_unified(
     except (httpx.ConnectTimeout, httpx.TimeoutException, httpx.HTTPError) as exc:
         logger.warning("[%s] QWEN-UNIFIED connection failed: %s", cycle_id, repr(exc))
         _record_failure(f"connection: {repr(exc)[:120]}")
-        return _degraded_unified(
-            regime, sl_proposed, tp_proposed, ml_prob, "Qwen unavailable"
-        )
+        return _degraded_unified(regime, ml_prob, "Qwen unavailable")
 
     if res.status_code == 200:
         # Traza: cuerpo crudo ANTES de parsear — si el parse falla, la
@@ -323,9 +375,7 @@ async def query_qwen_unified(
             # Respuesta basura del LLM: degradar, nunca propagar (P1-6)
             logger.warning("[%s] QWEN-UNIFIED malformed response: %s", cycle_id, exc)
             _record_failure(f"parse: {exc}")
-            return _degraded_unified(
-                regime, sl_proposed, tp_proposed, ml_prob, f"Qwen degraded: {exc}"
-            )
+            return _degraded_unified(regime, ml_prob, f"Qwen degraded: {exc}")
 
         q = float(parsed.get("quality", 5.0))
         reason = str(parsed.get("reason", ""))[:120]
@@ -338,10 +388,8 @@ async def query_qwen_unified(
 
         conf_mod = _clamp(float(parsed.get("confidence_modifier", 1.0)), 0.5, 1.5)
 
-        sl_adj = _clamp(float(parsed.get("sl_adjusted", sl_proposed)), SL_MIN_NORM, SL_MAX_NORM)
-        tp_adj = _clamp(float(parsed.get("tp_adjusted", tp_proposed)), TP_MIN_NORM, TP_MAX_NORM)
-        tp_adj = _clamp(sl_adj * 2.0, TP_MIN_NORM, TP_MAX_NORM)
-
+        # Paquete 1-4: sin parse de SL/TP — si el modelo ecoa sl_adjusted/
+        # tp_adjusted se ignoran (no se piden en el prompt, no se devuelven).
         effective_prob = float(np.exp(np.log(max(ml_prob, 1e-6)) + np.log(conf_mod)))
         effective_prob = _clamp(effective_prob, 0.0, 1.0)
 
@@ -357,9 +405,8 @@ async def query_qwen_unified(
 
         logger.info(
             "[%s] QWEN-UNIFIED ║ q=%.1f bias=%s conf_mod=%.2f eff_prob=%.4f | "
-            "sl=%.3f→%.3f tp=%.3f→%.3f regime=%s reentry_ok=%s | %s",
+            "regime=%s reentry_ok=%s | %s",
             cycle_id, q, bias, conf_mod, effective_prob,
-            sl_proposed, sl_adj, tp_proposed, tp_adj,
             parsed.get("regime", regime), reentry_ok, reason[:60]
         )
         _record_success()
@@ -370,17 +417,13 @@ async def query_qwen_unified(
             "bias": bias,
             "confidence_modifier": conf_mod,
             "effective_prob": effective_prob,
-            "sl_adjusted": sl_adj,
-            "tp_adjusted": tp_adj,
             "regime": parsed.get("regime", regime),
             "reentry_ok": reentry_ok,
         }
 
     logger.warning("[%s] QWEN-UNIFIED HTTP %s: %s", cycle_id, res.status_code, res.text[:120])
     _record_failure(f"HTTP {res.status_code}: {res.text[:80]}")
-    return _degraded_unified(
-        regime, sl_proposed, tp_proposed, ml_prob, f"Qwen degraded: HTTP {res.status_code}"
-    )
+    return _degraded_unified(regime, ml_prob, f"Qwen degraded: HTTP {res.status_code}")
 
 
 async def query_qwen_sltp_validator(

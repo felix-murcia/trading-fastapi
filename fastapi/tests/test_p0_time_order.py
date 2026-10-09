@@ -135,7 +135,8 @@ def _qwen_ok() -> dict:
     return {
         "ok": True, "quality": 8.5, "reason": "Strong setup",
         "bias": "BULLISH", "confidence_modifier": 1.1,
-        "effective_prob": 0.7, "sl_adjusted": 0.20, "tp_adjusted": 0.28,
+        # Sin sl_adjusted/tp_adjusted: refleja el contrato real (paquete 1-4)
+        "effective_prob": 0.7,
         "regime": "TRENDING",
     }
 

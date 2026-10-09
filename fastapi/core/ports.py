@@ -54,8 +54,10 @@ class ModelStorePort(Protocol):
 class LLMPort(Protocol):
     """Veto/calidad del LLM (adapter: services.qwen_client).
 
-    Firma idéntica a `query_qwen_unified`: el puerto refleja el contrato
-    real, no una idealización.
+    Firma idéntica a `query_qwen_unified` (paridad verificada por
+    `inspect.signature` en la suite): el puerto refleja el contrato real,
+    no una idealización. Sin campos de SL/TP (paquete 1-4: murieron con la
+    Opción 1 — production_stops es la única fuente de stops).
     """
 
     async def query_unified(
@@ -73,9 +75,15 @@ class LLMPort(Protocol):
         hour: int,
         news: str,
         candle_context: str,
-        sl_proposed: float,
-        tp_proposed: float,
         cycle_id: str,
         logger: logging.Logger,
         recent_insights: Optional[list[dict]] = None,
+        adx: Optional[float] = None,
+        sma200_dist: Optional[float] = None,
+        sma200_slope: Optional[float] = None,
+        regime: Optional[str] = None,
+        support_level: Optional[float] = None,
+        resistance_level: Optional[float] = None,
+        reentry: Optional[dict] = None,
+        calendar_events: Optional[list[dict]] = None,
     ) -> dict: ...

@@ -54,8 +54,6 @@ class FakeAsyncClient:
                             "reason": "Strong bullish setup",
                             "bias": "BULLISH",
                             "confidence_modifier": 1.1,
-                            "sl_adjusted": 0.20,
-                            "tp_adjusted": 0.28,
                             "regime": "TRENDING",
                         })
                     }
@@ -94,8 +92,6 @@ class QwenReentryRejectClient(FakeAsyncClient):
                             "reason": "Strong bullish setup",
                             "bias": "BULLISH",
                             "confidence_modifier": 1.1,
-                            "sl_adjusted": 0.20,
-                            "tp_adjusted": 0.28,
                             "regime": "TRENDING",
                             "reentry_ok": False,
                         })
@@ -742,7 +738,8 @@ class TestP1TimeStopAndServeReentry(_ServeHarness):
         `REENTRY-DEFAULT` en log + `qwen_degraded` en audit."""
         from services.qwen_client import _degraded_unified
 
-        degraded = _degraded_unified("TRENDING", 0.20, 0.40, 0.33, "Qwen unavailable")
+        # Paquete 1-4: contrato degradado en 3 args (sin campos de SL/TP)
+        degraded = _degraded_unified("TRENDING", 0.33, "Qwen unavailable")
         with patch("routers.ai.query_qwen_unified", AsyncMock(return_value=degraded)), \
              self._serve(self._model(), bars=bars, last_exit=_LAST_EXIT) as (client, audit):
             response = self._predict(client, {"position": 0, "steps_in_trade": 0})

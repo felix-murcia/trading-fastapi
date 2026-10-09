@@ -82,7 +82,8 @@ _UNIFIED_ARGS = dict(
     symbol="EURUSD", decision="BUY", ml_prob=0.75, rsi=55.0, atr=0.00100,
     atr_pct=0.01, macd_hist=0.0005, bb_pos=0.6, range_pct=0.02, last_ret=0.001,
     hour=10, news="No major news", candle_context="last 10 H1 candles",
-    sl_proposed=0.20, tp_proposed=0.40, cycle_id="EURUSD_1234567890",
+    # Paquete 1-4: sin sl_proposed/tp_proposed (contrato sin SL/TP)
+    cycle_id="EURUSD_1234567890",
     logger=MagicMock(),
 )
 

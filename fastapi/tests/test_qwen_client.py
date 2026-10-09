@@ -33,7 +33,9 @@ _UNIFIED_BASE = dict(
     symbol="EURUSD", decision="BUY", ml_prob=0.75, rsi=55.0, atr=0.00100,
     atr_pct=0.01, macd_hist=0.0005, bb_pos=0.6, range_pct=0.02, last_ret=0.001,
     hour=10, news="No major news", candle_context="last 10 H1 candles",
-    sl_proposed=0.20, tp_proposed=0.40, cycle_id="EURUSD_1234567890",
+    # Paquete 1-4: sin sl_proposed/tp_proposed — el contrato unificado ya no
+    # arrastra campos de SL/TP (production_stops es la única fuente).
+    cycle_id="EURUSD_1234567890",
     logger=MagicMock(),
 )
 
@@ -102,8 +104,6 @@ class TestQueryQwenUnified:
                 hour=10,
                 news="No major news",
                 candle_context="last 10 H1 candles",
-                sl_proposed=0.20,
-                tp_proposed=0.40,
                 cycle_id="EURUSD_1234567890",
                 logger=MagicMock(),
             )
@@ -112,8 +112,10 @@ class TestQueryQwenUnified:
         assert result["bias"] == "BULLISH"
         assert result["confidence_modifier"] == 1.2
         assert result["regime"] == "TRENDING"
-        assert result["sl_adjusted"] == 0.20
-        assert result["tp_adjusted"] == 0.40  # sl_adj * 2.0
+        # Tolerancia (paquete 1-4): el canned ECOA sl_adjusted/tp_adjusted
+        # aunque nadie los pide → el contrato los DESCARTA.
+        assert "sl_adjusted" not in result
+        assert "tp_adjusted" not in result
         assert result["ok"] is True
 
     @pytest.mark.asyncio
@@ -129,8 +131,8 @@ class TestQueryQwenUnified:
         assert result["quality"] == 0.0
         assert result["bias"] == "NEUTRAL"
         assert result["confidence_modifier"] == 1.0
-        assert result["sl_adjusted"] == 0.20
-        assert result["tp_adjusted"] == 0.40
+        assert "sl_adjusted" not in result
+        assert "tp_adjusted" not in result
         assert result["ok"] is False
         assert result["reason"] == "Qwen unavailable"
 
@@ -268,8 +270,6 @@ class TestQueryQwenUnified:
                 hour=10,
                 news="No major news",
                 candle_context="last 10 H1 candles",
-                sl_proposed=0.20,
-                tp_proposed=0.40,
                 cycle_id="EURUSD_1234567890",
                 logger=MagicMock(),
             )
@@ -277,8 +277,14 @@ class TestQueryQwenUnified:
         assert result["confidence_modifier"] == 1.5
 
     @pytest.mark.asyncio
-    async def test_sl_tp_clamped_to_bounds(self):
-        """Should clamp SL/TP to configured bounds."""
+    async def test_echoed_sl_tp_fields_are_dropped(self):
+        """Paquete 1-4: el contrato sin SL/TP DESCARTA los campos ecoados.
+
+        Antes el modelo "ajustaba" sl_adjusted/tp_adjusted (recorte a bounds
+        y vuelta al serve); producción no los leía en ninguna parte (grep
+        verificado) — hoy no se piden en el prompt y no se devuelven.
+        El canned sigue trayendo 0.50/0.80: tolerancia al eco intencional.
+        """
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
@@ -294,28 +300,11 @@ class TestQueryQwenUnified:
                 return_value=mock_response
             )
 
-            result = await query_qwen_unified(
-                symbol="EURUSD",
-                decision="BUY",
-                ml_prob=0.75,
-                rsi=55.0,
-                atr=0.00100,
-                atr_pct=0.01,
-                macd_hist=0.0005,
-                bb_pos=0.6,
-                range_pct=0.02,
-                last_ret=0.001,
-                hour=10,
-                news="No major news",
-                candle_context="last 10 H1 candles",
-                sl_proposed=0.20,
-                tp_proposed=0.40,
-                cycle_id="EURUSD_1234567890",
-                logger=MagicMock(),
-            )
+            result = await _call_unified()
 
-        assert result["sl_adjusted"] <= 0.30  # SL_MAX_NORM
-        assert result["tp_adjusted"] <= 0.50  # TP_MAX_NORM
+        assert result["ok"] is True
+        assert "sl_adjusted" not in result
+        assert "tp_adjusted" not in result
 
 
 class TestReentryContext:
