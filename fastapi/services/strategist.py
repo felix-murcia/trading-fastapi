@@ -271,6 +271,35 @@ async def fetch_bars_since_close(
     return bars
 
 
+async def fetch_last_exit(
+    symbol: str,
+    *,
+    df: pd.DataFrame,
+    current_price: float,
+    pip_size: float,
+) -> Optional[dict]:
+    """Último cierre de `symbol` + movimiento desde entonces — contexto del
+    juicio de re-entrada del cerebro (R1: `reentry_veto`).
+
+    `None` = sin cierre registrado. `price_move_since_close_pips` sale de
+    `compute_since_exit` (mismo dominio broker; `None` = salida anterior a la
+    ventana de velas — honesto: sin datos, sin valor)."""
+    pool = get_pool()
+    row = await pool.fetchrow(_LAST_CLOSE_SQL, symbol)
+    if row is None:
+        return None
+    pnl = float(row["pnl"])
+    _, move_pips = compute_since_exit(df, row["exit_time"], current_price, pip_size)
+    return {
+        "exit_time": row["exit_time"].isoformat(),
+        "exit_reason": row["exit_reason"],
+        "pnl": round(pnl, 2),
+        "direction": row["direction"],
+        "is_win": is_winning_close(pnl),   # regla 3 € (core.rules)
+        "price_move_since_close_pips": move_pips,
+    }
+
+
 async def fetch_narrative(
     symbol: str,
     *,

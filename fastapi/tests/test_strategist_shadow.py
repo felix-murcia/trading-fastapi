@@ -540,6 +540,54 @@ class TestFetchBarsSinceClose:
         assert bars is None   # salida anterior a la ventana → serve normaliza a 1.0
 
 
+# ─── Contexto del último cierre para el juicio de re-entrada (R1) ────────────
+
+class TestFetchLastExit:
+    """R1: `fetch_last_exit` alimenta el bloque «Reentry check» del prompt
+    de Qwen — el dato que el cerebro necesita para juzgar churn (pnl,
+    dirección, razón y movimiento desde el cierre)."""
+
+    def _df(self):
+        return pd.DataFrame({
+            "time": [f"2024-01-01T{h:02d}:00:00Z" for h in range(10)],
+            "close": [round(1.1000 + i * 0.0005, 5) for i in range(10)],
+        })
+
+    @pytest.mark.asyncio
+    async def test_last_exit_details_and_move(self):
+        with patch.object(strategist, "get_pool", return_value=_pool(_ROW)):
+            ctx = await strategist.fetch_last_exit(
+                "ZZZUSD", df=self._df(), current_price=1.1045, pip_size=0.0001)
+
+        assert ctx["direction"] == "LONG"
+        assert ctx["exit_reason"] == "tp"
+        assert ctx["pnl"] == pytest.approx(21.17)
+        assert ctx["is_win"] is True                 # regla 3 € (core.rules)
+        assert ctx["exit_time"] == "2024-01-01T06:00:00+00:00"
+        # salida 06:00, ventana hasta 09:00 → +15 pips desde el cierre
+        assert ctx["price_move_since_close_pips"] == pytest.approx(15.0)
+
+    @pytest.mark.asyncio
+    async def test_no_close_returns_none(self):
+        """Sin cierre registrado → None honesto (nunca un cierre inventado)."""
+        with patch.object(strategist, "get_pool", return_value=_pool(None)):
+            ctx = await strategist.fetch_last_exit(
+                "ZZZUSD", df=self._df(), current_price=1.1045, pip_size=0.0001)
+        assert ctx is None
+
+    @pytest.mark.asyncio
+    async def test_move_none_when_exit_outside_window(self):
+        """El cierre existe pero es anterior a la ventana de velas: los
+        detalles viajan y el movimiento queda None (sin datos, sin valor)."""
+        row = {**_ROW, "exit_time": datetime(2023, 12, 31, 23, 0, tzinfo=timezone.utc)}
+        with patch.object(strategist, "get_pool", return_value=_pool(row)):
+            ctx = await strategist.fetch_last_exit(
+                "ZZZUSD", df=self._df(), current_price=1.1045, pip_size=0.0001)
+        assert ctx is not None
+        assert ctx["direction"] == "LONG"
+        assert ctx["price_move_since_close_pips"] is None
+
+
 # ─── Router: traza en audit + shadow sin poder de decisión ────────────────────
 
 def _post_predict(action, monkeypatch, position=0, *, deliberate_side_effect=None):

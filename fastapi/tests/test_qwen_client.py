@@ -295,6 +295,136 @@ class TestQueryQwenUnified:
         assert result["tp_adjusted"] <= 0.50  # TP_MAX_NORM
 
 
+class TestReentryContext:
+    """R1: bloque «Reentry check» del prompt unificado + parse de `reentry_ok`.
+
+    El veto de re-entrada dejó de ser una constante (`churn_cooldown`) y
+    pasa a ser un juicio del cerebro: estos tests fijan (1) que el prompt
+    SIEMPRE lleva el bloque (esquema de respuesta constante — estable
+    frente al anti-ancla H2), (2) el contexto que recibe (ventana, cierre,
+    movimiento) y (3) el parse con default fail-open documentado."""
+
+    _REENTRY = {
+        "bars_since_close": 1,
+        "last_exit": {
+            "exit_time": "2026-10-09T13:10:00+00:00",
+            "exit_reason": "ea",
+            "pnl": -0.08,
+            "direction": "SHORT",
+            "is_win": False,
+            "price_move_since_close_pips": 2.5,
+        },
+    }
+
+    @staticmethod
+    def _mock_qwen(content: str):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "choices": [{"message": {"content": content}}]
+        }
+        # Patrón probado en la suite: `async with` cede __aenter__.return_value
+        client = MagicMock()
+        client.__aenter__.return_value = client
+        client.post = AsyncMock(return_value=mock_response)
+        return client
+
+    @staticmethod
+    def _prompt_of(mock_client) -> str:
+        call = mock_client.post.call_args
+        return call.kwargs["json"]["messages"][1]["content"]
+
+    @pytest.mark.asyncio
+    async def test_prompt_carries_reentry_context(self):
+        """Con cierre reciente: ventana, detalle del cierre y rúbrica."""
+        client = self._mock_qwen(
+            '{"quality": 8.0, "reason": "ok", "bias": "BULLISH",'
+            ' "confidence_modifier": 1.1, "sl_adjusted": 0.20,'
+            ' "tp_adjusted": 0.40, "regime": "TRENDING", "reentry_ok": true}'
+        )
+        with patch("httpx.AsyncClient", return_value=client):
+            result = await query_qwen_unified(**{**_UNIFIED_BASE, "reentry": self._REENTRY})
+
+        assert result["ok"] is True
+        prompt = self._prompt_of(client)
+        assert "Reentry check" in prompt
+        assert "Bars since close: 1 H1" in prompt
+        assert "SHORT (ea)" in prompt
+        assert "-0.08" in prompt
+        assert "+2.5 pips" in prompt
+        assert "reentry_ok=false" in prompt   # rúbrica churn
+
+    @pytest.mark.asyncio
+    async def test_prompt_without_recent_close_instructs_true(self):
+        """Fuera de ventana / sin entrada: bloque presente (esquema
+        constante) con la instrucción explícita reentry_ok=true."""
+        client = self._mock_qwen(
+            '{"quality": 8.0, "reason": "ok", "bias": "BULLISH",'
+            ' "confidence_modifier": 1.1, "sl_adjusted": 0.20,'
+            ' "tp_adjusted": 0.40, "regime": "TRENDING", "reentry_ok": true}'
+        )
+        with patch("httpx.AsyncClient", return_value=client):
+            result = await query_qwen_unified(**_UNIFIED_BASE)
+
+        assert result["ok"] is True
+        prompt = self._prompt_of(client)
+        assert "Reentry check" in prompt
+        assert "Set reentry_ok=true" in prompt
+
+    @pytest.mark.asyncio
+    async def test_prompt_exit_details_unavailable(self):
+        """Cierre registrado pero sin detalles: el cerebro juzga sólo con
+        las velas (None honesto, nunca un cierre inventado)."""
+        client = self._mock_qwen(
+            '{"quality": 8.0, "reason": "ok", "bias": "BULLISH",'
+            ' "confidence_modifier": 1.1, "sl_adjusted": 0.20,'
+            ' "tp_adjusted": 0.40, "regime": "TRENDING", "reentry_ok": true}'
+        )
+        with patch("httpx.AsyncClient", return_value=client):
+            await query_qwen_unified(**{
+                **_UNIFIED_BASE, "reentry": {"bars_since_close": 1, "last_exit": None},
+            })
+        prompt = self._prompt_of(client)
+        assert "Exit details unavailable" in prompt
+        assert "Bars since close: 1 H1" in prompt
+
+    @pytest.mark.asyncio
+    async def test_parses_reentry_ok_false(self):
+        """El juicio del cerebro viaja al serve: reentry_ok=false se parsea
+        tal cual (es lo que dispara veto_reason=reentry_veto)."""
+        client = self._mock_qwen(
+            '{"quality": 8.0, "reason": "churn reopen", "bias": "BULLISH",'
+            ' "confidence_modifier": 1.1, "sl_adjusted": 0.20,'
+            ' "tp_adjusted": 0.40, "regime": "TRENDING", "reentry_ok": false}'
+        )
+        with patch("httpx.AsyncClient", return_value=client):
+            result = await query_qwen_unified(**{**_UNIFIED_BASE, "reentry": self._REENTRY})
+
+        assert result["reentry_ok"] is False
+
+    @pytest.mark.asyncio
+    async def test_missing_reentry_ok_defaults_true_fail_open(self):
+        """Respuesta sin el campo (modelo no siguió el esquema) → true
+        fail-open + WARNING en el logger del ciclo: nunca silencioso,
+        nunca un veto inventado."""
+        log = MagicMock()
+        client = self._mock_qwen(
+            '{"quality": 8.0, "reason": "ok", "bias": "BULLISH",'
+            ' "confidence_modifier": 1.1, "sl_adjusted": 0.20,'
+            ' "tp_adjusted": 0.40, "regime": "TRENDING"}'
+        )
+        with patch("httpx.AsyncClient", return_value=client):
+            result = await query_qwen_unified(
+                **{**_UNIFIED_BASE, "reentry": self._REENTRY, "logger": log},
+            )
+
+        assert result["reentry_ok"] is True
+        assert any(
+            "reentry_ok ausente" in str(call.args[0])
+            for call in log.warning.call_args_list
+        )
+
+
 class TestQueryQwenSltpValidator:
     """Tests for the SL/TP validator function."""
 

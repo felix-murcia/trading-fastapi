@@ -154,6 +154,10 @@ async def query_qwen_unified(
     regime: Optional[str] = None,
     support_level: Optional[float] = None,
     resistance_level: Optional[float] = None,
+    # R1 (Félix 2026-10-09): contexto de re-entrada — el veto de re-entrada
+    # lo decide el CEREBRO con estos datos (ventana de churn, cierre reciente
+    # y movimiento). `None` = fuera de ventana / sin entrada propuesta.
+    reentry: Optional[dict] = None,
 ) -> dict:
     """
     Unified Qwen query — single call per candle.
@@ -165,6 +169,9 @@ async def query_qwen_unified(
         - confidence_modifier: 0.5-1.5
         - sl_adjusted / tp_adjusted: norm values
         - regime: TRENDING/RANGING/VOLATILE/BREAKOUT
+        - reentry_ok: bool — juicio anti-churn de la re-entrada (R1); true
+          si no hay cierre reciente o el cerebro considera legítima la
+          entrada; false = churn (→ veto_reason=reentry_veto en serve)
     """
     session = _classify_session(hour)
     if regime is None:
@@ -204,12 +211,47 @@ async def query_qwen_unified(
     if support_level is not None and resistance_level is not None:
         context_lines.append(f"- Support: {support_level:.5f} | Resistance: {resistance_level:.5f}")
 
+    # P2 / R1: bloque de re-entrada — SIEMPRE presente (esquema de respuesta
+    # constante, estable frente al anti-ancla H2): dentro de la ventana el
+    # cerebro recibe el cierre reciente y la rúbrica churn; fuera de ella
+    # (o sin entrada propuesta) se instruye reentry_ok=true.
+    if reentry is not None:
+        last_exit = reentry.get("last_exit")
+        move = None if last_exit is None else last_exit.get("price_move_since_close_pips")
+        reentry_lines = [
+            "Reentry check — a position was closed recently:",
+            f"- Bars since close: {reentry['bars_since_close']} H1",
+        ]
+        if last_exit is None:
+            reentry_lines.append(
+                "- Exit details unavailable: judge on bars since close only.",
+            )
+        else:
+            reentry_lines.extend([
+                f"- Last exit: {last_exit['direction']} ({last_exit['exit_reason']}), "
+                f"PnL {last_exit['pnl']:+.2f} EUR, at {last_exit['exit_time']}",
+                "- Price move since close: "
+                + (f"{move:+.1f} pips" if move is not None else "unavailable"),
+            ])
+        reentry_lines.extend([
+            "- reentry_ok=false if re-opening the same trade moments after closing it",
+            "  with no new evidence (churn); true if new information, structure/regime",
+            "  change or fresh evidence justifies entering now.",
+        ])
+    else:
+        reentry_lines = [
+            "Reentry check: no recent close inside the churn window (or no entry proposed).",
+            "- Set reentry_ok=true.",
+        ]
+
     context_lines.extend([
         f"- Candles: {candle_context}",
         "",
         f"News: {news_context[:400] if news_context != 'Unavailable' else 'Unavailable'}",
         "",
         f"ML Signal: {decision} with ML confidence {ml_prob:.3f}",
+        "",
+        *reentry_lines,
         "",
         # P2-H2 (2026-10-09): el ejemplo único con quality=7.5/bias=NEUTRAL
         # anclaba la respuesta en la plantilla (temperature=0.2 + modelo
@@ -222,10 +264,10 @@ async def query_qwen_unified(
         "setup on its own context:",
         '{"quality": 8.5, "reason": "trend and ADX align", "bias": "BULLISH", "confidence_modifier": 1.3,'
         '  "sl_ok": true, "tp_ok": true, "sl_adjusted": 0.2000, "tp_adjusted": 0.4000,'
-        '  "regime": "TRENDING"}',
+        '  "reentry_ok": true, "regime": "TRENDING"}',
         '{"quality": 3.0, "reason": "range chop against signal", "bias": "BEARISH", "confidence_modifier": 0.7,'
         '  "sl_ok": false, "tp_ok": true, "sl_adjusted": 0.1600, "tp_adjusted": 0.3200,'
-        '  "regime": "RANGING"}',
+        '  "reentry_ok": false, "regime": "RANGING"}',
         "",
         "Fields: quality 0-10 — score on evidence: 7-10 only when trend/ADX/session",
         "agree with the ML signal and structure is clean; 1-4 when ranging chop,",
@@ -233,7 +275,8 @@ async def query_qwen_unified(
         "bias BULLISH/BEARISH/NEUTRAL aligned with the setup; confidence_modifier",
         "0.5-1.5 moving effective confidence the same direction; sl_ok/tp_ok booleans;",
         "adjusted SL 0.15-0.30, TP 0.125-0.30 with TP:SL >=1.5; regime",
-        "TRENDING/RANGING/VOLATILE/BREAKOUT.",
+        "TRENDING/RANGING/VOLATILE/BREAKOUT; reentry_ok boolean per the Reentry",
+        "check block above (true when there is no recent close).",
     ])
 
     prompt = "\n".join(context_lines)
@@ -286,12 +329,22 @@ async def query_qwen_unified(
         effective_prob = float(np.exp(np.log(max(ml_prob, 1e-6)) + np.log(conf_mod)))
         effective_prob = _clamp(effective_prob, 0.0, 1.0)
 
+        # R1: juicio de re-entrada — default true (fail-open) si el modelo
+        # no devolvió el campo: veto sólo por juicio explícito, nunca
+        # inventado; la ausencia se señala con WARNING (nunca silencioso).
+        reentry_ok = bool(parsed.get("reentry_ok", True))
+        if "reentry_ok" not in parsed:
+            logger.warning(
+                "[%s] QWEN-UNIFIED reentry_ok ausente en la respuesta → true (fail-open)",
+                cycle_id,
+            )
+
         logger.info(
             "[%s] QWEN-UNIFIED ║ q=%.1f bias=%s conf_mod=%.2f eff_prob=%.4f | "
-            "sl=%.3f→%.3f tp=%.3f→%.3f regime=%s | %s",
+            "sl=%.3f→%.3f tp=%.3f→%.3f regime=%s reentry_ok=%s | %s",
             cycle_id, q, bias, conf_mod, effective_prob,
             sl_proposed, sl_adj, tp_proposed, tp_adj,
-            parsed.get("regime", regime), reason[:60]
+            parsed.get("regime", regime), reentry_ok, reason[:60]
         )
         _record_success()
         return {
@@ -304,6 +357,7 @@ async def query_qwen_unified(
             "sl_adjusted": sl_adj,
             "tp_adjusted": tp_adj,
             "regime": parsed.get("regime", regime),
+            "reentry_ok": reentry_ok,
         }
 
     logger.warning("[%s] QWEN-UNIFIED HTTP %s: %s", cycle_id, res.status_code, res.text[:120])

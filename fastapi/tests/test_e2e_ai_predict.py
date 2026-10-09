@@ -79,6 +79,44 @@ class ConnectTimeoutAsyncClient(FakeAsyncClient):
         raise httpx.ConnectTimeout("MT5 down (test)")
 
 
+class QwenReentryRejectClient(FakeAsyncClient):
+    """R1: Qwen (cerebro sano) que rechaza la re-entrada — `reentry_ok=false`.
+    Calidad 8.5 + bias BULLISH para que el ÚNICO veto posible en ventana
+    sea el juicio de re-entrada (ni calidad ni bias compiten)."""
+
+    async def post(self, url, **kwargs):
+        if "/v1/chat/completions" in url:
+            return self._response({
+                "choices": [{
+                    "message": {
+                        "content": json.dumps({
+                            "quality": 8.5,
+                            "reason": "Strong bullish setup",
+                            "bias": "BULLISH",
+                            "confidence_modifier": 1.1,
+                            "sl_adjusted": 0.20,
+                            "tp_adjusted": 0.28,
+                            "regime": "TRENDING",
+                            "reentry_ok": False,
+                        })
+                    }
+                }]
+            })
+        return self._response({})
+
+
+# Último cierre de ejemplo para el contexto de re-entrada (R1) — régimen de
+# la casuística vivida en el trade 251: cierre del modelo tras 10 min.
+_LAST_EXIT = {
+    "exit_time": "2026-10-09T13:10:00+00:00",
+    "exit_reason": "ea",
+    "pnl": -0.08,
+    "direction": "SHORT",
+    "is_win": False,
+    "price_move_since_close_pips": 2.5,
+}
+
+
 def _build_candles():
     candles = []
     base = 1.1000
@@ -521,16 +559,17 @@ class _ServeHarness:
 
     @staticmethod
     @contextmanager
-    def _serve(model, bars=None):
+    def _serve(model, bars=None, last_exit=None, qwen_client=FakeAsyncClient):
         with patch("main.init_pool", AsyncMock()), \
              patch("main.close_pool", AsyncMock()), \
              patch("routers.ai.is_news_blackout", AsyncMock(return_value=(False, None))), \
              patch("routers.ai.fetch_bars_since_close", AsyncMock(return_value=bars)), \
+             patch("routers.ai.fetch_last_exit", AsyncMock(return_value=last_exit)), \
              patch("routers.ai.get_pool", return_value=MagicMock(execute=AsyncMock())), \
              patch("routers.ai.PPO.load", return_value=model), \
              patch("services.news_scraper.get_macro_news", AsyncMock(return_value="No macro news")), \
              patch("routers.ai.log_to_audit", AsyncMock()) as audit, \
-             patch("httpx.AsyncClient", FakeAsyncClient):
+             patch("httpx.AsyncClient", qwen_client):
             with TestClient(app) as client:
                 yield client, audit
 
@@ -550,24 +589,34 @@ class _ServeHarness:
         return calls[-1].args[1]
 
 
-class TestP1TimeStopAndCooldownServe(_ServeHarness):
-    """P1 (Félix 2026-10-08): time-stop serve + cooldown de re-entrada (H6).
+class TestP1TimeStopAndServeReentry(_ServeHarness):
+    """P1 (Félix 2026-10-08) + R1 (Félix 2026-10-09): time-stop serve y
+    re-entrada juzgada por el CEREBRO.
 
     - time-stop: posición abierta ≥ 12 H1 = 144 pasos M5 (la unidad que mide
       el EA: (TimeCurrent−pTime)/PeriodSeconds(M5)) → `decision=CLOSE` con
       `time_stop=True` y `veto_reason=time_stop`: es una SALIDA mecánica,
       gana a toda la cadena Qwen/vetos.
-    - cooldown: ≤ CHURN_BARS=2 velas H1 desde el último cierre de
-      `trade_outcomes` → BUY/SELL revertido a HOLD (`churn_cooldown`):
-      espejo serve del anti-churn del env entrenado.
-    - audit_log (ai_predict_cycle) lleva `time_stop`, `churn_cooldown` y
-      `bars_since_close` para que la traza distinga cada salida/veto."""
+    - R1 (`reentry_veto`): el veto duro `churn_cooldown` (constante de
+      2 velas «grabada a fuego») se sustituyó por el juicio contextual de
+      Qwen (`reentry_ok`) con los datos del cierre reciente. La VENTANA
+      sigue siendo ≤ CHURN_BARS=2 velas H1 desde el último cierre de
+      `trade_outcomes` (paridad con la fricción anti-churn del env); lo que
+      cambia es QUIÉN decide: reentry_ok=false → HOLD con
+      `veto_reason=reentry_veto`.
+    - Qwen degradado → red de emergencia documentada: sólo se bloquea la
+      1ª vela (bars=0); en velas tardías el juicio deja pasar y el
+      fail-closed de calidad (quality=0) mantiene el HOLD.
+    - audit_log (ai_predict_cycle) lleva `time_stop`, `reentry_window`
+      (condición cruda, continuidad de medición con el antiguo
+      `churn_cooldown`), `reentry_ok` (juicio del cerebro; None = no
+      evaluado) y `bars_since_close`."""
 
     def test_p1_boundaries_pin_confirmed_parameters(self):
         from ml.trading_env_v2 import CHURN_BARS, TIME_STOP_BARS
         from routers.ai import _M5_PER_H1
 
-        assert CHURN_BARS == 2                    # fronteras 2/3 del cooldown
+        assert CHURN_BARS == 2                    # frontera 2/3 de la ventana R1
         assert TIME_STOP_BARS == 12               # 12 velas H1 = fronteras 143/144
         assert _M5_PER_H1 == 12                   # conversión edad EA (M5) → H1
         assert TIME_STOP_BARS * _M5_PER_H1 == 144 # frontera en pasos M5 que mide el EA
@@ -584,7 +633,7 @@ class TestP1TimeStopAndCooldownServe(_ServeHarness):
         trace = self._cycle_audit(audit)
         assert trace["time_stop"] is True
         assert trace["veto_reason"] == "time_stop"
-        assert trace["churn_cooldown"] is False
+        assert trace["reentry_window"] is False   # posición abierta → sin ventana
 
     @pytest.mark.parametrize("steps_in_trade", [0, 143])
     def test_no_time_stop_below_threshold(self, steps_in_trade):
@@ -632,37 +681,89 @@ class TestP1TimeStopAndCooldownServe(_ServeHarness):
         assert trace["time_stop"] is False           # 5 < 12: aún lejos del cierre
 
     @pytest.mark.parametrize("bars", [0, 1, 2])
-    def test_cooldown_blocks_entry_within_churn_window(self, bars):
+    def test_brain_vetoes_reentry_within_window(self, bars):
+        """R1: dentro de ventana (≤ CHURN_BARS) decide el CEREBRO — Qwen
+        responde `reentry_ok=false` (churn) → HOLD con `reentry_veto`."""
         assert bars <= 2                            # frontera = CHURN_BARS
-        with self._serve(self._model(), bars=bars) as (client, audit):
+        with self._serve(
+            self._model(), bars=bars, last_exit=_LAST_EXIT,
+            qwen_client=QwenReentryRejectClient,
+        ) as (client, audit):
             response = self._predict(client, {"position": 0, "steps_in_trade": 0})
 
         assert response.status_code == 200, response.text
         assert response.json()["decision"] == "HOLD"
         trace = self._cycle_audit(audit)
-        assert trace["churn_cooldown"] is True
-        assert trace["veto_reason"] == "churn_cooldown"
+        assert trace["reentry_window"] is True
+        assert trace["reentry_ok"] is False
+        assert trace["veto_reason"] == "reentry_veto"
         assert trace["bars_since_close"] == bars
 
+    @pytest.mark.parametrize("bars", [0, 2])
+    def test_brain_approves_reentry_within_window(self, bars):
+        """R1: el cerebro puede APROBAR la re-entrada — `reentry_ok=true`
+        (o ausente → fail-open) → la entrada adelanta sin veto. Sin esta
+        pieza el veto duro antiguo bloqueaba aquí siempre."""
+        with self._serve(
+            self._model(), bars=bars, last_exit=_LAST_EXIT,
+        ) as (client, audit):
+            response = self._predict(client, {"position": 0, "steps_in_trade": 0})
+
+        assert response.status_code == 200, response.text
+        assert response.json()["decision"] == "BUY"
+        trace = self._cycle_audit(audit)
+        assert trace["reentry_window"] is True
+        assert trace["reentry_ok"] is True
+        assert trace["veto_reason"] is None
+
     @pytest.mark.parametrize("bars", [3, None])
-    def test_cooldown_releases_outside_window_or_without_history(self, bars):
+    def test_no_reentry_judgment_outside_window_or_without_history(self, bars):
+        """Fuera de ventana (> CHURN_BARS) o sin cierre: no se juzga nada
+        (`reentry_window=False`, `reentry_ok=None`) y no se consulta el
+        último cierre."""
         with self._serve(self._model(), bars=bars) as (client, audit):
             response = self._predict(client, {"position": 0, "steps_in_trade": 0})
 
         assert response.status_code == 200, response.text
         assert response.json()["decision"] == "BUY"
         trace = self._cycle_audit(audit)
-        assert trace["churn_cooldown"] is False
+        assert trace["reentry_window"] is False
+        assert trace["reentry_ok"] is None
         assert trace["veto_reason"] is None
 
-    def test_veto_reason_time_stop_and_churn_are_authority(self):
+    @pytest.mark.parametrize("bars,expected_veto,expected_ok", [
+        (0, "reentry_veto", False),   # 1ª vela: red de emergencia (bars=0)
+        (2, "quality_veto", True),    # vela tardía: pasa el juicio; calidad=0 (fail-closed) bloquea
+    ])
+    def test_degraded_brain_safe_default(self, bars, expected_veto, expected_ok):
+        """R1: Qwen degradado → safe default documentado: sólo se bloquea
+        la 1ª vela tras el cierre; el resto del HOLD lo garantiza el
+        fail-closed de calidad (quality=0). Nunca silencioso: WARNING
+        `REENTRY-DEFAULT` en log + `qwen_degraded` en audit."""
+        from services.qwen_client import _degraded_unified
+
+        degraded = _degraded_unified("TRENDING", 0.20, 0.40, 0.33, "Qwen unavailable")
+        with patch("routers.ai.query_qwen_unified", AsyncMock(return_value=degraded)), \
+             self._serve(self._model(), bars=bars, last_exit=_LAST_EXIT) as (client, audit):
+            response = self._predict(client, {"position": 0, "steps_in_trade": 0})
+
+        assert response.status_code == 200, response.text
+        assert response.json()["decision"] == "HOLD"
+        trace = self._cycle_audit(audit)
+        assert trace["reentry_window"] is True
+        assert trace["reentry_ok"] is expected_ok
+        assert trace["veto_reason"] == expected_veto
+        assert trace["qwen_degraded"] is True
+
+    def test_veto_reason_time_stop_and_reentry_are_authority(self):
         from routers.ai import _veto_reason
 
         ranging = {"regime": "RANGING", "quality": 9.0, "bias": "NEUTRAL"}
         # La salida por time-stop va por delante de cualquier veto de Qwen
         assert _veto_reason("HOLD", "CLOSE", ranging, time_stop=True) == "time_stop"
-        # El cooldown va por delante del ranging INFERIDO (final=HOLD+RANGING)
-        assert _veto_reason("BUY", "HOLD", ranging, churn_rejected=True) == "churn_cooldown"
+        # El veto de re-entrada va por delante del ranging INFERIDO
+        # (final=HOLD+RANGING): es la razón más específica del ciclo
+        assert _veto_reason("BUY", "HOLD", ranging, reentry_rejected=True) == "reentry_veto"
         # Sin flags: el inferido sigue siendo la autoridad (sin regresión)
         assert _veto_reason("BUY", "HOLD", ranging) == "ranging_veto"
 
@@ -680,7 +781,7 @@ class TestP0EntryConfidenceGate(_ServeHarness):
       `effective_prob` < umbral → HOLD con `veto_reason=low_confidence`,
       flag `low_confidence` + snapshot del umbral (`min_entry_confidence`) en
       audit (habilita el replay N≥50 sin recomputar).
-    - Prioridad mecánica > calidad: time-stop > position > churn > gate >
+    - Prioridad mecánica > calidad: time-stop > position > reentry > gate >
       ranging/quality/bias (el gate solo se evalúa con BUY/SELL propuestos).
     - Solo entradas: ciclos FLAT/HOLD/CLOSE no tocan el flag."""
 
@@ -756,20 +857,24 @@ class TestP0EntryConfidenceGate(_ServeHarness):
         assert trace["low_confidence"] is False
         assert trace["veto_reason"] == "time_stop"
 
-    def test_churn_cooldown_wins_over_armed_gate(self, monkeypatch):
-        """Orden de la cadena: position > churn > gate > ranging/quality.
-        Con cooldown activo Y eff bajo, el label es `churn_cooldown` (el
-        veto mecánico de re-entrada opera primero)."""
+    def test_reentry_veto_wins_over_armed_gate(self, monkeypatch):
+        """Orden de la cadena: position > reentry > gate > ranging/quality.
+        Con el cerebro rechazando la re-entrada Y eff bajo, el label es
+        `reentry_veto` (el juicio de re-entrada opera primero)."""
         monkeypatch.setattr(settings, "min_entry_confidence", 0.5)
-        with self._serve(self._model(direction=0.30), bars=0) as (client, audit):
+        with self._serve(
+            self._model(direction=0.30), bars=0, last_exit=_LAST_EXIT,
+            qwen_client=QwenReentryRejectClient,
+        ) as (client, audit):
             response = self._predict(client, {"position": 0, "steps_in_trade": 0})
 
         assert response.status_code == 200, response.text
         assert response.json()["decision"] == "HOLD"
         trace = self._cycle_audit(audit)
-        assert trace["churn_cooldown"] is True
+        assert trace["reentry_window"] is True
+        assert trace["reentry_ok"] is False
         assert trace["low_confidence"] is False
-        assert trace["veto_reason"] == "churn_cooldown"
+        assert trace["veto_reason"] == "reentry_veto"
 
     def test_veto_reason_priority_mechanical_beats_gate_beats_inferred(self):
         from routers.ai import _veto_reason
@@ -777,10 +882,10 @@ class TestP0EntryConfidenceGate(_ServeHarness):
         ranging = {"regime": "RANGING", "quality": 9.0, "bias": "NEUTRAL"}
         # El gate (calidad explícita operada) gana a los inferidos de Qwen
         assert _veto_reason("BUY", "HOLD", ranging, low_confidence=True) == "low_confidence"
-        # ...pero pierde ante lo mecánico: time-stop > position > churn
+        # ...pero pierde ante lo mecánico: time-stop > position > reentry
         assert _veto_reason(
-            "BUY", "HOLD", ranging, low_confidence=True, churn_rejected=True,
-        ) == "churn_cooldown"
+            "BUY", "HOLD", ranging, low_confidence=True, reentry_rejected=True,
+        ) == "reentry_veto"
         assert _veto_reason(
             "BUY", "HOLD", ranging, low_confidence=True, position_rejected=True,
         ) == "position_veto"

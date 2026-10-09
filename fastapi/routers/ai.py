@@ -55,7 +55,12 @@ from services.position_sizing import (
 from services.order_manager import mark_order_filled
 from services.qwen_client import query_qwen_unified, query_qwen_sltp_validator
 from services.structured_logging import log_to_audit
-from services.strategist import STRATEGIST_VERSION, deliberate, fetch_bars_since_close
+from services.strategist import (
+    STRATEGIST_VERSION,
+    deliberate,
+    fetch_bars_since_close,
+    fetch_last_exit,
+)
 from .deps import verify_token
 
 
@@ -112,7 +117,7 @@ def _veto_reason(
     sizing_rejected: bool = False,
     position_rejected: bool = False,
     time_stop: bool = False,
-    churn_rejected: bool = False,
+    reentry_rejected: bool = False,
     low_confidence: bool = False,
 ) -> str | None:
     if original == final:
@@ -135,17 +140,20 @@ def _veto_reason(
     # motivo (antes, 21 rechazos de sizing se atribuían a ranging/unknown_veto).
     if sizing_rejected:
         return "sizing_veto"
-    # P1 / H6: cooldown de re-entrada (espejo serve del CHURN_BARS del env).
-    # Declarado ANTES de los inferidos de Qwen: con final=HOLD y régimen
-    # RANGING, el ranging_veto de abajo se lo atribuiría indebidamente.
-    # Mutuamente excluyente con position_veto (position==0) y con sizing
-    # (la cadena ya revirtió a HOLD → sizing_below_min no se activa).
-    if churn_rejected:
-        return "churn_cooldown"
+    # P1 / H6 → R1 (Félix 2026-10-09): re-entrada juzgada por el CEREBRO
+    # (`reentry_veto`) — sustituyó al veto duro `churn_cooldown` (constante
+    # «grabada a fuego»). Sigue declarado ANTES de los inferidos de Qwen
+    # (ranging/quality/bias): es la razón más específica del ciclo (contexto
+    # de cierre) y con final=HOLD + RANGING el ranging_veto de abajo se lo
+    # atribuiría indebidamente. Mutuamente excluyente con position_veto
+    # (position==0) y con sizing (la cadena ya revirtió a HOLD →
+    # sizing_below_min no se activa).
+    if reentry_rejected:
+        return "reentry_veto"
     # P0 / H1: gate de confianza de entrada (umbral operado por el operador).
     # Va ANTES de los inferidos de Qwen (ranging/quality/bias): es un veto
     # EXPLÍCITO y trazable, no una interpretación de régimen. Detrás de los
-    # mecánicos (time-stop/position/churn) por la misma regla de prioridad.
+    # mecánicos (time-stop/position/reentry) por la misma regla de prioridad.
     if low_confidence:
         return "low_confidence"
     if final == "HOLD" and qwen.get("regime") == "RANGING":
@@ -516,15 +524,25 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         tp_p = entry_p + tp_pips * pip_size if env_position == 1 else entry_p - tp_pips * pip_size
 
     market_slice = df[features_list].iloc[-20:].values
-    # Fase 3 / P1: UNA sola consulta de velas desde el último cierre —
-    # alimenta el canal de memoria del obs (bundle (20,25)) Y el veto de
-    # cooldown de re-entrada (espejo CHURN_BARS, H6). Con el bundle activo
-    # la memoria ya se consultaba en cada ciclo; para bundles legados pasa
-    # a consultarse también (el veto cooldown no depende del contrato del
-    # obs). `None` = sin cierre registrado o salida anterior a la ventana →
-    # normalización 1.0 y SIN cooldown, idéntico al env sin `ever_closed`.
+    # Fase 3 / P1 / R1: UNA sola consulta de velas desde el último cierre —
+    # alimenta el canal de memoria del obs (bundle (20,25)) Y la ventana de
+    # re-entrada (R1: dentro de ella decide el cerebro, `reentry_ok`). Con
+    # el bundle activo la memoria ya se consultaba en cada ciclo; para
+    # bundles legados pasa a consultarse también (la ventana no depende del
+    # contrato del obs). `None` = sin cierre registrado o salida anterior a
+    # la ventana → normalización 1.0 y SIN ventana, idéntico al env sin
+    # `ever_closed`.
     bars_since_close = await fetch_bars_since_close(
         sym, df=df, current_price=current_price, pip_size=pip_size,
+    )
+    # R1 (Félix 2026-10-09): ventana de re-entrada — MISMO umbral que la
+    # fricción anti-churn del env (CHURN_BARS=2 velas H1). La ventana es
+    # paridad serve↔env; el JUICIO dentro de ella es del cerebro (antes:
+    # veto duro `churn_cooldown` con esta misma condición).
+    reentry_window = (
+        env_position == 0
+        and bars_since_close is not None
+        and bars_since_close <= CHURN_BARS
     )
     max_holding_steps = 120
     bars_norm = None
@@ -594,6 +612,21 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         logger.warning("[%s] get_recent_insights falló: %s", cycle_id, e)
         recent_insights = []
 
+    # R1: contexto de re-entrada para el juicio del cerebro — sólo dentro
+    # de la ventana y con entrada propuesta (lo único que el veto puede
+    # bloquear); así la consulta extra al último cierre ocurre únicamente
+    # cuando su resultado puede cambiar la decisión. `last_exit=None`
+    # (cierre fuera de la ventana de velas) → el prompt instruye juzgar
+    # sólo con las velas.
+    reentry = None
+    if reentry_window and decision in ("BUY", "SELL"):
+        reentry = {
+            "bars_since_close": bars_since_close,
+            "last_exit": await fetch_last_exit(
+                sym, df=df, current_price=current_price, pip_size=pip_size,
+            ),
+        }
+
     qwen = await query_qwen_unified(
         symbol=req.symbol,
         decision=decision,
@@ -615,6 +648,8 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         recent_insights=recent_insights,
         # Fase 2: Context injection for Qwen
         adx=float(df['adx'].iloc[-1]) if 'adx' in df.columns else None,
+        # R1: juicio de re-entrada con el contexto del cierre reciente
+        reentry=reentry,
     )
 
     final_decision = decision
@@ -630,15 +665,25 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             cycle_id, steps_h1, TIME_STOP_BARS,
         )
         final_decision = "CLOSE"
-    # P1 / H6: COOLDOWN de re-entrada — espejo serve del anti-churn del env
-    # (CHURN_BARS=2): ≤ 2 velas H1 desde el último cierre de trade_outcomes →
-    # sin entradas nuevas. Mutuamente excluyente con position_rejected
-    # (aquí position==0) y con time_stop (aquí position!=0).
-    churn_cooldown = (
-        env_position == 0
-        and bars_since_close is not None
-        and bars_since_close <= CHURN_BARS
-    )
+    # R1 (Félix 2026-10-09): JUICIO DE RE-ENTRADA — el veto duro
+    # `churn_cooldown` (constante de 2 velas) se sustituyó por el cerebro:
+    # Qwen decide `reentry_ok` con el contexto del cierre (pnl, dirección,
+    # razón, movimiento). La VENTANA (≤ CHURN_BARS, paridad con la fricción
+    # del env) queda intacta: lo único que cambia es QUIÉN decide.
+    # Con Qwen degradado manda la red de emergencia documentada (no lógica
+    # primaria): sólo se bloquea la 1ª vela tras el cierre (bars=0), el
+    # mínimo vital mientras el cerebro no responde — el fail-closed de
+    # calidad (quality=0) bloquea la entrada de todas formas.
+    reentry_ok: Optional[bool] = None
+    if reentry_window:
+        if qwen.get("ok", True):
+            reentry_ok = bool(qwen.get("reentry_ok", True))
+        else:
+            reentry_ok = bars_since_close > 0
+            logger.warning(
+                "[%s] REENTRY-DEFAULT (Qwen degradado) → reentry_ok=%s (bars=%d)",
+                cycle_id, reentry_ok, bars_since_close,
+            )
     # P0 / H1 (Félix 2026-10-09): GATE DE CONFIANZA DE ENTRADA — mecanismo
     # construido DESARMADO: `settings.min_entry_confidence = 0.0` (default)
     # → la rama de abajo no se evalúa jamás (no-op, cero cambio de
@@ -659,9 +704,10 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             cycle_id, final_decision, req.position,
         )
         final_decision = "HOLD"
-    elif churn_cooldown and final_decision in ("BUY", "SELL"):
+    elif reentry_window and reentry_ok is False and final_decision in ("BUY", "SELL"):
         logger.warning(
-            "[%s] VETO COOLDOWN ║ %d velas H1 desde el último cierre ≤ CHURN_BARS=%d → HOLD",
+            "[%s] VETO RE-ENTRADA (cerebro) ║ reentry_ok=false, %d velas H1 desde el "
+            "último cierre ≤ CHURN_BARS=%d → HOLD",
             cycle_id, bars_since_close, CHURN_BARS,
         )
         final_decision = "HOLD"
@@ -727,7 +773,7 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         sizing_rejected=sizing_below_min,
         position_rejected=position_rejected,
         time_stop=time_stop,
-        churn_rejected=churn_cooldown,
+        reentry_rejected=reentry_window and reentry_ok is False,
         low_confidence=low_confidence,
     )
     try:
@@ -795,13 +841,17 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             "veto": decision != final_decision,
             "veto_reason": veto_reason,
             "sizing_below_min": sizing_below_min,
-            # P1: traza de las salidas/vetos nuevos — `time_stop` es SALIDA
+            # P1 → R1: traza de las salidas/vetos — `time_stop` es SALIDA
             # (aunque el veto mecánico de arriba sea true: el modelo dijo otra
-            # cosa); `bars_since_close` justifica el cooldown (None = sin
-            # cierre reciente → sin cooldown); `steps_in_trade_h1` = edad de
+            # cosa); `reentry_window` = condición cruda de ventana (posición
+            # plana y ≤ CHURN_BARS velas desde el cierre — misma medición que
+            # el antiguo `churn_cooldown`, continuidad de la traza);
+            # `reentry_ok` = juicio del cerebro (None = no evaluado: fuera de
+            # ventana o sin entrada propuesta); `steps_in_trade_h1` = edad de
             # la posición en el dominio entrenado (H1, post-conversión).
             "time_stop": time_stop,
-            "churn_cooldown": churn_cooldown,
+            "reentry_window": reentry_window,
+            "reentry_ok": reentry_ok,
             # P0 / H1: flag = el veto de confianza OPERÓ este ciclo (la rama
             # solo evalúa BUY/SELL propuestos); umbral = snapshot por ciclo
             # para el replay N≥50 si más adelante se (des)arma vía env.
