@@ -20,6 +20,7 @@ Propiedad fijada por estos tests (2026-10-09):
 Si alguien vuelve a un solo valor ancla en cualquiera de los dos prompts,
 estos tests caen a rojo.
 """
+import json
 import re
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
@@ -40,11 +41,17 @@ def fresh_qwen_state(monkeypatch):
 def _capturing_client(canned_content: str):
     """Fake de httpx.AsyncClient que captura el prompt y devuelve JSON válido."""
 
+    body = {"choices": [{"message": {"content": canned_content}}]}
+    body_text = json.dumps(body)
+
     class _Resp:
         status_code = 200
+        # Cuerpo crudo: lo lee la traza QWEN-RESPONSE (httpx real siempre
+        # expone .text) — el fake debe reflejar la superficie usada por el código.
+        text = body_text
 
         def json(self):
-            return {"choices": [{"message": {"content": canned_content}}]}
+            return body
 
     class _Client:
         captured: dict = {}

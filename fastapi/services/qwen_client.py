@@ -281,13 +281,26 @@ async def query_qwen_unified(
 
     prompt = "\n".join(context_lines)
 
+    messages = [
+        {"role": "system", "content": "You are a quantitative trading analyst. Always respond in valid JSON."},
+        {"role": "user", "content": prompt},
+    ]
+
+    # Traza de entrada/salida del LLM (orden de Félix 2026-10-09): el prompt
+    # COMPLETO (system+user) ANTES de la llamada — visible también si la
+    # conexión falla — y la respuesta cruda DESPUÉS (más abajo), antes del
+    # parse. Ambos con la misma lifecycle que la decisión: un solo par de
+    # líneas por ciclo de /predict.
+    logger.info(
+        "[%s] QWEN-PROMPT ║\n%s",
+        cycle_id,
+        "\n".join(f"{m['role'].upper()}: {m['content']}" for m in messages),
+    )
+
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
             res = await client.post(QWEN_URL, json={
-                "messages": [
-                    {"role": "system", "content": "You are a quantitative trading analyst. Always respond in valid JSON."},
-                    {"role": "user", "content": prompt}
-                ],
+                "messages": messages,
                 "temperature": 0.2,
                 "max_tokens": 160,
                 "response_format": {"type": "json_object"},
@@ -300,6 +313,9 @@ async def query_qwen_unified(
         )
 
     if res.status_code == 200:
+        # Traza: cuerpo crudo ANTES de parsear — si el parse falla, la
+        # respuesta del modelo sigue siendo visible en el log.
+        logger.info("[%s] QWEN-RESPONSE ║ %s", cycle_id, res.text)
         try:
             content = res.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
             parsed = _parse_json_response(content)

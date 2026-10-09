@@ -8,6 +8,8 @@ Covers:
 - Invalid JSON handling
 - SL/TP validator logic
 """
+import json
+
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import httpx
@@ -38,6 +40,27 @@ _UNIFIED_BASE = dict(
 
 async def _call_unified(**overrides):
     return await query_qwen_unified(**{**_UNIFIED_BASE, **overrides})
+
+
+def _mock_qwen_client(content: str) -> MagicMock:
+    """Fake httpx.AsyncClient para query_qwen_unified — patrón probado de la
+    suite: `async with` cede el propio cliente; el POST devuelve 200 con
+    `content` como message.content (`.text` = cuerpo crudo, alimenta la traza
+    QWEN-RESPONSE)."""
+    body = {"choices": [{"message": {"content": content}}]}
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = body
+    mock_response.text = json.dumps(body)
+    client = MagicMock()
+    client.__aenter__.return_value = client
+    client.post = AsyncMock(return_value=mock_response)
+    return client
+
+
+def _prompt_from(client: MagicMock) -> str:
+    """El prompt (mensaje user) que se envió en la última llamada del fake."""
+    return client.post.call_args.kwargs["json"]["messages"][1]["content"]
 
 
 class TestQueryQwenUnified:
@@ -316,28 +339,10 @@ class TestReentryContext:
         },
     }
 
-    @staticmethod
-    def _mock_qwen(content: str):
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "choices": [{"message": {"content": content}}]
-        }
-        # Patrón probado en la suite: `async with` cede __aenter__.return_value
-        client = MagicMock()
-        client.__aenter__.return_value = client
-        client.post = AsyncMock(return_value=mock_response)
-        return client
-
-    @staticmethod
-    def _prompt_of(mock_client) -> str:
-        call = mock_client.post.call_args
-        return call.kwargs["json"]["messages"][1]["content"]
-
     @pytest.mark.asyncio
     async def test_prompt_carries_reentry_context(self):
         """Con cierre reciente: ventana, detalle del cierre y rúbrica."""
-        client = self._mock_qwen(
+        client = _mock_qwen_client(
             '{"quality": 8.0, "reason": "ok", "bias": "BULLISH",'
             ' "confidence_modifier": 1.1, "sl_adjusted": 0.20,'
             ' "tp_adjusted": 0.40, "regime": "TRENDING", "reentry_ok": true}'
@@ -346,7 +351,7 @@ class TestReentryContext:
             result = await query_qwen_unified(**{**_UNIFIED_BASE, "reentry": self._REENTRY})
 
         assert result["ok"] is True
-        prompt = self._prompt_of(client)
+        prompt = _prompt_from(client)
         assert "Reentry check" in prompt
         assert "Bars since close: 1 H1" in prompt
         assert "SHORT (ea)" in prompt
@@ -358,7 +363,7 @@ class TestReentryContext:
     async def test_prompt_without_recent_close_instructs_true(self):
         """Fuera de ventana / sin entrada: bloque presente (esquema
         constante) con la instrucción explícita reentry_ok=true."""
-        client = self._mock_qwen(
+        client = _mock_qwen_client(
             '{"quality": 8.0, "reason": "ok", "bias": "BULLISH",'
             ' "confidence_modifier": 1.1, "sl_adjusted": 0.20,'
             ' "tp_adjusted": 0.40, "regime": "TRENDING", "reentry_ok": true}'
@@ -367,7 +372,7 @@ class TestReentryContext:
             result = await query_qwen_unified(**_UNIFIED_BASE)
 
         assert result["ok"] is True
-        prompt = self._prompt_of(client)
+        prompt = _prompt_from(client)
         assert "Reentry check" in prompt
         assert "Set reentry_ok=true" in prompt
 
@@ -375,7 +380,7 @@ class TestReentryContext:
     async def test_prompt_exit_details_unavailable(self):
         """Cierre registrado pero sin detalles: el cerebro juzga sólo con
         las velas (None honesto, nunca un cierre inventado)."""
-        client = self._mock_qwen(
+        client = _mock_qwen_client(
             '{"quality": 8.0, "reason": "ok", "bias": "BULLISH",'
             ' "confidence_modifier": 1.1, "sl_adjusted": 0.20,'
             ' "tp_adjusted": 0.40, "regime": "TRENDING", "reentry_ok": true}'
@@ -384,7 +389,7 @@ class TestReentryContext:
             await query_qwen_unified(**{
                 **_UNIFIED_BASE, "reentry": {"bars_since_close": 1, "last_exit": None},
             })
-        prompt = self._prompt_of(client)
+        prompt = _prompt_from(client)
         assert "Exit details unavailable" in prompt
         assert "Bars since close: 1 H1" in prompt
 
@@ -392,7 +397,7 @@ class TestReentryContext:
     async def test_parses_reentry_ok_false(self):
         """El juicio del cerebro viaja al serve: reentry_ok=false se parsea
         tal cual (es lo que dispara veto_reason=reentry_veto)."""
-        client = self._mock_qwen(
+        client = _mock_qwen_client(
             '{"quality": 8.0, "reason": "churn reopen", "bias": "BULLISH",'
             ' "confidence_modifier": 1.1, "sl_adjusted": 0.20,'
             ' "tp_adjusted": 0.40, "regime": "TRENDING", "reentry_ok": false}'
@@ -408,7 +413,7 @@ class TestReentryContext:
         fail-open + WARNING en el logger del ciclo: nunca silencioso,
         nunca un veto inventado."""
         log = MagicMock()
-        client = self._mock_qwen(
+        client = _mock_qwen_client(
             '{"quality": 8.0, "reason": "ok", "bias": "BULLISH",'
             ' "confidence_modifier": 1.1, "sl_adjusted": 0.20,'
             ' "tp_adjusted": 0.40, "regime": "TRENDING"}'
@@ -423,6 +428,65 @@ class TestReentryContext:
             "reentry_ok ausente" in str(call.args[0])
             for call in log.warning.call_args_list
         )
+
+
+class TestPromptResponseTrace:
+    """Trazabilidad Qwen (orden de Félix 2026-10-09): `docker logs` debe
+    mostrar el prompt COMPLETO de entrada (system+user, ANTES de la llamada
+    — también visible si la conexión falla) y la respuesta CRUDA recibida
+    (ANTES del parse — también visible si el parse falla)."""
+
+    _CONTENT = (
+        '{"quality": 8.0, "reason": "ok", "bias": "BULLISH",'
+        ' "confidence_modifier": 1.1, "sl_adjusted": 0.20,'
+        ' "tp_adjusted": 0.40, "regime": "TRENDING", "reentry_ok": true}'
+    )
+
+    @staticmethod
+    def _info_traces(log: MagicMock, tag: str) -> list:
+        return [c.args for c in log.info.call_args_list if tag in str(c.args[0])]
+
+    @pytest.mark.asyncio
+    async def test_logs_full_prompt_before_call(self):
+        log = MagicMock()
+        client = _mock_qwen_client(self._CONTENT)
+        with patch("httpx.AsyncClient", return_value=client):
+            result = await _call_unified(reentry=TestReentryContext._REENTRY, logger=log)
+
+        assert result["ok"] is True
+        traces = self._info_traces(log, "QWEN-PROMPT")
+        assert len(traces) == 1, "falta la traza única QWEN-PROMPT"
+        trace = str(traces[0][2])                       # args = (fmt, cycle_id, texto)
+        assert "You are a quantitative trading analyst" in trace   # mensaje system
+        assert "ML Signal: BUY" in trace                           # mensaje user
+        assert "Reentry check" in trace
+        assert "Return EXACTLY JSON" in trace
+
+    @pytest.mark.asyncio
+    async def test_logs_raw_response_before_parse(self):
+        log = MagicMock()
+        client = _mock_qwen_client(self._CONTENT)
+        with patch("httpx.AsyncClient", return_value=client):
+            result = await _call_unified(logger=log)
+
+        assert result["ok"] is True
+        traces = self._info_traces(log, "QWEN-RESPONSE")
+        assert len(traces) == 1, "falta la traza única QWEN-RESPONSE"
+        assert "quality" in str(traces[0][2])          # cuerpo crudo con el JSON
+
+    @pytest.mark.asyncio
+    async def test_response_trace_visible_on_malformed_response(self):
+        """Parse falla → la respuesta cruda sigue trazada (nada silencioso)
+        y el resultado degrada (P1-6)."""
+        log = MagicMock()
+        client = _mock_qwen_client("not-a-json {")
+        with patch("httpx.AsyncClient", return_value=client):
+            result = await _call_unified(logger=log)
+
+        assert result["ok"] is False
+        traces = self._info_traces(log, "QWEN-RESPONSE")
+        assert len(traces) == 1
+        assert "not-a-json" in str(traces[0][2])
 
 
 class TestQueryQwenSltpValidator:
