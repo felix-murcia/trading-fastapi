@@ -11,6 +11,7 @@ Cobertura (comportamiento, no regex):
 """
 import asyncio
 from contextlib import ExitStack
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -194,6 +195,8 @@ class TestTriggerApproval:
         spawn = MagicMock()
         monkeypatch.setattr(ar, "_spawn_retrain_task", spawn)
         monkeypatch.setattr(ar.settings, "retrain_auto_approve", auto_approve)
+        # P2-3: por defecto sin cooldown; los tests de cooldown lo fijan a True.
+        monkeypatch.setattr(ar, "_cooldown_active", AsyncMock(return_value=False))
         return state, spawn
 
     @staticmethod
@@ -240,3 +243,96 @@ class TestTriggerApproval:
         await self._close_one_trade(deal_ticket=1003)
 
         spawn.assert_not_called()
+
+
+class TestCooldownPostRejection:
+    """P2-3 (2026-10-09, orden Félix): cooldown de 24 h tras un 'rejected'.
+
+    #30/#31 (2026-10-09, ambos trade_count → rejected) quemaron ~5 min de
+    cómputo por cierre EURUSD. Tras un rechazo el auto-trigger trade_count
+    se suprime 24 h desde finished_at; el contador sigue acumulando (queda
+    pendiente, no perdido) y los disparos manuales/forzados no se tocan.
+    """
+
+    @pytest.mark.asyncio
+    async def test_cooldown_blocks_auto_spawn_keeps_pending(self, monkeypatch):
+        min_trades = ar.RetrainConfig.min_trades_for_retrain
+        state, spawn = TestTriggerApproval._patch_trigger(
+            monkeypatch, min_trades - 1, True
+        )
+        monkeypatch.setattr(ar, "_cooldown_active", AsyncMock(return_value=True))
+
+        await TestTriggerApproval._close_one_trade(deal_ticket=2001)
+
+        assert state.filled_count == min_trades  # el cierre contó…
+        spawn.assert_not_called()                # …pero el retrain queda en cooldown
+
+    @pytest.mark.asyncio
+    async def test_forced_bypasses_cooldown(self, monkeypatch):
+        """force_retrain (orden humana) NO consulta el cooldown."""
+        state = RetrainState(filled_count=0)
+        monkeypatch.setattr(ar, "_ensure_retrain_state", AsyncMock(return_value=state))
+        spawn = MagicMock()
+        monkeypatch.setattr(ar, "_spawn_retrain_task", spawn)
+        monkeypatch.setattr(ar, "_cooldown_active", AsyncMock(return_value=True))
+
+        result = await force_retrain()
+
+        assert result["status"] == "triggered"
+        spawn.assert_called_once()
+        assert spawn.call_args[0][0] == "forced"
+
+
+class TestCooldownActive:
+    """Unit de _cooldown_active: ventana de 24 h desde finished_at del rechazo."""
+
+    @staticmethod
+    def _pool_with(last_rejected):
+        pool = MagicMock()
+        pool.fetchval = AsyncMock(return_value=last_rejected)
+        return pool
+
+    async def _active(self, last_rejected, now=None):
+        pool = self._pool_with(last_rejected)
+        with patch("db.connection.get_pool", return_value=pool):
+            return await ar._cooldown_active(now=now)
+
+    @pytest.mark.asyncio
+    async def test_recent_rejection_activates(self):
+        now = datetime(2026, 10, 9, 12, 0, tzinfo=timezone.utc).timestamp()
+        last = datetime(2026, 10, 9, 10, 30, tzinfo=timezone.utc)  # 1.5 h
+        assert await self._active(last, now=now) is True
+
+    @pytest.mark.asyncio
+    async def test_expired_after_24h(self):
+        now = datetime(2026, 10, 10, 12, 0, tzinfo=timezone.utc).timestamp()
+        last = datetime(2026, 10, 9, 10, 30, tzinfo=timezone.utc)  # 25.5 h
+        assert await self._active(last, now=now) is False
+
+    @pytest.mark.asyncio
+    async def test_boundary_24h(self):
+        base = datetime(2026, 10, 9, 10, 0, tzinfo=timezone.utc)
+        assert await self._active(
+            base, now=(base + timedelta(hours=23, minutes=59)).timestamp()
+        ) is True
+        assert await self._active(
+            base, now=(base + timedelta(hours=24, minutes=1)).timestamp()
+        ) is False
+
+    @pytest.mark.asyncio
+    async def test_no_rejections_no_cooldown(self):
+        assert await self._active(None) is False
+
+    @pytest.mark.asyncio
+    async def test_naive_timestamp_treated_as_utc(self):
+        now = datetime(2026, 10, 9, 12, 0, tzinfo=timezone.utc).timestamp()
+        assert await self._active(datetime(2026, 10, 9, 11, 0), now=now) is True
+
+    @pytest.mark.asyncio
+    async def test_query_targets_rejected_only(self):
+        pool = self._pool_with(None)
+        with patch("db.connection.get_pool", return_value=pool):
+            await ar._cooldown_active()
+        sql = pool.fetchval.call_args[0][0]
+        assert "status='rejected'" in sql
+        assert "max(finished_at)" in sql

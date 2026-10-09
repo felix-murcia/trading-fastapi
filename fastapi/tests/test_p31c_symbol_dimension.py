@@ -208,6 +208,8 @@ class TestFilledCountIsolation:
         monkeypatch.setattr(ar, "_spawn_retrain_task", MagicMock())
         monkeypatch.setattr("services.trade_journal.record_trade_closed", AsyncMock())
         monkeypatch.setattr(ar.settings, "retrain_auto_approve", True)
+        # P2-3: fuera de cooldown por defecto (los tests de cooldown lo fijan).
+        monkeypatch.setattr(ar, "_cooldown_active", AsyncMock(return_value=False))
 
     async def _fill(self, symbol: str):
         await ar.record_trade_filled(

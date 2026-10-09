@@ -303,6 +303,33 @@ async def _persist_trade_outcome(
     return trade_id
 
 
+# P2-3 (2026-10-09, decisión de Félix — «Cooldown 24h post-rechazo»):
+# tras un experimento 'rejected' el auto-trigger trade_count se suprime
+# durante 24 h. #30/#31 (ambos trade_count → rejected el 09-10) quemaron
+# ~5 min de cómputo por cierre EURUSD; el gate decide, la cadencia es
+# orquestación — ningún umbral del gate se toca.
+RETRAIN_COOLDOWN_HOURS = 24
+
+
+async def _cooldown_active(now: float | None = None) -> bool:
+    """True si hubo un experimento 'rejected' en las últimas RETRAIN_COOLDOWN_HOURS.
+
+    Fuente de verdad = ledger `training_experiments` (max finished_at de los
+    rechazos); sin estado propio que desincronizar. Los disparos
+    manuales/forzados/aprobados no lo consultan (decisión humana).
+    """
+    from db.connection import get_pool
+    last_rejected = await get_pool().fetchval(
+        "SELECT max(finished_at) FROM training_experiments WHERE status='rejected'"
+    )
+    if last_rejected is None:
+        return False
+    if last_rejected.tzinfo is None:
+        last_rejected = last_rejected.replace(tzinfo=timezone.utc)
+    ts = last_rejected.timestamp()
+    return (now if now is not None else time.time()) - ts < RETRAIN_COOLDOWN_HOURS * 3600
+
+
 async def record_trade_filled(
     symbol: str,
     entry_time: float | str,
@@ -397,6 +424,19 @@ async def record_trade_filled(
                 "[RETRAIN] Auto-retrain bloqueado: retrain_auto_approve=false. "
                 "Usar POST /api/v1/ai/retrain/approve?symbol=%s para aprobar el retrain pendiente.",
                 symbol,
+            )
+            return
+        # P2-3 (2026-10-09, decisión Félix): cooldown de 24 h tras un
+        # rechazo — #30/#31 quemaron ~5 min de cómputo por cierre EURUSD.
+        # filled_count NO se reinicia: el retrain queda pendiente y el
+        # primer cierre tras el cooldown lo dispara. Forzado/aprobado/calendario
+        # (168 h) no se tocan: solo el disparo automático por cierre.
+        if await _cooldown_active():
+            logger.warning(
+                "[RETRAIN] Auto-retrain en cooldown (≤%dh desde el último "
+                "rechazo): pendiente con filled_count=%d — el próximo cierre "
+                "tras el cooldown lo disparará.",
+                RETRAIN_COOLDOWN_HOURS, state.filled_count,
             )
             return
         _spawn_retrain_task("trade_count", symbol=symbol)
