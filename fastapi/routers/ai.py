@@ -113,6 +113,7 @@ def _veto_reason(
     position_rejected: bool = False,
     time_stop: bool = False,
     churn_rejected: bool = False,
+    low_confidence: bool = False,
 ) -> str | None:
     if original == final:
         return None
@@ -141,6 +142,12 @@ def _veto_reason(
     # (la cadena ya revirtió a HOLD → sizing_below_min no se activa).
     if churn_rejected:
         return "churn_cooldown"
+    # P0 / H1: gate de confianza de entrada (umbral operado por el operador).
+    # Va ANTES de los inferidos de Qwen (ranging/quality/bias): es un veto
+    # EXPLÍCITO y trazable, no una interpretación de régimen. Detrás de los
+    # mecánicos (time-stop/position/churn) por la misma regla de prioridad.
+    if low_confidence:
+        return "low_confidence"
     if final == "HOLD" and qwen.get("regime") == "RANGING":
         return "ranging_veto"
     if final == "HOLD" and qwen.get("quality", 10) < QUALITY_THRESHOLD:
@@ -632,6 +639,13 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         and bars_since_close is not None
         and bars_since_close <= CHURN_BARS
     )
+    # P0 / H1 (Félix 2026-10-09): GATE DE CONFIANZA DE ENTRADA — mecanismo
+    # construido DESARMADO: `settings.min_entry_confidence = 0.0` (default)
+    # → la rama de abajo no se evalúa jamás (no-op, cero cambio de
+    # comportamiento). Evidencia EN CONTRA pre-registrada en README (n=18,
+    # bandas inversas); armar solo con revisión N≥50 post-fix Qwen o orden
+    # explícita (env MIN_ENTRY_CONFIDENCE).
+    low_confidence = False
     # A-1: flip con posición abierta → el EA lo rechaza siempre en ejecución
     # (L407/L440/L475: rejected_position_open) porque la salida es exclusiva
     # SL/TP. El backend lo declara AQUÍ, antes de la cadena Qwen y del sizing,
@@ -649,6 +663,22 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         logger.warning(
             "[%s] VETO COOLDOWN ║ %d velas H1 desde el último cierre ≤ CHURN_BARS=%d → HOLD",
             cycle_id, bars_since_close, CHURN_BARS,
+        )
+        final_decision = "HOLD"
+    elif (
+        settings.min_entry_confidence > 0.0
+        and qwen["effective_prob"] < settings.min_entry_confidence
+        and final_decision in ("BUY", "SELL")
+    ):
+        # P0 / H1: solo con el umbral ARMADO (> 0.0). `effective_prob` es
+        # ml_prob × confidence_modifier (Qwen): el modificador dejó de ser
+        # constante 1.0 con el fix anti-ancla H2 (2026-10-09), así que este
+        # número es el candidato con poder discriminador real. Solo BUY/SELL
+        # (entradas): FLAT/HOLD/CLOSE y los vetos mecánicos de arriba mandan.
+        low_confidence = True
+        logger.warning(
+            "[%s] VETO CONFIANZA ║ effective_prob %.3f < umbral %.2f → HOLD",
+            cycle_id, qwen["effective_prob"], settings.min_entry_confidence,
         )
         final_decision = "HOLD"
     elif RANGING_VETO and qwen.get("regime") == "RANGING" and final_decision in ("BUY", "SELL"):
@@ -698,6 +728,7 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         position_rejected=position_rejected,
         time_stop=time_stop,
         churn_rejected=churn_cooldown,
+        low_confidence=low_confidence,
     )
     try:
         deliberation = await deliberate(
@@ -771,6 +802,11 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             # la posición en el dominio entrenado (H1, post-conversión).
             "time_stop": time_stop,
             "churn_cooldown": churn_cooldown,
+            # P0 / H1: flag = el veto de confianza OPERÓ este ciclo (la rama
+            # solo evalúa BUY/SELL propuestos); umbral = snapshot por ciclo
+            # para el replay N≥50 si más adelante se (des)arma vía env.
+            "low_confidence": low_confidence,
+            "min_entry_confidence": settings.min_entry_confidence,
             "bars_since_close": bars_since_close,
             "steps_in_trade_h1": steps_h1,
             "deliberation": deliberation,

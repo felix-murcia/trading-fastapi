@@ -499,18 +499,10 @@ def test_v3_direction_decoding_preserves_buy_sell_hold_mapping():
     assert decode_v3_direction(-0.8, current_position=-1) == (-1, "HOLD")
 
 
-class TestP1TimeStopAndCooldownServe:
-    """P1 (Félix 2026-10-08): time-stop serve + cooldown de re-entrada (H6).
-
-    - time-stop: posición abierta ≥ 12 H1 = 144 pasos M5 (la unidad que mide
-      el EA: (TimeCurrent−pTime)/PeriodSeconds(M5)) → `decision=CLOSE` con
-      `time_stop=True` y `veto_reason=time_stop`: es una SALIDA mecánica,
-      gana a toda la cadena Qwen/vetos.
-    - cooldown: ≤ CHURN_BARS=2 velas H1 desde el último cierre de
-      `trade_outcomes` → BUY/SELL revertido a HOLD (`churn_cooldown`):
-      espejo serve del anti-churn del env entrenado.
-    - audit_log (ai_predict_cycle) lleva `time_stop`, `churn_cooldown` y
-      `bars_since_close` para que la traza distinga cada salida/veto."""
+class _ServeHarness:
+    """Harness de serve (TestClient + Qwen fake + MT5 fake) compartido por
+    las suites P1 (time-stop/cooldown) y P0 (gate de confianza). No se
+    recolecta como tests (no empieza por `Test`)."""
 
     @staticmethod
     def _model(direction=0.80, volume=0.18):
@@ -556,6 +548,20 @@ class TestP1TimeStopAndCooldownServe:
         calls = [c for c in audit_mock.await_args_list if c.args[0] == "ai_predict_cycle"]
         assert calls, "sin traza ai_predict_cycle en audit_log"
         return calls[-1].args[1]
+
+
+class TestP1TimeStopAndCooldownServe(_ServeHarness):
+    """P1 (Félix 2026-10-08): time-stop serve + cooldown de re-entrada (H6).
+
+    - time-stop: posición abierta ≥ 12 H1 = 144 pasos M5 (la unidad que mide
+      el EA: (TimeCurrent−pTime)/PeriodSeconds(M5)) → `decision=CLOSE` con
+      `time_stop=True` y `veto_reason=time_stop`: es una SALIDA mecánica,
+      gana a toda la cadena Qwen/vetos.
+    - cooldown: ≤ CHURN_BARS=2 velas H1 desde el último cierre de
+      `trade_outcomes` → BUY/SELL revertido a HOLD (`churn_cooldown`):
+      espejo serve del anti-churn del env entrenado.
+    - audit_log (ai_predict_cycle) lleva `time_stop`, `churn_cooldown` y
+      `bars_since_close` para que la traza distinga cada salida/veto."""
 
     def test_p1_boundaries_pin_confirmed_parameters(self):
         from ml.trading_env_v2 import CHURN_BARS, TIME_STOP_BARS
@@ -659,3 +665,139 @@ class TestP1TimeStopAndCooldownServe:
         assert _veto_reason("BUY", "HOLD", ranging, churn_rejected=True) == "churn_cooldown"
         # Sin flags: el inferido sigue siendo la autoridad (sin regresión)
         assert _veto_reason("BUY", "HOLD", ranging) == "ranging_veto"
+
+
+class TestP0EntryConfidenceGate(_ServeHarness):
+    """P0 / H1 (Félix 2026-10-09): GATE DE CONFIANZA DE ENTRADA — construido
+    DESARMADO (`settings.min_entry_confidence = 0.0` → no-op) por la evidencia
+    pre-registrada en README (muestra n=18, trades 229–250): las bandas de
+    confianza son INVERSIAS (<0.5 = +4.58 €/trade, ≥0.7 = −1.89 €/trade) y un
+    gate armado habría restado dinero esa semana. Decisión de Félix:
+    «mecanismo listo, sin armar» — revisión pre-registrada a N≥50 trades
+    post-fix Qwen (conf_mod ya variable) antes de considerar armarlo.
+
+    - Armado (env MIN_ENTRY_CONFIDENCE / monkeypatch): propuesta BUY/SELL con
+      `effective_prob` < umbral → HOLD con `veto_reason=low_confidence`,
+      flag `low_confidence` + snapshot del umbral (`min_entry_confidence`) en
+      audit (habilita el replay N≥50 sin recomputar).
+    - Prioridad mecánica > calidad: time-stop > position > churn > gate >
+      ranging/quality/bias (el gate solo se evalúa con BUY/SELL propuestos).
+    - Solo entradas: ciclos FLAT/HOLD/CLOSE no tocan el flag."""
+
+    def test_default_threshold_is_disarmed_noop(self, monkeypatch):
+        """Umbral 0.0 (default): propuesta de confianza BAJA (eff 0.33)
+        se adelanta igual — el mecanismo existe pero NO opera."""
+        monkeypatch.setattr(settings, "min_entry_confidence", 0.0)
+        with self._serve(self._model(direction=0.30)) as (client, audit):
+            response = self._predict(client, {"position": 0, "steps_in_trade": 0})
+
+        assert response.status_code == 200, response.text
+        assert response.json()["decision"] == "BUY"
+        trace = self._cycle_audit(audit)
+        assert trace["low_confidence"] is False
+        assert trace["veto_reason"] is None
+        assert trace["min_entry_confidence"] == 0.0
+
+    def test_armed_gate_blocks_low_confidence_entry(self, monkeypatch):
+        """Umbral 0.5 armado: direction 0.30 → eff 0.33 < 0.5 → HOLD con
+        `low_confidence` (flag + label + snapshot del umbral en audit)."""
+        monkeypatch.setattr(settings, "min_entry_confidence", 0.5)
+        with self._serve(self._model(direction=0.30)) as (client, audit):
+            response = self._predict(client, {"position": 0, "steps_in_trade": 0})
+
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["decision"] == "HOLD"
+        assert payload["effective_prob"] == pytest.approx(0.33, abs=0.01)
+        trace = self._cycle_audit(audit)
+        assert trace["low_confidence"] is True
+        assert trace["veto_reason"] == "low_confidence"
+        assert trace["min_entry_confidence"] == 0.5
+
+    def test_armed_gate_passes_confident_entry(self, monkeypatch):
+        """Umbral 0.5 armado: direction 0.80 → eff 0.88 ≥ 0.5 → BUY pasa
+        sin flag (el gate no degrada entradas sanas)."""
+        monkeypatch.setattr(settings, "min_entry_confidence", 0.5)
+        with self._serve(self._model(direction=0.80)) as (client, audit):
+            response = self._predict(client, {"position": 0, "steps_in_trade": 0})
+
+        assert response.status_code == 200, response.text
+        assert response.json()["decision"] == "BUY"
+        trace = self._cycle_audit(audit)
+        assert trace["low_confidence"] is False
+        assert trace["veto_reason"] is None
+
+    def test_gate_ignores_cycles_without_entry_proposal(self, monkeypatch):
+        """FLAT (direction 0.0 → eff 0.11 < umbral 0.5) sin propuesta de
+        entrada: el gate es de ENTRADAS — no inventa veto donde no hay
+        nada que bloquear."""
+        monkeypatch.setattr(settings, "min_entry_confidence", 0.5)
+        with self._serve(self._model(direction=0.0)) as (client, audit):
+            response = self._predict(client, {"position": 0, "steps_in_trade": 0})
+
+        assert response.status_code == 200, response.text
+        trace = self._cycle_audit(audit)
+        assert trace["low_confidence"] is False
+        assert trace["veto_reason"] is None
+
+    def test_time_stop_wins_over_armed_gate(self, monkeypatch):
+        """Mecánica > calidad: posición ≥ 12 H1 → CLOSE aunque eff (0.88)
+        esté por debajo del umbral armado (0.9) — el gate no toca salidas."""
+        monkeypatch.setattr(settings, "min_entry_confidence", 0.9)
+        with self._serve(self._model(direction=0.80)) as (client, audit):
+            response = self._predict(client, {
+                "position": 1, "entry_price": 1.1000, "sl_price": 1.0985,
+                "tp_price": 1.1030, "steps_in_trade": 144,
+            })
+
+        assert response.status_code == 200, response.text
+        assert response.json()["decision"] == "CLOSE"
+        trace = self._cycle_audit(audit)
+        assert trace["low_confidence"] is False
+        assert trace["veto_reason"] == "time_stop"
+
+    def test_churn_cooldown_wins_over_armed_gate(self, monkeypatch):
+        """Orden de la cadena: position > churn > gate > ranging/quality.
+        Con cooldown activo Y eff bajo, el label es `churn_cooldown` (el
+        veto mecánico de re-entrada opera primero)."""
+        monkeypatch.setattr(settings, "min_entry_confidence", 0.5)
+        with self._serve(self._model(direction=0.30), bars=0) as (client, audit):
+            response = self._predict(client, {"position": 0, "steps_in_trade": 0})
+
+        assert response.status_code == 200, response.text
+        assert response.json()["decision"] == "HOLD"
+        trace = self._cycle_audit(audit)
+        assert trace["churn_cooldown"] is True
+        assert trace["low_confidence"] is False
+        assert trace["veto_reason"] == "churn_cooldown"
+
+    def test_veto_reason_priority_mechanical_beats_gate_beats_inferred(self):
+        from routers.ai import _veto_reason
+
+        ranging = {"regime": "RANGING", "quality": 9.0, "bias": "NEUTRAL"}
+        # El gate (calidad explícita operada) gana a los inferidos de Qwen
+        assert _veto_reason("BUY", "HOLD", ranging, low_confidence=True) == "low_confidence"
+        # ...pero pierde ante lo mecánico: time-stop > position > churn
+        assert _veto_reason(
+            "BUY", "HOLD", ranging, low_confidence=True, churn_rejected=True,
+        ) == "churn_cooldown"
+        assert _veto_reason(
+            "BUY", "HOLD", ranging, low_confidence=True, position_rejected=True,
+        ) == "position_veto"
+        assert _veto_reason(
+            "BUY", "CLOSE", ranging, low_confidence=True, time_stop=True,
+        ) == "time_stop"
+
+    def test_config_min_entry_confidence_default_and_range(self, monkeypatch):
+        """Setting P0: default 0.0 (desarmado) y rango [0,1] validado."""
+        from pydantic import ValidationError
+
+        from config import Settings
+
+        monkeypatch.delenv("MIN_ENTRY_CONFIDENCE", raising=False)
+        monkeypatch.delenv("min_entry_confidence", raising=False)
+        assert Settings().min_entry_confidence == 0.0
+        with pytest.raises(ValidationError):
+            Settings(min_entry_confidence=1.5)
+        with pytest.raises(ValidationError):
+            Settings(min_entry_confidence=-0.1)

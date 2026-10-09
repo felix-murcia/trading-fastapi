@@ -1,3 +1,4 @@
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
@@ -62,6 +63,17 @@ class Settings(BaseSettings):
     # Valor (p.ej. 15.0) = el guardian BLOQUEA aperturas nuevas cuando el
     # equity cae ≥ ese % desde el peak. Es de cuenta: aplica a todos los pares.
     max_drawdown_block_pct: float | None = None
+
+    # ─── P0 / H1: gate de confianza de entrada (Félix 2026-10-09) ─────────────
+    # Umbral mínimo de `effective_prob` (ml_prob × confidence_modifier) para
+    # adelantar una propuesta BUY/SELL. 0.0 (default) = MECANISMO DESARMADO
+    # (no-op: toda propuesta pasa, cero cambio de comportamiento).
+    # Evidencia EN CONTRA pre-registrada en README (muestra n=18 de trades
+    # 229–250): las bandas de confianza son INVERSIAS (<0.5 = +4.58 €/trade;
+    # ≥0.7 = −1.89 €/trade) — un gate armado habría restado dinero esa
+    # semana. Armar SOLO con (a) revisión N≥50 trades post-fix Qwen que lo
+    # justifique, o (b) orden explícita de Félix (env MIN_ENTRY_CONFIDENCE).
+    min_entry_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
 
     # ─── Market Microstructure ────────────────────────────────────────────────
     microstructure_features_enabled: bool = False  # Añade VP + Orderbook al predict (requiere retrain del modelo si se activa)
