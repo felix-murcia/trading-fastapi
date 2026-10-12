@@ -75,6 +75,13 @@ class Settings(BaseSettings):
     # justifique, o (b) orden explícita de Félix (env MIN_ENTRY_CONFIDENCE).
     min_entry_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
 
+    # ─── Parche del agujero del feed (Félix 2026-10-12) ──────────────────────
+    # El feed del MCP corta la historia en 2025-12-31 y sólo entrega el día
+    # vivo (agujero 2026-01-01→10-11). Los CSV de `resultadosBT/` (MT5, UTC
+    # puro) son la única fuente de 2026. Directorio con esos CSV; vacío =
+    # parche desactivado (el feed pasa tal cual).
+    csv_history_dir: str = ""
+
     # ─── Market Microstructure ────────────────────────────────────────────────
     microstructure_features_enabled: bool = False  # Añade VP + Orderbook al predict (requiere retrain del modelo si se activa)
     volume_profile_bins: int = 50         # Niveles de precio para Volume Profile

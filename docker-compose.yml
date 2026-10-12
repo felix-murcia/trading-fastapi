@@ -7,6 +7,7 @@ services:
     volumes:
       - ./fastapi/ml:/app/ml
       - ./mql5:/mql5:ro
+      - ./resultadosBT:/resultadosBT:ro
 
     restart: unless-stopped
     networks:
@@ -21,6 +22,7 @@ services:
       - INTERNAL_TOKEN=${INTERNAL_TOKEN}
       - HMAC_SECRET=${HMAC_SECRET}
       - MT5_HTTP_URL=${MT5_HTTP_URL}
+      - CSV_HISTORY_DIR=/resultadosBT
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
