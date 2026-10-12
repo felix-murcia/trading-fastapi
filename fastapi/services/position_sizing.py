@@ -53,6 +53,30 @@ def pip_value_per_lot(symbol: str, price: float) -> float:
     return 10.0                 # quote=USD (EURUSD, GBPUSD, AUDUSD, NZDUSD, XAUUSD)
 
 
+def expected_close_eur(symbol: str, pips: float, volume: float, price: float) -> float:
+    """Opción A (Félix 2026-10-12): beneficio en EUR que produciría un
+    cierre a `pips` de distancia con `volume` lotes — el dato que el gate
+    de recompensa mínima de `/predict` compara contra MIN_WIN_EUR.
+
+    Convención de la cuenta (EUR) idéntica al deal del bróker: en EURUSD
+    el pip value está en USD y USD→EUR = /price (1 EUR = price USD),
+    exacto — verificado contra el trade #255 (21.6 p × 0.01 lot a
+    1.12094 → 1.927 € calculado vs 1.93 € pagados por el bróker).
+
+    Símbolos sin conversión honesta definible desde el propio par (cual-
+    quiera que no sea EURUSD): ValueError — nada de tasas inventadas; el
+    gate no aplica donde la conversión no está definida y el error se
+    propaga (fracaso ruidoso, nunca silencioso).
+    """
+    if symbol != "EURUSD":
+        raise ValueError(f"expected_close_eur sin conversión EUR definida para {symbol}")
+    if pips <= 0.0 or volume <= 0.0 or price <= 0.0:
+        raise ValueError(
+            f"expected_close_eur exige pips/volume/price > 0: {pips}/{volume}/{price}"
+        )
+    return float(pips) * float(volume) * pip_value_per_lot(symbol, price) / float(price)
+
+
 def size_ppo_position(
     volume_norm: float,
     sl_pips: float,

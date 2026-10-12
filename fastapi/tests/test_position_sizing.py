@@ -22,6 +22,7 @@ import math
 import pytest
 
 from config import settings
+from core.rules import MIN_WIN_EUR, is_winning_close
 from services import position_sizing as ps
 
 
@@ -280,3 +281,39 @@ class TestPipSingleSource:
         # y su pip_value usa la regla base=USD (antes no existían aquí)
         assert ps.pip_value_per_lot("USDCNH", 7.80) == pytest.approx(10.0 / 7.80)
         assert ps.pip_value_per_lot("USDSEK", 10.50) == pytest.approx(10.0 / 10.50)
+
+
+class TestExpectedCloseEur:
+    """Opción A (Félix 2026-10-12): gate de recompensa mínima — cálculo del
+    beneficio que produciría un cierre a TP, en la divisa de la cuenta
+    (EUR), con paridad exacta al deal del bróker (verificado contra el
+    trade #255: 21.6 p × 0.01 lot a 1.12094 → 1.93 € pagados)."""
+
+    def test_eurusd_matches_broker_deal_255(self):
+        assert ps.expected_close_eur("EURUSD", 21.6, 0.01, 1.12094) == pytest.approx(1.93, abs=0.01)
+
+    def test_boundary_exact_min_win_is_not_blocked(self):
+        # Frontera exacta del gate: 30 pips × 0.01 lot a price 1.0 = 3.00 €
+        # = MIN_WIN_EUR. Paridad con la regla 3€ (is_winning_close(3.0) es
+        # WIN) → el gate deja pasar el empate: comparación estricta `<`.
+        reward = ps.expected_close_eur("EURUSD", 30.0, 0.01, 1.0)
+        assert reward == pytest.approx(MIN_WIN_EUR)
+        assert is_winning_close(reward)
+        assert not (reward < MIN_WIN_EUR)
+
+    def test_below_min_win_is_blocked(self):
+        assert ps.expected_close_eur("EURUSD", 29.9, 0.01, 1.0) < MIN_WIN_EUR
+
+    def test_non_eurusd_raises_no_invented_rate(self):
+        # Sin tasa cross definible desde el par → ValueError: el gate no
+        # aplica donde la conversión no es honesta (nada de tasas inventadas).
+        with pytest.raises(ValueError):
+            ps.expected_close_eur("GBPUSD", 30.0, 0.01, 1.27)
+
+    @pytest.mark.parametrize(
+        "pips,volume,price",
+        [(0.0, 0.01, 1.10), (30.0, 0.0, 1.10), (30.0, 0.01, 0.0), (-5.0, 0.01, 1.10)],
+    )
+    def test_non_positive_inputs_raise(self, pips, volume, price):
+        with pytest.raises(ValueError):
+            ps.expected_close_eur("EURUSD", pips, volume, price)

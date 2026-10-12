@@ -903,3 +903,167 @@ class TestP0EntryConfidenceGate(_ServeHarness):
             Settings(min_entry_confidence=1.5)
         with pytest.raises(ValidationError):
             Settings(min_entry_confidence=-0.1)
+
+
+def _build_tight_candles():
+    """Velas de ATR mínimo (~3 pips) → production_stops en rama flat:
+    SL = clamp(4.5, 10, 50) = 10 pips, TP = 20 pips. A tamaño mínimo de
+    lote ese TP rinde < 3 € — el escenario exacto del trade #255 (TP
+    21.6 p × 0.01 lot = 1.93 €): imposible de ganar por construcción."""
+    candles = []
+    base = 1.1000
+    for i in range(100):
+        timestamp = f"2024-01-01T{i // 60:02d}:{i % 60:02d}:00Z"
+        open_price = base + i * 0.00001
+        close_price = open_price + 0.0001
+        candles.append({
+            "time": timestamp,
+            "open": round(open_price, 5),
+            "high": round(close_price + 0.0001, 5),
+            "low": round(open_price - 0.0001, 5),
+            "close": round(close_price, 5),
+            "tick_volume": 1000 + i,
+        })
+    return candles[::-1]
+
+
+class TightCandlesClient(FakeAsyncClient):
+    """FakeAsyncClient con ATR mínimo (ver _build_tight_candles)."""
+
+    async def get(self, url, **kwargs):
+        if "/api/v1/market/candles/latest" in url:
+            return self._response(_build_tight_candles())
+        return await super().get(url, **kwargs)
+
+
+class TightReentryRejectClient(QwenReentryRejectClient, TightCandlesClient):
+    """ATR mínimo + cerebro que rechaza la re-entrada: compiten a la vez el
+    veto mecánico de recompensa y el juicio de re-entrada."""
+
+
+class TestRewardGate(_ServeHarness):
+    """Opción A (Félix 2026-10-12): GATE DE RECOMPENSA MÍNIMA — una entrada
+    cuyo TP no alcanza MIN_WIN_EUR (3 €) al tamaño elegido queda bloqueada:
+    el trade sería imposible de ganar por CONSTRUCCIÓN (el TP sella la
+    salida por debajo de la regla 3€ — ni CLOSE del modelo ni un manual
+    pueden superarlo sin rellenar el TP antes). Evidencia: trade #255
+    (2026-10-12) quality 9.0 / ml_prob 0.99, sizing 0.01 lot → TP 21.6 p =
+    1.93 € máx → clasificado LOSS por la propia regla; gate simulado sobre
+    las 48 órdenes rellenadas = 1 bloqueo (no degrada entradas sanas).
+
+    - veto: BUY/SELL con lote válido y reward_eur < 3.00 → HOLD con
+      `veto_reason=reward_below_min`; flag + snapshot `reward_eur` en audit.
+    - prioridad: mecánico antes que el juicio — position > reward >
+      reentry > gate > ranging/quality/bias; mutuamente excluyente con
+      sizing (exige lote > 0 → sizing se queda la atribución).
+    - solo entradas: FLAT/HOLD/CLOSE no computan recompensa.
+    - conversión: `expected_close_eur` verificada contra el deal real
+      #255 (1.927 € calculado vs 1.93 € del bróker) — ver TestExpectedCloseEur."""
+
+    @pytest.mark.parametrize("direction", [0.80, -0.80])
+    def test_block_when_tp_reward_below_min_win(self, direction):
+        """ATR mínimo (SL 10 p / TP 20 p) + vol head 0.04 → 0.01 lot:
+        TP = 20 × 0.01 × 10 / 1.1011 ≈ 1.82 € < 3 → HOLD con
+        reward_below_min. Para SELL también: el mecánico vence al veto
+        de bias (Qwen BULLISH)."""
+        with self._serve(
+            self._model(direction=direction, volume=0.04),
+            qwen_client=TightCandlesClient,
+        ) as (client, audit):
+            response = self._predict(client, {"position": 0, "steps_in_trade": 0})
+
+        assert response.status_code == 200, response.text
+        assert response.json()["decision"] == "HOLD"
+        trace = self._cycle_audit(audit)
+        assert trace["reward_below_min"] is True
+        assert trace["veto_reason"] == "reward_below_min"
+        assert trace["reward_eur"] == pytest.approx(20 * 0.01 * 10 / 1.1011, abs=0.01)
+        assert trace["reward_eur"] < 3.0
+
+    def test_pass_when_tp_reward_reaches_min_win(self):
+        """Candles por defecto (ATR ~25 p → TP ≥ 60 p) + vol head 0.18 →
+        0.01 lot: TP ≥ 4.5 € ≥ 3 → la propuesta BUY pasa SIN veto (el gate
+        no degrada entradas sanas: 47/48 órdenes históricas pasan)."""
+        with self._serve(self._model()) as (client, audit):
+            response = self._predict(client, {"position": 0, "steps_in_trade": 0})
+
+        assert response.status_code == 200, response.text
+        assert response.json()["decision"] == "BUY"
+        trace = self._cycle_audit(audit)
+        assert trace["reward_below_min"] is False
+        assert trace["veto_reason"] is None
+        assert trace["reward_eur"] >= 3.0
+
+    def test_reward_mechanical_beats_brain_judgment(self):
+        """Ventana de re-entrada + cerebro que rechaza (reentry_ok=false) +
+        recompensa < 3 €: ambos vetos califican → gana el MECÁNICO
+        (position > reward > reentry): el juicio no se adjudica un veto
+        que la regla ya explica."""
+        with self._serve(
+            self._model(direction=0.30, volume=0.04), bars=1, last_exit=_LAST_EXIT,
+            qwen_client=TightReentryRejectClient,
+        ) as (client, audit):
+            response = self._predict(client, {"position": 0, "steps_in_trade": 0})
+
+        assert response.status_code == 200, response.text
+        assert response.json()["decision"] == "HOLD"
+        trace = self._cycle_audit(audit)
+        assert trace["reentry_window"] is True
+        assert trace["reentry_ok"] is False
+        assert trace["reward_below_min"] is True
+        assert trace["veto_reason"] == "reward_below_min"
+
+    def test_sizing_veto_wins_when_no_lots(self):
+        """vol head 0.0 → presupuesto 0 → 0 lot (veto sizing). El gate de
+        recompensa no se computa (mutuamente excluyente: exige lote > 0)
+        — no roba la atribución del veto."""
+        with self._serve(
+            self._model(direction=0.80, volume=0.0),
+            qwen_client=TightCandlesClient,
+        ) as (client, audit):
+            response = self._predict(client, {"position": 0, "steps_in_trade": 0})
+
+        assert response.status_code == 200, response.text
+        assert response.json()["decision"] == "HOLD"
+        trace = self._cycle_audit(audit)
+        assert trace["sizing_below_min"] is True
+        assert trace["reward_below_min"] is False
+        assert trace["reward_eur"] is None
+        assert trace["veto_reason"] == "sizing_veto"
+
+    @pytest.mark.parametrize(
+        "position,direction,expected",
+        [(0, 0.0, "FLAT"), (1, 0.80, "HOLD")],
+    )
+    def test_non_entry_cycles_do_not_compute_reward(self, position, direction, expected):
+        """FLAT (sin dirección) y HOLD (ya en largo) no son entradas: la
+        recompensa no se computa — reward_eur=None, flag False, sin veto."""
+        with self._serve(self._model(direction=direction)) as (client, audit):
+            response = self._predict(client, {"position": position, "steps_in_trade": 0})
+
+        assert response.status_code == 200, response.text
+        assert response.json()["decision"] == expected
+        trace = self._cycle_audit(audit)
+        assert trace["reward_below_min"] is False
+        assert trace["reward_eur"] is None
+        assert trace["veto_reason"] is None
+
+    def test_veto_reason_reward_priority(self):
+        from routers.ai import _veto_reason
+
+        qwen = {"regime": "RANGING", "quality": 9.0, "bias": "NEUTRAL"}
+        # El gate de recompensa es mecánico: vence al juicio de re-entrada
+        # y al gate de confianza...
+        assert _veto_reason(
+            "BUY", "HOLD", qwen, reward_rejected=True, reentry_rejected=True,
+        ) == "reward_below_min"
+        assert _veto_reason(
+            "BUY", "HOLD", qwen, reward_rejected=True, low_confidence=True,
+        ) == "reward_below_min"
+        # ...y pierde ante los mecánicos superiores (position, time-stop).
+        assert _veto_reason(
+            "BUY", "HOLD", qwen, reward_rejected=True, position_rejected=True,
+        ) == "position_veto"
+        assert _veto_reason(
+            "BUY", "CLOSE", qwen, reward_rejected=True, time_stop=True,
+        ) == "time_stop"

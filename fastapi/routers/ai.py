@@ -21,6 +21,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from config import settings
 from core.container import build_registry_from_settings
 from core.pair import PairRegistry, default_model_path
+from core.rules import MIN_WIN_EUR
 from db.connection import get_pool
 from ml.trading_env_v2 import (
     CHURN_BARS,
@@ -48,6 +49,7 @@ from services.risk_guardian import observe_equity
 from services.risk_state_store import flush_risk_state
 from services.position_sizing import (
     PIP_SIZE,
+    expected_close_eur,
     is_supported,
     pip_value_per_lot,
     size_ppo_position,
@@ -119,6 +121,7 @@ def _veto_reason(
     time_stop: bool = False,
     reentry_rejected: bool = False,
     low_confidence: bool = False,
+    reward_rejected: bool = False,
 ) -> str | None:
     if original == final:
         return None
@@ -140,6 +143,14 @@ def _veto_reason(
     # motivo (antes, 21 rechazos de sizing se atribuían a ranging/unknown_veto).
     if sizing_rejected:
         return "sizing_veto"
+    # Opción A (Félix 2026-10-12): gate de recompensa mínima — mecánico
+    # como sizing (la regla 3€ decide, sin juicio) y MUTUAMENTE EXCLUSIVO
+    # con él por construcción (exige final_lots > 0 → si no cabe lote,
+    # sizing se queda la atribución y el orden entre ambos nunca decide).
+    # Va ANTES del juicio de re-entrada y de los inferidos de Qwen: es un
+    # veto EXPLÍCITO y trazable (calidad de la regla, no interpretación).
+    if reward_rejected:
+        return "reward_below_min"
     # P1 / H6 → R1 (Félix 2026-10-09): re-entrada juzgada por el CEREBRO
     # (`reentry_veto`) — sustituyó al veto duro `churn_cooldown` (constante
     # «grabada a fuego»). Sigue declarado ANTES de los inferidos de Qwen
@@ -753,6 +764,23 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     # bandas inversas); armar solo con revisión N≥50 post-fix Qwen o orden
     # explícita (env MIN_ENTRY_CONFIDENCE).
     low_confidence = False
+    # Opción A (Félix 2026-10-12): GATE DE RECOMPENSA MÍNIMA — si el TP del
+    # trade no alcanza MIN_WIN_EUR (3 €) al tamaño elegido, la entrada es
+    # imposible de ganar por CONSTRUCCIÓN: el TP sella la salida por debajo
+    # de la regla (ni CLOSE del modelo ni un manual pueden superar 3 € sin
+    # rellenar el TP antes). Evidencia: trade #255 (09-12) quality 9.0 /
+    # ml_prob 0.99 con sizing 0.01 lot → TP 21.6 p = 1.93 € máx → LOSS por
+    # la propia regla; gate simulado sobre las 48 órdenes rellenadas = 1
+    # bloqueo (no degrada entradas sanas). `reward_eur` se audita SIEMPRE
+    # que hay entrada propuesta (snapshot replayable, patrón
+    # min_entry_confidence). Mutuamente excluyente con sizing (exige
+    # final_lots > 0 → el veto de abajo se queda la atribución si no cabe
+    # lote). La conversión es honesta por diseño: expected_close_eur lanza
+    # ValueError para símbolos sin tasa EUR (hoy sólo EURUSD operativo).
+    reward_eur: Optional[float] = None
+    reward_below_min = False
+    if final_decision in ("BUY", "SELL") and final_lots > 0.0 and tp_pips_final > 0.0:
+        reward_eur = expected_close_eur(req.symbol, tp_pips_final, final_lots, current_price)
     # A-1: flip con posición abierta → el EA lo rechaza siempre en ejecución
     # (L407/L440/L475: rejected_position_open) porque la salida es exclusiva
     # SL/TP. El backend lo declara AQUÍ, antes de la cadena Qwen y del sizing,
@@ -764,6 +792,17 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             "[%s] VETO POSICION ║ flip %s con posición abierta (pos=%d) → HOLD "
             "(coherente con EA: salida solo SL/TP)",
             cycle_id, final_decision, req.position,
+        )
+        final_decision = "HOLD"
+    elif reward_eur is not None and reward_eur < MIN_WIN_EUR and final_decision in ("BUY", "SELL"):
+        # Opción A: mecánico (la regla 3€ ya lo decide) → va ANTES del
+        # juicio de re-entrada y de los inferidos de Qwen, detrás de los
+        # mecánicos superiores (time-stop/position, vía cadena + _veto_reason).
+        reward_below_min = True
+        logger.warning(
+            "[%s] VETO RECOMPENSA ║ TP %.1f pips × %.3f lot = %.2f€ < MIN_WIN_EUR=%.2f → HOLD "
+            "(imposible de ganar: el TP sella por debajo de la regla 3€)",
+            cycle_id, tp_pips_final, final_lots, reward_eur, MIN_WIN_EUR,
         )
         final_decision = "HOLD"
     elif reentry_window and reentry_ok is False and final_decision in ("BUY", "SELL"):
@@ -837,6 +876,7 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         time_stop=time_stop,
         reentry_rejected=reentry_window and reentry_ok is False,
         low_confidence=low_confidence,
+        reward_rejected=reward_below_min,
     )
     try:
         deliberation = await deliberate(
@@ -919,6 +959,13 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             # para el replay N≥50 si más adelante se (des)arma vía env.
             "low_confidence": low_confidence,
             "min_entry_confidence": settings.min_entry_confidence,
+            # Opción A: flag = el veto de recompensa mínima OPERÓ este ciclo
+            # (sólo BUY/SELL con lote válido); `reward_eur` = snapshot del
+            # beneficio del TP al tamaño elegido (None sin entrada
+            # propuesta) → replay del gate sin reconstruir la config
+            # histórica (patrón min_entry_confidence).
+            "reward_below_min": reward_below_min,
+            "reward_eur": round(reward_eur, 4) if reward_eur is not None else None,
             "bars_since_close": bars_since_close,
             "steps_in_trade_h1": steps_h1,
             "deliberation": deliberation,
