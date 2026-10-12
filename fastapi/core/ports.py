@@ -86,4 +86,5 @@ class LLMPort(Protocol):
         resistance_level: Optional[float] = None,
         reentry: Optional[dict] = None,
         calendar_events: Optional[list[dict]] = None,
+        higher_tf_context: Optional[str] = None,
     ) -> dict: ...

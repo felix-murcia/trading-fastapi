@@ -329,6 +329,89 @@ def _sma200_context(raw_sorted: pd.DataFrame) -> tuple[Optional[float], Optional
     return float(close.iloc[-1] - sma.iloc[-1]), float(sma.iloc[-1] - sma.iloc[-6])
 
 
+def _higher_tf_context_line(tf: str, res) -> str:
+    """Línea de contexto del marco superior H4/D para el prompt de Qwen.
+
+    Foco ampliado H4/D (Félix 2026-10-12, backlog P2 «Contexto H4/D»): SMA200
+    (estructura: posición + pendiente), RSI14 y ADX del timeframe superior —
+    el «contexto global» que la Fase 2 nunca cableó (solo `adx` H1) y que el
+    pack 1-4 sólo aproximó con un SMA200 DERIVADO de 240 H1.
+
+    Guardas — contexto de calidad, nunca inventado y nunca una excepción
+    hacia /predict (H4/D1 son contexto, no críticos):
+      - Exception (fetch caído) o HTTP ≠ 200 → «- {tf}: Unavailable» + warning;
+      - JSON inválido o payload sin ≥30 velas o sin columna `time`
+        (orden fiable = tendencia honesta) → «- {tf}: Unavailable»;
+      - CONTINUIDAD (vuelta roja 2026-10-12): hueco >168h entre barras →
+        «- {tf}: Unavailable» + warning. El feed real del MCP tenía un
+        agujero de 9.5 meses (historia hasta 2025-12-31 + solo el día vivo;
+        `candles/date` no recupera el rango) y sobre esa serie el SMA200/RSI
+        mienten (ejemplo medido: RSI 2.7, SMA200 dist −0.047 mezclando
+        dic-2025 con hoy). Ningún cierre de mercado/feriado legítimo supera
+        7 días (fin de semana ≤56h, festivos ≤~120h);
+      - NaN en RSI/ADX → se omite el campo (el SMA200 ya tiene sus guardas
+        en `_sma200_context`: ≥205 velas y no-NaN).
+    """
+    if isinstance(res, Exception):
+        logger.warning("higher-TF %s fetch falló: %s", tf, res)
+        return f"- {tf}: Unavailable"
+    status = getattr(res, "status_code", None)
+    if status != 200:
+        logger.warning("higher-TF %s HTTP %s del MCP", tf, status)
+        return f"- {tf}: Unavailable"
+    try:
+        data = res.json()
+    except ValueError:
+        logger.warning("higher-TF %s: payload sin JSON", tf)
+        return f"- {tf}: Unavailable"
+    if isinstance(data, list):
+        raw = data
+    elif isinstance(data, dict):
+        raw = data.get("candles") or []
+    else:
+        raw = []
+    if len(raw) < 30:
+        return f"- {tf}: Unavailable"
+    try:
+        frame = pd.DataFrame(raw)
+        if "time" not in frame.columns:
+            return f"- {tf}: Unavailable"
+        # Continuidad: un hueco >7 días invalida la serie entera (el bloque
+        # viejo y el reciente no forman una historia; los indicadores saldrían
+        # de la mezcla). Ver docstring — feed real roto desde ≤2026-10-07.
+        times = pd.to_datetime(frame["time"], errors="coerce", utc=True).dropna()
+        if len(times) < len(frame):
+            return f"- {tf}: Unavailable"
+        gap_h = float(times.sort_values().diff().dt.total_seconds().div(3600).max())
+        if gap_h > 168.0:
+            logger.warning(
+                "higher-TF %s: hueco de %.0fh en la serie → contexto descartado",
+                tf, gap_h,
+            )
+            return f"- {tf}: Unavailable"
+        df = engineer_market_features(frame)   # ordena por `time` (ascendente)
+    except (KeyError, ValueError, TypeError):
+        logger.warning("higher-TF %s: payload de velas no aprovechable", tf)
+        return f"- {tf}: Unavailable"
+    parts: list[str] = []
+    dist, slope = _sma200_context(df)
+    if dist is not None and slope is not None:
+        trend = "ABOVE" if dist > 0 else "BELOW"
+        slope_dir = "RISING" if slope > 0 else "FALLING" if slope < 0 else "FLAT"
+        parts.append(
+            f"Price {trend} SMA200 ({dist:+.4f}), SMA200 {slope_dir} ({slope:+.4f})"
+        )
+    rsi_v = float(df["rsi14"].iloc[-1]) * 100.0
+    adx_v = float(df["adx"].iloc[-1])
+    if not pd.isna(rsi_v):
+        parts.append(f"RSI {rsi_v:.1f}")
+    if not pd.isna(adx_v):
+        parts.append(f"ADX {adx_v:.2f}")
+    if not parts:
+        return f"- {tf}: Unavailable"
+    return f"- {tf}: " + ", ".join(parts)
+
+
 def _build_qwen_candle_context(df: pd.DataFrame, count: int = 10) -> str:
     """Compact candle sequence for Qwen: trend information without raw OHLC noise."""
     recent = df.tail(count).copy()
@@ -481,10 +564,35 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
                 f"{settings.mt5_http_url}/api/v1/market/candles/latest?symbol_name={req.symbol}&timeframe=H1&count=240",
                 timeout=3.0,
             )
-            equity_res, candles_res = await asyncio.gather(equity_task, candles_task)
+            # Foco ampliado H4/D (Félix 2026-10-12): marcos SUPERIORES para el
+            # contexto de Qwen — 250 velas por TF (SMA200 + 5 de margen). Van en
+            # el MISMO gather (sin latencia secuencial) y con
+            # return_exceptions: su fallo degrada la línea a «Unavailable»
+            # (son contexto, no críticos); equity/H1 conservan su camino HOLD.
+            h4_task = client.get(
+                f"{settings.mt5_http_url}/api/v1/market/candles/latest?symbol_name={req.symbol}&timeframe=H4&count=250",
+                timeout=3.0,
+            )
+            d1_task = client.get(
+                f"{settings.mt5_http_url}/api/v1/market/candles/latest?symbol_name={req.symbol}&timeframe=D1&count=250",
+                timeout=3.0,
+            )
+            equity_res, candles_res, h4_res, d1_res = await asyncio.gather(
+                equity_task, candles_task, h4_task, d1_task,
+                return_exceptions=True,
+            )
     except (httpx.ConnectTimeout, httpx.TimeoutException, httpx.HTTPError) as exc:
         logger.warning("[%s] MT5 connection error in predict: %s", cycle_id, exc)
         return PredictResponse(cycle_id=cycle_id, ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
+
+    # equity y H1 son CRÍTICOS: el return_exceptions del gather no puede
+    # enmascarar su tratamiento de siempre (mismo camino HOLD / re-lanzado).
+    for _critico in (equity_res, candles_res):
+        if isinstance(_critico, Exception):
+            if isinstance(_critico, httpx.HTTPError):
+                logger.warning("[%s] MT5 connection error in predict: %s", cycle_id, _critico)
+                return PredictResponse(cycle_id=cycle_id, ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
+            raise _critico
 
     try:
         equity_val = (
@@ -539,6 +647,16 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     # MCP) el "reciente" eran las velas más ANTIGUAS y la hora de sesión la de
     # una semana atrás.
     candle_context = _build_qwen_candle_context(df, count=10)
+
+    # Foco ampliado H4/D: bloque de marcos superiores para el Qwen — esquema
+    # SIEMPRE constante (`- H4:` / `- D1:`, con «Unavailable» si el fetch
+    # falló) → anti-ancla H2 y degradación honesta y visible.
+    higher_tf_context = (
+        "- Higher-timeframe context (H4/D1) — contrast the H1 signal with the "
+        "larger trend:\n"
+        f"{_higher_tf_context_line('H4', h4_res)}\n"
+        f"{_higher_tf_context_line('D1', d1_res)}"
+    )
 
     brain = _BRAINS.get(sym)
     if brain is None:
@@ -721,6 +839,8 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         support_level=support_level,
         resistance_level=resistance_level,
         calendar_events=calendar_events,
+        # Foco ampliado H4/D: marcos superiores (bloque ya formateado)
+        higher_tf_context=higher_tf_context,
         # R1: juicio de re-entrada con el contexto del cierre reciente
         reentry=reentry,
     )

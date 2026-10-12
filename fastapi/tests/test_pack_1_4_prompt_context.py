@@ -306,14 +306,17 @@ class TestPredictWiring:
         assert "tp_proposed" not in kw
 
     def test_engineer_receives_newest_120_ascending(self, monkeypatch):
-        """Las features se calculan sobre las 120 velas MÁS RECIENTES en
-        orden ascendente — el contrato de obs no cambia con el fetch de 240."""
+        """Las features del MODELO se calculan sobre las 120 velas MÁS
+        RECIENTES en orden ascendente — el contrato de obs no cambia con el
+        fetch de 240. (Desde el foco ampliado H4/D, 10-12, el engineer se
+        invoca también para el contexto de marcos superiores: la llamada [0]
+        es SIEMPRE la del modelo.)"""
         model = _model()
         with _serve(monkeypatch, model, _candles(240)) as (client, *_):
             with patch("routers.ai.engineer_market_features", wraps=_real_engineer) as eng:
                 resp = _post(client, "pack14-engineer")
             assert resp.status_code == 200, resp.text
-        (raw_input,) = eng.call_args.args
+        (raw_input,) = eng.call_args_list[0].args
         assert len(raw_input) == 120, f"features deben salir de 120 velas, no {len(raw_input)}"
         assert raw_input["time"].is_monotonic_increasing
         assert raw_input["time"].iloc[0] == "2026-01-06T00:00:00Z"

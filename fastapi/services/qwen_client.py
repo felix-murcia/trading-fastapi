@@ -206,6 +206,11 @@ async def query_qwen_unified(
     # routers.ai (−120…+240 min, top 3). `None` = filtro de noticias
     # deshabilitado; `[]` = activo sin eventos en la ventana.
     calendar_events: Optional[list[dict]] = None,
+    # Foco ampliado H4/D (Félix 2026-10-12): marcos SUPERIORES — bloque ya
+    # formateado por routers.ai (cabecera + `- H4:` + `- D1:`, con
+    # «Unavailable» si el fetch falló). `None` = sin bloque (back-compat).
+    # Contexto de tendencia mayor, nunca de puntuación (restricción H2).
+    higher_tf_context: Optional[str] = None,
 ) -> dict:
     """
     Unified Qwen query — single call per candle.
@@ -261,6 +266,11 @@ async def query_qwen_unified(
 
     if support_level is not None and resistance_level is not None:
         context_lines.append(f"- Support: {support_level:.5f} | Resistance: {resistance_level:.5f}")
+
+    # Foco ampliado H4/D: contexto de marco superior DENTRO del bloque
+    # Context (antes de `- Candles:`). Esquema constante anti-ancla H2.
+    if higher_tf_context:
+        context_lines.extend(higher_tf_context.splitlines())
 
     # P2 / R1: bloque de re-entrada — SIEMPRE presente (esquema de respuesta
     # constante, estable frente al anti-ancla H2): dentro de la ventana el
