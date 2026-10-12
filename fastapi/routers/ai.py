@@ -356,6 +356,11 @@ def _load_csv_candles(symbol: str, tf: str) -> list[dict]:
                 "open": o, "high": hi, "low": lo, "close": cl,
                 "tick_volume": int(row[6]) if len(row) > 6 and row[6].strip().isdigit() else 0,
                 "spread": int(row[8]) if len(row) > 8 and row[8].strip().isdigit() else 0,
+                # Paridad de columnas con las velas del MCP: sin `real_volume`
+                # la columna queda NaN al concatenar y el `dropna()` de
+                # `engineer_market_features` descarta TODAS las filas CSV
+                # (regresión 500 en build_v3_observation, 2026-10-12).
+                "real_volume": 0,
             })
     return out
 

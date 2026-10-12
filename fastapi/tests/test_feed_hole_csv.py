@@ -121,6 +121,26 @@ class TestFillFeedHole:
         out = routers.ai._fill_feed_hole(candles, "EURUSD", "H4")
         assert "2026-10-11T16:00:00Z" in {c["time"] for c in out}
 
+    def test_csv_paridad_columnas_mcp(self, tmp_path, monkeypatch):
+        """Regresión 500 (2026-10-12): las velas CSV deben llevar `real_volume`.
+
+        Sin esa columna, al concatenar con las vivas del MCP queda NaN y el
+        `dropna()` de `engineer_market_features` descarta TODAS las filas CSV
+        → `market_slice` queda con solo las vivas (4 filas) →
+        `build_v3_observation` lanza ValueError (4≠20) → predict 500.
+        """
+        monkeypatch.setattr(routers.ai.settings, "csv_history_dir", str(tmp_path))
+        _write_csv(tmp_path, "EURUSD", "H1", [("2026.10.11T20:00:00", 1.15)])
+        candles = _mk_candles([
+            ("2025-12-31T23:00:00Z", 1.18),
+            ("2026-10-12T00:00:00Z", 1.19),
+        ])
+        out = routers.ai._fill_feed_hole(candles, "EURUSD", "H1")
+        csv_rows = [c for c in out if c["time"].startswith("2026-10-11")]
+        assert csv_rows, "debe haber filas del CSV en el merge"
+        for row in csv_rows:
+            assert "real_volume" in row, "la vela CSV carece de real_volume"
+
 
 def _write_csv(csv_dir, symbol, tf, rows):
     """Escribe un CSV MT5 (tabulado, UTC puro) con las filas dadas.
