@@ -109,6 +109,27 @@ TP_MAX_NORM = 0.50
 # en audit_log EN TODOS los ciclos — el rate-limit solo silencia el ruido de
 # `docker logs` (antes: 21 ERROR "sizing inviable" en una ventana).
 _SIZING_WARN_TS: dict[str, float] = {}
+
+# Histeresis CLOSE K=2 ciclos (ítem cierres tempranos, 2026-10-12): el
+# contrafactual con datos reales mostró que los cierres `ea` (zona muerta)
+# dejan +257€ sobre la mesa (83% tocó TP en 48h). K=2: 1er ciclo en zona
+# muerta → HOLD, 2º ciclo consecutivo → CLOSE. Contador por símbolo.
+_DEAD_ZONE_COUNTER: dict[str, int] = {}
+
+
+def _dead_zone_close(symbol: str, decision: str, env_position: int = 1) -> bool:
+    """Histeresis CLOSE K=2. True = cerrar; False = mantener (HOLD).
+
+    Resetea el contador cuando la decisión no es CLOSE o no hay posición.
+    El 1er ciclo en zona muerta no cierra; el 2º consecutivo sí.
+    `env_position` default 1 = posición abierta (el caso que importa).
+    """
+    if decision != "CLOSE" or env_position == 0:
+        _DEAD_ZONE_COUNTER[symbol] = 0
+        return True
+    count = _DEAD_ZONE_COUNTER.get(symbol, 0) + 1
+    _DEAD_ZONE_COUNTER[symbol] = count
+    return count >= 2
 _SIZING_WARN_INTERVAL_S = 600.0
 
 
@@ -752,6 +773,16 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     direction, volume_norm = float(raw_action[0]), float(raw_action[1])
 
     target_pos, decision = decode_v3_direction(float(direction), env_position)
+    # Histeresis CLOSE K=2 (ítem cierres tempranos, 2026-10-12): no cerrar en
+    # el 1er ciclo en zona muerta — esperar 2 consecutivos antes de ejecutar.
+    # Sin el contrafactual con datos reales, estos cierres dejaban +257€ sobre
+    # la mesa (83% tocó TP en 48h). Resetea el contador fuera de zona muerta.
+    if not _dead_zone_close(req.symbol, decision, env_position):
+        logger.info(
+            "[%s] HISTERESIS CLOSE ║ 1er ciclo en zona muerta → HOLD (K=2)",
+            cycle_id,
+        )
+        decision = "HOLD"
     ml_prob = float(np.clip(abs(direction), 0.1, 0.99))
 
     # P2-2: sizing delegado en position_sizing.size_ppo_position — la cabeza

@@ -121,7 +121,15 @@ class TestPredictPositionVeto:
         assert data["veto_reason"] is None
 
     def test_close_with_position_is_not_vetoed(self, monkeypatch):
-        """CLOSE es el flujo legítimo de salida con posición abierta (EA L358)."""
+        """CLOSE es el flujo legítimo de salida con posición abierta (EA L358).
+        Histeresis K=2 (2026-10-12): 1er ciclo zona muerta → HOLD, 2º → CLOSE."""
+        import routers.ai
+        routers.ai._DEAD_ZONE_COUNTER.clear()
+        # 1er ciclo en zona muerta → HOLD (histeresis)
+        response, _ = _post_predict(ACTION_DEADBAND, monkeypatch, position=1)
+        assert response.status_code == 200, response.text
+        assert response.json()["decision"] == "HOLD"
+        # 2º ciclo consecutivo → CLOSE (sin veto de posición)
         response, audit_mock = _post_predict(ACTION_DEADBAND, monkeypatch, position=1)
         assert response.status_code == 200, response.text
         assert response.json()["decision"] == "CLOSE"
