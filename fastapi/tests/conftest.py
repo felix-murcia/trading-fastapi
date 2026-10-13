@@ -25,6 +25,15 @@ import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
 
+@pytest.fixture(autouse=True)
+def fresh_qwen_state(monkeypatch):
+    """Estado de Qwen aislado POR TEST — el módulo es estado compartido
+    (salud P1-6 + guardas anti-ancla/anti-parrota con racha por símbolo;
+    la racha filtraría desde tests anteriores si no se resetea)."""
+    import services.qwen_client as qwen_client
+    monkeypatch.setattr(qwen_client, "_QWEN_STATE", qwen_client.QwenHealthState())
+
+
 @pytest.fixture
 def mock_settings():
     """Mock settings for tests that don't need real DB/MT5."""

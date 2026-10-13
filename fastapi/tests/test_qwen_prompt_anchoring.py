@@ -67,6 +67,7 @@ def _capturing_client(canned_content: str):
 
         async def post(self, url, json=None, **kwargs):
             _Client.captured["prompt"] = json["messages"][1]["content"]
+            _Client.captured["payload"] = json
             return _Resp()
 
     return _Client
@@ -287,6 +288,33 @@ class TestAnchorCopyGuardRCA:
         assert example_reasons == set(qwen_client.FORMAT_EXAMPLE_REASONS), (
             f"desincronizados: prompt={example_reasons} "
             f"const={set(qwen_client.FORMAT_EXAMPLE_REASONS)}"
+        )
+
+
+class TestTemperatureExperimentB:
+    """Opción B (orden Félix 2026-10-13): temperatura 0.2 → 0.4 — el modelo
+    debe juzgar de verdad (a 0.2 cae en basin determinista de plantilla:
+    q=8.5/conf_mod=1.30 constantes en 100% out-of-window)."""
+
+    @pytest.mark.asyncio
+    async def test_unified_temperature_is_point_four(self):
+        """El payload del unificado fija la temperatura del experimento B."""
+        client = _capturing_client(_UNIFIED_CANNED)
+        with patch("httpx.AsyncClient", client):
+            await query_qwen_unified(**_UNIFIED_ARGS)
+        assert client.captured["payload"]["temperature"] == 0.4, (
+            "temperatura del experimento B no aplicada"
+        )
+
+    @pytest.mark.asyncio
+    async def test_temperature_constant_is_used(self):
+        """El payload usa la constante QWEN_TEMPERATURE_UNIFIED (single source)."""
+        client = _capturing_client(_UNIFIED_CANNED)
+        with patch("httpx.AsyncClient", client):
+            await query_qwen_unified(**_UNIFIED_ARGS)
+        assert (
+            client.captured["payload"]["temperature"]
+            == qwen_client.QWEN_TEMPERATURE_UNIFIED
         )
 
 

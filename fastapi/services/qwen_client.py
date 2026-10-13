@@ -112,6 +112,14 @@ PARROT_STREAK_LIMIT = 3
 # frontera limpia en 0.5).
 PARROT_SIMILARITY_THRESHOLD = 0.5
 
+# Orden Félix 2026-10-13 (opción B): temperatura del prompt unificado
+# 0.2 → 0.4 — el modelo (Qwen3-4B) a 0.2 cae en un basin determinista de
+# plantilla (parrota con q=8.5 / conf_mod=1.30 constantes en 100 % de los
+# ciclos out-of-window desde 10:35). 0.4 busca diversidad de decodificación
+# para que discrimine de verdad. Las guardas anti-ancla y anti-parrota (C+)
+# quedan como red de seguridad: si el síntoma persiste, fail-closed.
+QWEN_TEMPERATURE_UNIFIED = 0.4
+
 
 def _reason_tokens(reason: str) -> frozenset:
     """Tokens normalizados de una razón (minúsculas, alfanuméricos)."""
@@ -426,7 +434,7 @@ async def query_qwen_unified(
         async with httpx.AsyncClient(timeout=20.0) as client:
             res = await client.post(QWEN_URL, json={
                 "messages": messages,
-                "temperature": 0.2,
+                "temperature": QWEN_TEMPERATURE_UNIFIED,
                 "max_tokens": 160,
                 "response_format": {"type": "json_object"},
             })
