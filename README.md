@@ -2200,3 +2200,11 @@ Relación **INVERSA**: con un gate armado ≥0.7 esa semana se habrían bloquead
 **Disciplina:** éste es el **único** retrain de la orden — **sin repetición** (repetir hasta aprobar = múltiple testing, prohibido; racha: #10–#24, #26–#29, #33 rechazados, sólo #25 promovido). Gate y umbrales de `walk_forward.py` intactos. **Observación:** el baseline evalúado sobre feed limpio (`-22.15`, sharpe `1.10`) es sustancialmente mejor que en las evaluaciones con feed roto (`-36…-47`) → ésta es la **primera evaluación fiable del gate**; el candidato sigue incumpliendo el suelo absoluto.
 
 **Evidencia:** suite pre-ejecución **816 passed** (sin cambios de código, sólo documentación → sin bump EA). Archivos tocados: `README.md`, `PROTOCOLO_ANTI_BUCLE.md`, `doc/backlog-auditoria-2026-10-02.md` (local, gitignored).
+
+### RETRAIN_AUTO_APPROVE → true — retrain automático restaurado (2026-10-13, orden de Félix — env-only, suite 816 passed)
+
+**Decisión:** se revierte el `false` de O-4 (2026-10-01). Condiciones nuevas: feed reparado hoy (evaluaciones del gate fiables por primera vez), cooldown P2-3 acotando el auto-disparo a ≤1/día, y 171 outcomes reales haciendo el retrain informativo. **Aclaración clave:** el flag sólo decide quién *arranca* el intento — **la promoción la decide siempre el gate walk-forward** (suelo absoluto + comparación vs baseline), igual que con `false`.
+
+**Aplicación (13:17 UTC):** `.env` `RETRAIN_AUTO_APPROVE=true` + `docker compose up -d fastapi` (recreate). Verificado: `printenv=true` en el contenedor, `settings.retrain_auto_approve=True`, `/health` ok (equity 463.82), ciclo predict 13:20 → **200 completo** tras el recreate. Suite **816 passed** (sin cambios de código → sin bump EA).
+
+**Comportamiento nuevo:** (1) el primer cierre EURUSD tras expirar el cooldown de #33 (**10-14 13:04 UTC** — `filled_count=18 ≥ 5` ya pendiente) disparará un retrain automático `trade_count`; (2) el calendario 168h pasa a disparar solo (próximo due ~10-20, exento de cooldown); (3) `forced`/`approve` siguen disponibles para orden manual. Cada intento: ~5 min de cómputo, gate decide, sin repetición forzada (cooldown 24h).
