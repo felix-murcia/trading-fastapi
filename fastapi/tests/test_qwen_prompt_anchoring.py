@@ -35,13 +35,7 @@ import pytest
 
 import services.qwen_client as qwen_client
 import services.trade_journal as trade_journal
-from services.qwen_client import QwenHealthState, query_qwen_unified
-
-
-@pytest.fixture(autouse=True)
-def fresh_qwen_state(monkeypatch):
-    """Estado de Qwen aislado por test — el módulo es estado compartido."""
-    monkeypatch.setattr(qwen_client, "_QWEN_STATE", QwenHealthState())
+from services.qwen_client import query_qwen_unified
 
 
 def _capturing_client(canned_content: str):
@@ -228,10 +222,10 @@ _ANCHOR_COPY_WITH_FIELD = (
 )
 
 
-async def _unified_with(canned: str) -> tuple:
+async def _unified_with(canned: str, **overrides) -> tuple:
     client = _capturing_client(canned)
     with patch("httpx.AsyncClient", client):
-        result = await query_qwen_unified(**_UNIFIED_ARGS)
+        result = await query_qwen_unified(**{**_UNIFIED_ARGS, **overrides})
     return result, client.captured["prompt"]
 
 
@@ -294,3 +288,124 @@ class TestAnchorCopyGuardRCA:
             f"desincronizados: prompt={example_reasons} "
             f"const={set(qwen_client.FORMAT_EXAMPLE_REASONS)}"
         )
+
+
+# Orden Félix 2026-10-13 (opción C) — guarda anti-parrota: razón idéntica
+# ≥3 ciclos consecutivos por símbolo → degradada fail-closed. Evidencia
+# viva post-fix (c): q=8.5/conf_mod=1.30 conrazón fija «Trend, ADX, and
+# session align with ML HOLD signal» idéntica 5/5 ciclos con datos
+# distintos — plantilla parrota, no juicio.
+
+_PARROT_A = (
+    '{"quality": 7.0, "reason": "Parrot template Alpha", "bias": "BULLISH", '
+    '"confidence_modifier": 1.1, "reentry_ok": true, "regime": "TRENDING"}'
+)
+
+_PARROT_B = (
+    '{"quality": 6.0, "reason": "Choppy range without momentum follow-through", '
+    '"bias": "BEARISH", "confidence_modifier": 0.9, "reentry_ok": true, '
+    '"regime": "RANGING"}'
+)
+
+
+class TestParrotGuardRCA:
+    """Guarda anti-parrota (opción C, orden 2026-10-13)."""
+
+    # Variantes REALES observadas en vivo 17:10-17:40 (rotación de la
+    # plantilla parrota): Jaccard entre ellas 0.58-0.67 ≥ umbral 0.5.
+    _LIVE_V1 = (
+        '{"quality": 8.5, "reason": "Trend, ADX, session and ML signal align", '
+        '"bias": "BULLISH", "confidence_modifier": 1.3, "reentry_ok": true, '
+        '"regime": "TRENDING"}'
+    )
+    _LIVE_V2 = (
+        '{"quality": 8.5, "reason": "Trend, ADX, and ML signal align with bullish bias", '
+        '"bias": "BULLISH", "confidence_modifier": 1.3, "reentry_ok": true, '
+        '"regime": "TRENDING"}'
+    )
+    _LIVE_V3 = (
+        '{"quality": 8.5, "reason": "trend, ADX, session align with ML HOLD signal", '
+        '"bias": "NEUTRAL", "confidence_modifier": 1.3, "reentry_ok": true, '
+        '"regime": "TRENDING"}'
+    )
+
+    @pytest.mark.asyncio
+    async def test_two_identical_reasons_still_judged(self):
+        """2 razones idénticas: por debajo del límite → ambas juicios."""
+        r1, _ = await _unified_with(_PARROT_A)
+        r2, _ = await _unified_with(_PARROT_A)
+        assert r1["ok"] is True and r2["ok"] is True
+
+    @pytest.mark.asyncio
+    async def test_third_identical_reason_degrades(self):
+        """3ª razón idéntica consecutiva → degradada fail-closed."""
+        await _unified_with(_PARROT_A)
+        await _unified_with(_PARROT_A)
+        r3, _ = await _unified_with(_PARROT_A)
+        assert r3["ok"] is False, "parrota pasó por juicio real"
+        assert r3["quality"] == 0.0, "debe ser quality=0 (fail-closed)"
+
+    @pytest.mark.asyncio
+    async def test_parrot_degrade_persists(self):
+        """La racha no se resetea al degradar: la 4ª también degrada."""
+        await _unified_with(_PARROT_A)
+        await _unified_with(_PARROT_A)
+        r3, _ = await _unified_with(_PARROT_A)
+        r4, _ = await _unified_with(_PARROT_A)
+        assert r3["ok"] is False and r4["ok"] is False
+
+    @pytest.mark.asyncio
+    async def test_different_reason_resets_streak(self):
+        """Razón disímil resetea la racha (A,A,B,A,A,A → degrada en la 6ª)."""
+        results = []
+        for canned in (_PARROT_A, _PARROT_A, _PARROT_B,
+                       _PARROT_A, _PARROT_A, _PARROT_A):
+            r, _ = await _unified_with(canned)
+            results.append(r["ok"])
+        assert results == [True, True, True, True, True, False], results
+
+    @pytest.mark.asyncio
+    async def test_live_rotating_variants_degrade_at_third(self):
+        """C+: las 3 variantes REALES de la plantilla rotada (Jaccard
+        ≥0.5 entre adyacentes) degradan en el 3er ciclo — el escape
+        observado en vivo queda cubierto."""
+        r1, _ = await _unified_with(self._LIVE_V1)
+        r2, _ = await _unified_with(self._LIVE_V2)
+        r3, _ = await _unified_with(self._LIVE_V3)
+        assert r1["ok"] is True and r2["ok"] is True
+        assert r3["ok"] is False, "la rotación de variantes escapó a la guarda C+"
+        assert r3["quality"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_live_variants_pairwise_similar(self):
+        """Fijar la separación medida: variantes vivas ≥0.5, genuinas <0.5."""
+        v1 = qwen_client._reason_tokens("Trend, ADX, session and ML signal align")
+        v2 = qwen_client._reason_tokens("Trend, ADX, and ML signal align with bullish bias")
+        v3 = qwen_client._reason_tokens("trend, ADX, session align with ML HOLD signal")
+        gen1 = qwen_client._reason_tokens("Mixed trend and range signals; momentum fading")
+        gen2 = qwen_client._reason_tokens("Breakout in downtrend with weak volume")
+        assert qwen_client._jaccard(v1, v2) >= 0.5
+        assert qwen_client._jaccard(v2, v3) >= 0.5
+        assert qwen_client._jaccard(gen1, gen2) < 0.5
+
+    @pytest.mark.asyncio
+    async def test_streak_is_per_symbol(self):
+        """Rachas independientes por símbolo (preparado para G2)."""
+        await _unified_with(_PARROT_A)                              # EURUSD ×1
+        await _unified_with(_PARROT_A)                              # EURUSD ×2
+        rg, _ = await _unified_with(_PARROT_A, symbol="GBPUSD")     # GBPUSD ×1
+        re_, _ = await _unified_with(_PARROT_A)                     # EURUSD ×3 → degrade
+        assert rg["ok"] is True, "la racha de EURUSD contaminó GBPUSD"
+        assert re_["ok"] is False
+
+    @pytest.mark.asyncio
+    async def test_empty_reason_not_counted(self):
+        """Razón vacía no cuenta racha (parse incompleto ≠ parrota)."""
+        no_reason = (
+            '{"quality": 6.0, "bias": "NEUTRAL", '
+            '"confidence_modifier": 1.0, "reentry_ok": true, "regime": "RANGING"}'
+        )
+        r1, _ = await _unified_with(no_reason)
+        r2, _ = await _unified_with(no_reason)
+        r3, _ = await _unified_with(no_reason)
+        assert r1["ok"] is True and r2["ok"] is True and r3["ok"] is True

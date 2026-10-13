@@ -9,8 +9,9 @@ registra en QwenHealthState y lo reporta /pipeline/health (P1-6).
 import json
 import logging
 import os
+import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import httpx
@@ -38,6 +39,11 @@ class QwenHealthState:
     last_ok_at: float | None = None
     last_fail_at: float | None = None
     last_error: str | None = None
+    # Guarda anti-parrota (orden Félix 2026-10-13, opción C/C+): tokens de
+    # la última razón y racha de razones SIMILARES consecutivas POR
+    # SÍMBOLO (preparado para G2: estados por mundo, cero acoplamiento).
+    last_reason: dict = field(default_factory=dict)
+    reason_streak: dict = field(default_factory=dict)
 
 
 _QWEN_STATE = QwenHealthState()
@@ -90,6 +96,33 @@ FORMAT_EXAMPLE_REASONS = frozenset({
     "range chop against signal",
     "Mixed trend and momentum signals",
 })
+
+# Orden Félix 2026-10-13 (opción C): razón idéntica ≥3 ciclos consecutivos
+# por símbolo = plantilla parrota, no juicio (Qwen3-4B@temp 0.2 emite la
+# MISMA razón con datos de mercado distintos). Fail-closed. Los «falsos
+# positivos» (juicio genuino repetido) producen el mismo outcome que el
+# veto de re-entrada (HOLD) → costo de oportunidad nulo.
+PARROT_STREAK_LIMIT = 3
+
+# Orden Félix 2026-10-13 (opción C+): la comparación de la racha es por
+# SIMILITUD de tokens (Jaccard ≥ 0.5 = razón «misma»), no igualdad exacta
+# — en vivo el modelo escapa del match exacto rotando variantes casi
+# idénticas de la misma plantilla (medido 17:10-17:40 UTC: Jaccard entre
+# las 3 variantes vivas 0.58-0.67; juicios genuinos de la mañana 0.0-0.4;
+# frontera limpia en 0.5).
+PARROT_SIMILARITY_THRESHOLD = 0.5
+
+
+def _reason_tokens(reason: str) -> frozenset:
+    """Tokens normalizados de una razón (minúsculas, alfanuméricos)."""
+    return frozenset(re.findall(r"[a-z0-9]+", reason.lower()))
+
+
+def _jaccard(a: frozenset, b: frozenset) -> float:
+    """Similitud de Jaccard entre conjuntos de tokens (∅ → 0.0)."""
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
 
 
 def _calendar_line(events: Optional[list[dict]]) -> str:
@@ -442,6 +475,37 @@ async def query_qwen_unified(
             return _degraded_unified(
                 regime, ml_prob, "Qwen degraded: anchor-copy (reason de ejemplo sin reentry_ok)",
             )
+
+        # Guarda anti-parrota (orden Félix 2026-10-13, opción C → C+): razón
+        # SIMILAR (Jaccard de tokens ≥ PARROT_SIMILARITY_THRESHOLD) a la
+        # anterior ≥ PARROT_STREAK_LIMIT ciclos consecutivos por símbolo =
+        # plantilla parrota, no juicio — inmune a cualquier ancla futura y
+        # a la rotación de variantes observada en vivo (casi idénticas
+        # byte a byte NO; con jitter de palabras SÍ). Sólo cuenta
+        # respuestas que superaron la guarda anti-ancla. La racha se
+        # resetea con cualquier razón disímil (p. ej. la variante
+        # in-window que sí juzga).
+        rsn = reason.strip()
+        if rsn:
+            tokens = _reason_tokens(rsn)
+            prev_tokens = _QWEN_STATE.last_reason.get(symbol)
+            similar = (
+                prev_tokens is not None
+                and _jaccard(tokens, prev_tokens) >= PARROT_SIMILARITY_THRESHOLD
+            )
+            streak = _QWEN_STATE.reason_streak.get(symbol, 0) + 1 if similar else 1
+            _QWEN_STATE.last_reason[symbol] = tokens
+            _QWEN_STATE.reason_streak[symbol] = streak
+            if streak >= PARROT_STREAK_LIMIT:
+                logger.warning(
+                    "[%s] QWEN-UNIFIED parrota detectada (%d ciclos con razón similar, "
+                    "símbolo %s) → respuesta degradada fail-closed",
+                    cycle_id, streak, symbol,
+                )
+                _record_failure("parrot")
+                return _degraded_unified(
+                    regime, ml_prob, f"Qwen degraded: parrot ({streak}x razon similar)",
+                )
 
         # Paquete 1-4: sin parse de SL/TP — si el modelo ecoa sl_adjusted/
         # tp_adjusted se ignoran (no se piden en el prompt, no se devuelven).

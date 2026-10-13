@@ -2251,3 +2251,16 @@ Relación **INVERSA**: con un gate armado ≥0.7 esa semana se habrían bloquead
 - **Aceptar:** guardas (c)+C activas; daño medible 0 (sin entradas distorsionadas — ML en HOLD); veto débil out-of-window = condición previa.
 
 **Archivos:** `fastapi/services/qwen_client.py`, `fastapi/tests/test_qwen_prompt_anchoring.py`, `fastapi/tests/conftest.py`, README, PROTOCOLO. Sin MQL5 → sin bump.
+
+### Guarda anti-parrota C+ (Jaccard ≥0.5) — DISPARA EN VIVO, cerebro parrota contenido (2026-10-13, orden de Félix «aplica la c+» — suite 829→831 = 829+2, deploy 17:53 UTC)
+
+**Mecanismo (`services/qwen_client.py`):** la racha anti-parrota compara por **similitud de Jaccard de tokens** (`PARROT_SIMILARITY_THRESHOLD=0.5`, `_reason_tokens`/`_jaccard`) en lugar de igualdad exacta — el modelo escapa del match exacto rotando variantes casi idénticas de la misma plantilla (medido 17:10-17:40: Jaccard 0.58-0.67 entre las 3 variantes vivas vs 0.0-0.4 de juicios genuinos; frontera limpia en 0.5). Umbral 0.5 pre-registrado por la orden. TDD: 2 tests nuevos (las 3 variantes REALES del vivo degradan en el 3er ciclo + fijación de la separación parrota/genuino) y `_PARROT_B` del test de reset hecho genuinamente disímil («Beta» vs «Alpha» = 0.5 exacto → contaría como similar bajo C+).
+
+**Verificación en vivo (18:00-18:25, 6 ciclos post-deploy):**
+- 18:00 y 18:05: juicio (racha 1 y 2, por debajo del límite).
+- **18:10: `parrota detectada (3 ciclos con razón similar) → degradada fail-closed`** — el escape rotatorio observado a las 17:10-17:40 queda cubierto.
+- 18:15-18:25: degradación **persistente** (racha 4→6) mientras el cerebro siga parroteando.
+
+**Efecto operativo (deseado, fail-closed):** mientras el modelo parrotea, los ciclos out-of-window reciben `quality=0` → **veto de calidad bloquea cualquier entrada** (antes: quality 8.5 prestado = veto decorativo); se **recupera automáticamente** cuando el modelo emita una razón genuinamente distinta (p. ej. el juicio in-window con contexto de cierre — pendiente de verificar con el próximo cierre, SHORT orden 54 abierto, time-stop ~03:00 UTC). El time-stop y los vetos mecánicos no dependen de Qwen → intactos. El monitor 24h vigila los warnings (esperados, log-only).
+
+**Archivos:** `fastapi/services/qwen_client.py`, `fastapi/tests/test_qwen_prompt_anchoring.py`, README, PROTOCOLO. Sin MQL5 → sin bump.
