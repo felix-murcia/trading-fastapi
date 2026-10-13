@@ -363,7 +363,8 @@ class TestReentryContext:
         assert result["ok"] is True
         prompt = _prompt_from(client)
         assert "Reentry check" in prompt
-        assert "Set reentry_ok=true" in prompt
+        # RCA 2026-10-13: paridad de formato con la variante in-window.
+        assert "No churn risk: set reentry_ok=true" in prompt
 
     @pytest.mark.asyncio
     async def test_prompt_exit_details_unavailable(self):

@@ -78,6 +78,20 @@ def _degraded_unified(regime: str, ml_prob: float, reason: str) -> dict:
     }
 
 
+# RCA 2026-10-13 — razones EXACTAS de los ejemplos FORMAT del prompt
+# unificado. Si la respuesta devuelve una de estas razones SIN el campo
+# `reentry_ok` (que los ejemplos SIEMPRE llevan), el modelo copió el
+# ejemplo (ancla determinista: temperature=0.2, Qwen3-4B, contexto fino =
+# variante out-of-window) en lugar de juzgar: se degrada fail-closed en
+# vez de fiarse del quality prestado (8.5) y del bias/×1.3 anclados.
+# Sincronizado con el prompt por test_format_example_reasons_synced.
+FORMAT_EXAMPLE_REASONS = frozenset({
+    "trend and ADX align",
+    "range chop against signal",
+    "Mixed trend and momentum signals",
+})
+
+
 def _calendar_line(events: Optional[list[dict]]) -> str:
     """Línea `Calendar:` del prompt (paquete 1-4): ventana −2 h…+4 h ya
     filtrada/limitada en routers.ai (top 3, orden ascendente).
@@ -300,9 +314,13 @@ async def query_qwen_unified(
             "  change or fresh evidence justifies entering now.",
         ])
     else:
+        # RCA (2026-10-13): esta variante (2 líneas, ~90% de los ciclos) era
+        # la que colapsaba en copia del ancla — formato paridad con la
+        # in-window (cabecera «Reentry check — …:» + instrucción explícita).
         reentry_lines = [
-            "Reentry check: no recent close inside the churn window (or no entry proposed).",
-            "- Set reentry_ok=true.",
+            "Reentry check — no recent close inside the churn window"
+            " (or no entry proposed):",
+            "- No churn risk: set reentry_ok=true.",
         ]
 
     context_lines.extend([
@@ -326,13 +344,23 @@ async def query_qwen_unified(
         # calidad decorativo). Dos ejemplos con valores separados + rúbrica
         # explícita: la propiedad ">=2 ejemplos distintos" la fija
         # tests/test_qwen_prompt_anchoring.py.
-        "Return EXACTLY JSON, no extra text — ONE JSON object. Two FORMAT",
+        # RCA (2026-10-13): con dos ejemplos la variante out-of-window caía
+        # en copia byte a byte del ejemplo #1 sin `reentry_ok` (100% de los
+        # ciclos desde 10:35). Tres ejemplos (prior más plano) + advertencia
+        # POST-ejemplos + guarda anti-ancla en el parse (fail-closed).
+        "Return EXACTLY JSON, no extra text — ONE JSON object. Three FORMAT",
         "examples with different scores; do NOT copy their values — judge THIS",
         "setup on its own context:",
         '{"quality": 8.5, "reason": "trend and ADX align", "bias": "BULLISH", "confidence_modifier": 1.3,'
         '  "reentry_ok": true, "regime": "TRENDING"}',
         '{"quality": 3.0, "reason": "range chop against signal", "bias": "BEARISH", "confidence_modifier": 0.7,'
         '  "reentry_ok": false, "regime": "RANGING"}',
+        '{"quality": 5.0, "reason": "Mixed trend and momentum signals", "bias": "NEUTRAL", "confidence_modifier": 0.9,'
+        '  "reentry_ok": true, "regime": "VOLATILE"}',
+        "",
+        "Any value COPIED from the examples (score, reason, bias, modifier) is",
+        "wrong — reason must cite THIS setup from the Context above (trend,",
+        "ADX, session, ML signal).",
         "",
         "Fields: quality 0-10 — score on evidence: 7-10 only when trend/ADX/session",
         "agree with the ML signal and structure is clean; 1-4 when ranging chop,",
@@ -397,6 +425,23 @@ async def query_qwen_unified(
             bias = "BEARISH"
 
         conf_mod = _clamp(float(parsed.get("confidence_modifier", 1.0)), 0.5, 1.5)
+
+        # Guarda anti-ancla (RCA 2026-10-13): razón == razón de ejemplo FORMAT
+        # SIN `reentry_ok` (campo que los ejemplos SIEMPRE llevan) = el modelo
+        # copió el ancla en lugar de juzgar (10/10 ciclos out-of-window desde
+        # 10:35; replay 18:04 UTC reproducido 100%). Fail-closed: degradada
+        # (quality=0 → veto de calidad) en vez de fiarse del quality prestado.
+        # Con `reentry_ok` presente se asume juicio real (test de especificidad).
+        if "reentry_ok" not in parsed and reason.strip() in FORMAT_EXAMPLE_REASONS:
+            logger.warning(
+                "[%s] QWEN-UNIFIED ancla detectada (reason de ejemplo FORMAT sin "
+                "reentry_ok) → respuesta degradada fail-closed",
+                cycle_id,
+            )
+            _record_failure("anchor-copy")
+            return _degraded_unified(
+                regime, ml_prob, "Qwen degraded: anchor-copy (reason de ejemplo sin reentry_ok)",
+            )
 
         # Paquete 1-4: sin parse de SL/TP — si el modelo ecoa sl_adjusted/
         # tp_adjusted se ignoran (no se piden en el prompt, no se devuelven).
