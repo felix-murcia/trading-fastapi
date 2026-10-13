@@ -2238,3 +2238,16 @@ Relación **INVERSA**: con un gate armado ≥0.7 esa semana se habrían bloquead
 **Verificación en vivo (16:35-16:50, 5 ciclos post-deploy):** ✅ `reentry_ok` **restaurado 5/5** → R1 opera, warnings fail-open eliminados; ✅ `bias` anclado BULLISH → ahora NEUTRAL; ✅ guarda viva. ⚠️ **El ancla numérica persiste:** `q=8.5` y `conf_mod=1.30` constantes con razón nueva fija idéntica («Trend, ADX, and session align with ML HOLD signal») — **nueva plantilla parrota, no juicio**: el veto de calidad sigue decorativo out-of-window (condición previa al incidente, no regresión — el 10-12 ya era 98/285). Variante in-window sin verificar en vivo aún (requiere el próximo cierre; SHORT orden 54 abierto, time-stop ~03:00 UTC). **Decisión pendiente de Félix:** A aceptar / B experimento temperatura 0.2→0.4 / **C guarda anti-parrota (razón idéntica ≥3 ciclos → degradada; recomendada)**.
 
 **Archivos:** `fastapi/services/qwen_client.py`, `fastapi/tests/test_qwen_prompt_anchoring.py`, `fastapi/tests/test_qwen_client.py`, README, PROTOCOLO. Sin MQL5 → sin bump.
+
+### Guarda anti-parrota (opción C) — desplegada; el modelo escapa rotando variantes (2026-10-13, orden de Félix «aplica la c» — suite 823→829 = 823+6, deploy 17:08 UTC)
+
+**Mecanismo (`services/qwen_client.py`):** `PARROT_STREAK_LIMIT=3` — razón idéntica ≥3 ciclos consecutivos **por símbolo** (`QwenHealthState.last_reason`/`reason_streak`, dicts per-symbol preparados para G2) → `_degraded_unified` (fail-closed) + `_record_failure("parrot")` + warning. Sólo cuenta respuestas que superaron la guarda anti-ancla; razón vacía no cuenta; una razón distinta resetea la racha. Estado de tests aislado por test (fixture autouse `fresh_qwen_state` movida a `conftest.py`). TDD 6 tests nuevos (`TestParrotGuardRCA`): límite 2→ok/3→degrada, persistencia, reset con razón distinta, rachas por símbolo independientes, razón vacía ignorada.
+
+**Verificación en vivo (17:10-17:40, 7 ciclos post-deploy):** la guarda **no dispara** — el modelo ya no parrota byte a byte (era el comportamiento 16:35-16:50, pre-guarda): ahora **rotiza 3 variantes casi idénticas** de la misma plantilla (Jaccard 0.58-0.67 entre ellas vs 0.0-0.3 de juicios genuinos de la mañana): «Trend, ADX, session and ML signal align» / «…and ML signal align with bullish bias» / «trend, ADX, session align with ML HOLD signal». **El ancla numérica sigue 7/7 constante: q=8.5, conf_mod=1.30, eff_prob=1.0** → veto de calidad decorativo out-of-window (condición histórica). La guarda C queda como red de seguridad para el modo byte-a-byte y disparará si el modelo vuelve a él.
+
+**Decisión pendiente de Félix (con la evidencia encima de la mesa):**
+- **C+ (recomendada):** comparación por similitud (Jaccard de tokens ≥0.5 = razón «misma») en la guarda anti-parrota — dispararía en el ciclo 3 (17:20) con la evidencia actual; separación limpia parrota (0.58-1.0) vs genuino (0.0-0.3). Umbral 0.5 pre-registrado.
+- **B:** experimento temperatura 0.2→0.4 (ataca la discriminación en origen).
+- **Aceptar:** guardas (c)+C activas; daño medible 0 (sin entradas distorsionadas — ML en HOLD); veto débil out-of-window = condición previa.
+
+**Archivos:** `fastapi/services/qwen_client.py`, `fastapi/tests/test_qwen_prompt_anchoring.py`, `fastapi/tests/conftest.py`, README, PROTOCOLO. Sin MQL5 → sin bump.
