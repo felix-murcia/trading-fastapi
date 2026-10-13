@@ -48,11 +48,12 @@ class TestCloseOutbox:
         src = _ea_source()
         assert "OUTBOX_MAX_PER_FLUSH" in src, "Falta límite de reintentos por ciclo"
 
-    def test_ea_version_bumped_to_13_3(self):
+    def test_ea_version_bumped_to_13_4(self):
         src = _ea_source()
-        # v13.3: P1 intraposición — ManageBreakeven (SL→entrada al +1R)
-        assert re.search(r'#property\s+version\s+"13\.3"', src), "Falta bump a 13.3"
-        assert re.search(r'#define\s+EA_VERSION\s+"13\.3"', src)
+        # v13.4: presupuesto de latencia Llama-3.1-8B — predict WebRequest 60s
+        # (el 8B tarda ~36-39s; con 30s el EA cortaba antes que el backend)
+        assert re.search(r'#property\s+version\s+"13\.4"', src), "Falta bump a 13.4"
+        assert re.search(r'#define\s+EA_VERSION\s+"13\.4"', src)
 
     def test_ea_filters_opening_deals_v13_2(self):
         # v13.2: OnTradeTransaction descarta DEAL_ENTRY_IN — el deal de
@@ -61,3 +62,17 @@ class TestCloseOutbox:
         src = _ea_source()
         assert "if(currentEntry == DEAL_ENTRY_IN)" in src
         assert "long currentEntry = -1;" in src
+
+
+class TestPredictLatencyBudget:
+    def test_predict_webrequest_timeout_covers_llama8b(self):
+        """Orden Félix 2026-10-13: Llama-3.1-8B tarda ~36-39s por llamada —
+        el WebRequest del predict debe esperar 60s (backend: 45s). Con 30s
+        el EA cortaba antes que el backend y el ciclo quedaba 'unavailable'."""
+        src = _ea_source()
+        line = next(
+            l for l in src.splitlines() if '"/api/v1/ai/predict"' in l
+        )
+        assert ", 60000," in line, (
+            f"timeout del WebRequest de predict debe ser 60000ms: {line.strip()}"
+        )

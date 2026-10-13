@@ -6,10 +6,10 @@ Terminal de Ejecución y Telemetría para Cerebro Autónomo (FastAPI + PPO v3).
 - Rol del Servidor: Decisión direccional, dimensionamiento de lotes, SL, TP y gestión de riesgo.
 */
 #property copyright "AI Quant Terminal v3"
-#property version   "13.3"
+#property version   "13.4"
 #property strict
 
-#define EA_VERSION "13.3"
+#define EA_VERSION "13.4"
 
 #include <Trade\Trade.mqh>
 
@@ -341,7 +341,7 @@ void OnTick()
      {
       if(attempt > 0) Sleep(BASE_RETRY_DELAY_MS * attempt);
       ArrayFree(resultArr);
-       res = WebRequest("POST", FastAPI_URL + "/api/v1/ai/predict", headers, 30000, postData, resultArr, responseHeaders);
+       res = WebRequest("POST", FastAPI_URL + "/api/v1/ai/predict", headers, 60000, postData, resultArr, responseHeaders);
       if(res == 200) break;
      }
 

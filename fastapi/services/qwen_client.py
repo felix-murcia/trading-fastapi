@@ -120,6 +120,13 @@ PARROT_SIMILARITY_THRESHOLD = 0.5
 # quedan como red de seguridad: si el síntoma persiste, fail-closed.
 QWEN_TEMPERATURE_UNIFIED = 0.4
 
+# Orden Félix 2026-10-13: el Jetson sirve ahora Llama-3.1-8B-Instruct
+# (sustituye al Qwen3-4B). Latencia medida 36-39s por llamada idle (vs
+# 11-17s del 4B) — con el timeout viejo (20s) el 8B quedaba 'unavailable'
+# en cada ciclo (fail-closed: veto de calidad 0). Presupuesto en escalera:
+# backend 45s < EA WebRequest 60s (mql5 §predict, v13.4).
+QWEN_TIMEOUT_UNIFIED = 45.0
+
 
 def _reason_tokens(reason: str) -> frozenset:
     """Tokens normalizados de una razón (minúsculas, alfanuméricos)."""
@@ -431,7 +438,7 @@ async def query_qwen_unified(
     )
 
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
+        async with httpx.AsyncClient(timeout=QWEN_TIMEOUT_UNIFIED) as client:
             res = await client.post(QWEN_URL, json={
                 "messages": messages,
                 "temperature": QWEN_TEMPERATURE_UNIFIED,

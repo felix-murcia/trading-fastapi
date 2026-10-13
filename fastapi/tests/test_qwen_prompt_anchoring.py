@@ -57,7 +57,7 @@ def _capturing_client(canned_content: str):
         captured: dict = {}
 
         def __init__(self, *args, **kwargs):
-            pass
+            _Client.captured["client_kwargs"] = kwargs
 
         async def __aenter__(self):
             return self
@@ -437,3 +437,23 @@ class TestParrotGuardRCA:
         r2, _ = await _unified_with(no_reason)
         r3, _ = await _unified_with(no_reason)
         assert r1["ok"] is True and r2["ok"] is True and r3["ok"] is True
+
+
+class TestLLM8BLatencyBudget:
+    """Orden Félix 2026-10-13: el Jetson sirve ahora Llama-3.1-8B-Instruct
+    (sustituye al Qwen3-4B). Latencia medida 36-39s por llamada idle
+    (vs 11-17s del 4B). Presupuesto: backend 45s < EA WebRequest 60s —
+    con el timeout viejo (backend 20s / EA 30s) el 8B quedaba 'unavailable'
+    en cada ciclo (fail-closed, veto de calidad 0)."""
+
+    @pytest.mark.asyncio
+    async def test_unified_timeout_covers_8b_latency(self):
+        """El cliente httpx del unificado espera QWEN_TIMEOUT_UNIFIED (45s)."""
+        client = _capturing_client(_UNIFIED_CANNED)
+        with patch("httpx.AsyncClient", client):
+            await query_qwen_unified(**_UNIFIED_ARGS)
+        assert (
+            client.captured["client_kwargs"]["timeout"]
+            == qwen_client.QWEN_TIMEOUT_UNIFIED
+            == 45.0
+        ), "timeout del unificado no cubre la latencia del 8B (~39s)"
