@@ -1,6 +1,4 @@
 import asyncio
-import csv
-import glob
 import json
 import logging
 import os
@@ -44,6 +42,7 @@ from services.auto_retrain import (
     record_trade_filled,
     TRAINING_SYMBOL as _TRAINING_SYMBOL,
 )
+from services.feed_patcher import fill_feed_hole as _fill_feed_hole
 from services.market_time import utc_hour_from_candle
 from services.news_filter import get_upcoming_news, is_news_blackout
 from services.performance_metrics import record_cycle_metrics
@@ -329,95 +328,6 @@ async def on_startup():
         load_inference_artifacts(ctx.config.symbol)
 
 
-def _load_csv_candles(symbol: str, tf: str) -> list[dict]:
-    """Carga las velas de `resultadosBT/{symbol}_{tf}_*.csv` (MT5, UTC puro).
-
-    Devuelve dicts al estilo del MCP (`time` ISO-8601 con `Z`). El patrón
-    `{symbol}_{tf}_*.csv` toma el fichero de rango más reciente si hay varios.
-    """
-    pattern = os.path.join(settings.csv_history_dir, f"{symbol}_{tf}_*.csv")
-    files = sorted(glob.glob(pattern))
-    if not files:
-        return []
-    out: list[dict] = []
-    with open(files[-1], encoding="utf-8") as fh:
-        rd = csv.reader(fh, delimiter="\t")
-        next(rd, None)  # cabecera <DATE> <TIME> ...
-        for row in rd:
-            if len(row) < 6:
-                continue
-            d, t = row[0].strip(), row[1].strip()
-            try:
-                o, hi, lo, cl = float(row[2]), float(row[3]), float(row[4]), float(row[5])
-            except ValueError:
-                continue
-            out.append({
-                "time": f"{d.replace('.', '-')}T{t}Z",
-                "open": o, "high": hi, "low": lo, "close": cl,
-                "tick_volume": int(row[6]) if len(row) > 6 and row[6].strip().isdigit() else 0,
-                "spread": int(row[8]) if len(row) > 8 and row[8].strip().isdigit() else 0,
-                # Paridad de columnas con las velas del MCP: sin `real_volume`
-                # la columna queda NaN al concatenar y el `dropna()` de
-                # `engineer_market_features` descarta TODAS las filas CSV
-                # (regresión 500 en build_v3_observation, 2026-10-12).
-                "real_volume": 0,
-            })
-    return out
-
-
-def _fill_feed_hole(candles: list[dict], symbol: str, tf: str) -> list[dict]:
-    """Parchea el agujero del feed MCP con los CSV de `resultadosBT/`.
-
-    Hallazgo 2026-10-12: el feed del MCP corta la historia en 2025-12-31 y
-    sólo entrega el día vivo (agujero 2026-01-01→10-11). El obs del modelo
-    queda contaminado: `tail(120)` = 104 velas dic-2025 + 16 de hoy con un
-    salto fantasma −4.72 % dentro de la ventana de 20 pasos. Los CSV de
-    `resultadosBT/` (MT5, UTC puro) cubren 2026-01-02→10-12 contiguos.
-
-    Si la serie del MCP tiene un salto >168 h (mismo umbral que la guarda
-    H4/D — ningún cierre/feriado legítimo supera 7 días), el bloque viejo
-    pre-agujero se sustituye por el histórico CSV; las velas del MCP
-    posteriores al último CSV (el día vivo) se conservan. Dedup por
-    timestamp: el CSV es la fuente histórica continua y gana en el solape.
-
-    Sin agujero, sin CSV, o sin columna `time` → el feed pasa intacto
-    (degradación honesta, nunca una excepción hacia /predict).
-    """
-    if not settings.csv_history_dir or not candles:
-        return candles
-    try:
-        frame = pd.DataFrame(candles)
-        if "time" not in frame.columns:
-            return candles
-        times = pd.to_datetime(frame["time"], errors="coerce", utc=True)
-        if times.isna().any():
-            return candles
-    except (KeyError, ValueError, TypeError):
-        return candles
-    ordered = frame.assign(_t=times).sort_values("_t").reset_index(drop=True)
-    gap_h = float(ordered["_t"].diff().dt.total_seconds().div(3600).max())
-    if not (gap_h > 168.0):
-        return candles  # serie continua: nada que parchear
-    csv_candles = _load_csv_candles(symbol, tf)
-    if not csv_candles:
-        logger.warning(
-            "feed %s %s: hueco de %.0fh pero sin CSV en %s → feed intacto",
-            symbol, tf, gap_h, settings.csv_history_dir,
-        )
-        return candles
-    csv_last = pd.to_datetime(
-        pd.Series([c["time"] for c in csv_candles]), utc=True
-    ).max()
-    mcp_times = pd.to_datetime(ordered["time"], utc=True)
-    live = ordered.loc[mcp_times > csv_last].drop(columns="_t").to_dict("records")
-    merged = csv_candles + live
-    logger.warning(
-        "feed %s %s: hueco de %.0fh parchado con CSV (%d velas) + %d vivas del MCP",
-        symbol, tf, gap_h, len(csv_candles), len(live),
-    )
-    return merged
-
-
 def _sma200_context(raw_sorted: pd.DataFrame) -> tuple[Optional[float], Optional[float]]:
     """(distancia, pendiente) del SMA200 sobre la serie ASCENDENTE completa.
 
@@ -441,13 +351,18 @@ def _sma200_context(raw_sorted: pd.DataFrame) -> tuple[Optional[float], Optional
     return float(close.iloc[-1] - sma.iloc[-1]), float(sma.iloc[-1] - sma.iloc[-6])
 
 
-def _higher_tf_context_line(tf: str, res) -> str:
+def _higher_tf_context_line(tf: str, res, symbol: str) -> str:
     """Línea de contexto del marco superior H4/D para el prompt de Qwen.
 
     Foco ampliado H4/D (Félix 2026-10-12, backlog P2 «Contexto H4/D»): SMA200
     (estructura: posición + pendiente), RSI14 y ADX del timeframe superior —
     el «contexto global» que la Fase 2 nunca cableó (solo `adx` H1) y que el
     pack 1-4 sólo aproximó con un SMA200 DERIVADO de 240 H1.
+
+    `symbol` manda el parche de agujero del feed (`_fill_feed_hole`): si el
+    MCP vuelve a cortar la historia, la serie se repara con el CSV del símbolo
+    ANTES de las guardas de calidad (orden Félix 2026-10-13, recomendación 2).
+    Explícito — jamás por defecto: EURUSD y GBPUSD tienen CSV propios.
 
     Guardas — contexto de calidad, nunca inventado y nunca una excepción
     hacia /predict (H4/D1 son contexto, no críticos):
@@ -482,6 +397,10 @@ def _higher_tf_context_line(tf: str, res) -> str:
         raw = data.get("candles") or []
     else:
         raw = []
+    # Parche de agujero con CSV (mismo parche del obs H1): si el feed volvió
+    # a romperse, la serie se repara ANTES de las guardas de calidad — sin
+    # CSV o sin continuidad posterior, "Unavailable" sigue mandando.
+    raw = _fill_feed_hole(raw, symbol, tf)
     if len(raw) < 30:
         return f"- {tf}: Unavailable"
     try:
@@ -771,8 +690,8 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     higher_tf_context = (
         "- Higher-timeframe context (H4/D1) — contrast the H1 signal with the "
         "larger trend:\n"
-        f"{_higher_tf_context_line('H4', h4_res)}\n"
-        f"{_higher_tf_context_line('D1', d1_res)}"
+        f"{_higher_tf_context_line('H4', h4_res, req.symbol)}\n"
+        f"{_higher_tf_context_line('D1', d1_res, req.symbol)}"
     )
 
     brain = _BRAINS.get(sym)

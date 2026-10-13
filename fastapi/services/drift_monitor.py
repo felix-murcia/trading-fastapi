@@ -35,6 +35,7 @@ import pandas as pd
 from config import settings
 from core.pair import LEGACY_SYMBOL, default_model_path
 from services.alerting import AlertLevel, send_alert
+from services.feed_patcher import fill_feed_hole
 
 logger = logging.getLogger(__name__)
 
@@ -247,6 +248,12 @@ async def run_drift_check() -> dict:
         try:
             from services.auto_retrain import _build_training_dataframe, _fetch_historical_candles
             candles = await _fetch_historical_candles(symbol="EURUSD", count=LIVE_CANDLES)
+            # Parche de agujero con CSV (orden Félix 2026-10-13, recom. 1):
+            # sin él, si el feed vuelve a cortar la historia la ventana de PSI
+            # se llena de saltos fantasma y el monitor queda CIEGO (PSI≈11.2
+            # por overflow de sma20, medido en vivo 2026-10-12). El fetch del
+            # retrain NO se toca (freeze de datos de entrenamiento).
+            candles = fill_feed_hole(candles, LEGACY_SYMBOL, "H1")
             live_df = _build_training_dataframe(candles)
             for col, stats in baseline.get("features", {}).items():
                 if col not in live_df.columns:

@@ -10,8 +10,15 @@ cubren 2026-01-02→10-12 contiguos.
 `_fill_feed_hole` detecta el salto >168 h (mismo umbral que la guarda H4/D) y
 fusiona el CSV (histórico continuo) con las velas vivas del MCP (posteriores al
 último CSV), deduplicando por timestamp. Sin agujero → el feed pasa intacto.
+
+Ampliación 2026-10-13 (orden de Félix, recomendación 2): el mismo parche se
+aplica al contexto H4/D del prompt (`_higher_tf_context_line`) — antes, la
+guarda de continuidad descartaba la serie entera a "Unavailable". El CSV
+diario es `EURUSD_Daily_*.csv` SIN columna `<TIME>` (esquema real del export
+MT5) y se emite a las 00:00Z, igual que las barras D1 del MCP.
 """
 import numpy as np
+import pandas as pd
 import routers.ai
 
 
@@ -121,6 +128,29 @@ class TestFillFeedHole:
         out = routers.ai._fill_feed_hole(candles, "EURUSD", "H4")
         assert "2026-10-11T16:00:00Z" in {c["time"] for c in out}
 
+    def test_csv_daily_sin_columna_time(self, tmp_path, monkeypatch):
+        """D1: el CSV diario NO lleva columna `<TIME>` → se emite a las 00:00Z.
+
+        El fichero real es `EURUSD_Daily_*` (no `EURUSD_D1_*`) y sus filas son
+        `2026.10.12<TAB>open...` — el parser guiado por cabecera resuelve el
+        token de timeframe y la hora faltante.
+        """
+        monkeypatch.setattr(routers.ai.settings, "csv_history_dir", str(tmp_path))
+        _write_daily_csv(tmp_path, "EURUSD", [
+            ("2026.10.10", 1.15),
+            ("2026.10.11", 1.16),
+        ])
+        candles = _mk_candles([
+            ("2026-01-02T00:00:00Z", 1.17),   # bloque viejo (antes del agujero)
+            ("2026-10-12T00:00:00Z", 1.19),   # barra viva
+        ])
+        out = routers.ai._fill_feed_hole(candles, "EURUSD", "D1")
+        times = {c["time"] for c in out}
+        assert "2026-10-10T00:00:00Z" in times
+        assert "2026-10-11T00:00:00Z" in times
+        assert "2026-01-02T00:00:00Z" not in times   # bloque viejo fuera
+        assert "2026-10-12T00:00:00Z" in times       # viva conservada
+
     def test_csv_paridad_columnas_mcp(self, tmp_path, monkeypatch):
         """Regresión 500 (2026-10-12): las velas CSV deben llevar `real_volume`.
 
@@ -156,3 +186,121 @@ def _write_csv(csv_dir, symbol, tf, rows):
         for t, c in rows:
             d, tm = t.split("T")
             w.writerow([d, tm, c, c + 0.001, c - 0.001, c, 1000, 0, 0])
+
+
+def _write_daily_csv(csv_dir, symbol, rows):
+    """CSV diario MT5 real: SIN columna `<TIME>` (8 columnas).
+
+    rows: lista de (fecha 'YYYY.MM.DD', close).
+    """
+    import csv as _csv
+    fname = csv_dir / f"{symbol}_Daily_202601020000_202610120000.csv"
+    with open(fname, "w", newline="", encoding="utf-8") as f:
+        w = _csv.writer(f, delimiter="\t")
+        w.writerow(["<DATE>", "<OPEN>", "<HIGH>", "<LOW>", "<CLOSE>",
+                    "<TICKVOL>", "<VOL>", "<SPREAD>"])
+        for d, c in rows:
+            w.writerow([d, c, c + 0.001, c - 0.001, c, 1000, 0, 0])
+
+
+def _resp(candles, status=200):
+    """Response falso estilo httpx: `status_code` + `.json()`."""
+    class _R:
+        status_code = status
+
+        def json(self):
+            return candles
+    return _R()
+
+
+def _bars(start, n, step_h, base=1.10):
+    """n velas OHLC en tendencia con paridad de columnas MCP (incluye
+    `real_volume`: sin él el `dropna()` de `engineer_market_features`
+    descarta las filas y la línea sale vacía)."""
+    out = []
+    prev = base
+    for i in range(n):
+        c = base + 0.0004 * i
+        out.append({
+            "time": (start + pd.Timedelta(hours=step_h * i)).isoformat(),
+            "open": prev,
+            "high": max(prev, c) + 0.001,
+            "low": min(prev, c) - 0.001,
+            "close": c,
+            "tick_volume": 1000,
+            "spread": 2,
+            "real_volume": 0,
+        })
+        prev = c
+    return out
+
+
+def _gapped_h4():
+    """Payload H4 con agujero: bloque viejo (sep) + vivo (oct), hueco ≈684h."""
+    return _bars(pd.Timestamp("2026-09-01"), 60, 4, base=1.10) + \
+        _bars(pd.Timestamp("2026-10-12"), 11, 4, base=1.12)
+
+
+def _h4_csv_rows():
+    """42 barras H4 contiguas: 2026-10-05T00:00 → 10-11T20:00 (168h)."""
+    start = pd.Timestamp("2026-10-05")
+    return [
+        ((start + pd.Timedelta(hours=4 * i)).strftime("%Y.%m.%dT%H:%M:%S"),
+         1.10 + 0.0004 * i)
+        for i in range(42)
+    ]
+
+
+def _gapped_d1():
+    """Payload D1 con agujero: bloque ene + barras vivas 10-12/10-13."""
+    return _bars(pd.Timestamp("2026-01-02"), 5, 24, base=1.10) + \
+        _bars(pd.Timestamp("2026-10-12"), 2, 24, base=1.12)
+
+
+def _daily_csv_rows():
+    """65 días hábiles: 2026-07-13 → 2026-10-09 (fecha, close)."""
+    return [
+        (d.strftime("%Y.%m.%d"), 1.10 + 0.0004 * i)
+        for i, d in enumerate(pd.bdate_range("2026-07-13", "2026-10-09"))
+    ]
+
+
+class TestHigherTfContextFill:
+    """`_higher_tf_context_line` aplica el parche ANTES de las guardas.
+
+    H4/D1 sólo degradan a "Unavailable" si tras el parche la serie sigue
+    rota (sin CSV o sin continuidad): el contexto real se recupera.
+    """
+
+    def test_hole_con_csv_construye_linea_real(self, tmp_path, monkeypatch):
+        """Hueco + CSV H4 → línea con RSI/ADX reales (no "Unavailable")."""
+        monkeypatch.setattr(routers.ai.settings, "csv_history_dir", str(tmp_path))
+        _write_csv(tmp_path, "EURUSD", "H4", _h4_csv_rows())
+        line = routers.ai._higher_tf_context_line("H4", _resp(_gapped_h4()), "EURUSD")
+        assert not line.endswith("Unavailable"), line
+        assert line.startswith("- H4: ")
+        assert "RSI" in line and "ADX" in line
+
+    def test_hole_sin_csv_degrada_a_unavailable(self, tmp_path, monkeypatch):
+        """Sin CSV para el símbolo → la guarda de continuidad sigue mandando."""
+        monkeypatch.setattr(routers.ai.settings, "csv_history_dir", str(tmp_path))
+        line = routers.ai._higher_tf_context_line("H4", _resp(_gapped_h4()), "EURUSD")
+        assert line == "- H4: Unavailable"
+
+    def test_d1_usa_csv_daily(self, tmp_path, monkeypatch):
+        """D1: hueco + `EURUSD_Daily_*` (sin `<TIME>`) → línea real."""
+        monkeypatch.setattr(routers.ai.settings, "csv_history_dir", str(tmp_path))
+        _write_daily_csv(tmp_path, "EURUSD", _daily_csv_rows())
+        line = routers.ai._higher_tf_context_line("D1", _resp(_gapped_d1()), "EURUSD")
+        assert not line.endswith("Unavailable"), line
+        assert line.startswith("- D1: ")
+        assert "RSI" in line
+
+    def test_payload_sano_no_se_toca(self, tmp_path, monkeypatch):
+        """Serie sana + CSV presente → sin merge, línea directa (sin hueco)."""
+        monkeypatch.setattr(routers.ai.settings, "csv_history_dir", str(tmp_path))
+        _write_csv(tmp_path, "EURUSD", "H4", _h4_csv_rows())
+        healthy = _bars(pd.Timestamp("2026-10-01"), 60, 4, base=1.11)
+        line = routers.ai._higher_tf_context_line("H4", _resp(healthy), "EURUSD")
+        assert not line.endswith("Unavailable"), line
+        assert "RSI" in line

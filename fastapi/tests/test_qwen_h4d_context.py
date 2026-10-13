@@ -17,7 +17,7 @@ Propiedades fijadas:
    "Unavailable" con warning — NUNCA tumba el ciclo (son contexto, no
    críticos; equity/H1 siguen siendo los críticos con su camino HOLD de
    siempre).
-2. `routers.ai._higher_tf_context_line(tf, res)` construye la línea con
+2. `routers.ai._higher_tf_context_line(tf, res, symbol)` construye la línea con
    guardas de calidad (HTTP/JSON/<30 velas/NaN → "Unavailable") y guarda de
    CONTINUIDAD (hueco >7d en la serie → "Unavailable": el feed real del MCP
    tiene un agujero de 9.5 meses visto el 2026-10-12 y un contexto calculado
@@ -222,7 +222,7 @@ class TestHigherTfContextLine:
     una excepción hacia /predict)."""
 
     def test_uptrend_line_has_structure_rsi_and_adx(self):
-        line = routers.ai._higher_tf_context_line("H4", _resp(_candles(250)))
+        line = routers.ai._higher_tf_context_line("H4", _resp(_candles(250)), "EURUSD")
         assert line.startswith("- H4: ")
         assert "Price ABOVE SMA200" in line
         assert "SMA200 RISING" in line
@@ -231,7 +231,7 @@ class TestHigherTfContextLine:
 
     def test_downtrend_line_marks_below_and_falling(self):
         line = routers.ai._higher_tf_context_line(
-            "D1", _resp(_candles(250, base=1.20, step=-0.0001)),
+            "D1", _resp(_candles(250, base=1.20, step=-0.0001)), "EURUSD",
         )
         assert line.startswith("- D1: ")
         assert "Price BELOW SMA200" in line
@@ -241,31 +241,31 @@ class TestHigherTfContextLine:
         import logging
         with caplog.at_level(logging.WARNING):
             line = routers.ai._higher_tf_context_line(
-                "H4", httpx.ConnectTimeout("MCP caído"),
+                "H4", httpx.ConnectTimeout("MCP caído"), "EURUSD",
             )
         assert line == "- H4: Unavailable"
         assert "H4" in caplog.text, "la degradación debe dejar warning (sin fallos silenciosos)"
 
     def test_http_error_degrades_to_unavailable(self):
         assert routers.ai._higher_tf_context_line(
-            "D1", _resp({"detail": "boom"}, status_code=500),
+            "D1", _resp({"detail": "boom"}, status_code=500), "EURUSD",
         ) == "- D1: Unavailable"
 
     def test_invalid_json_degrades_to_unavailable(self):
         bad = MagicMock()
         bad.status_code = 200
         bad.json.side_effect = ValueError("no JSON")
-        assert routers.ai._higher_tf_context_line("H4", bad) == "- H4: Unavailable"
+        assert routers.ai._higher_tf_context_line("H4", bad, "EURUSD") == "- H4: Unavailable"
 
     @pytest.mark.parametrize("payload", [[], {}, {"candles": []}, "garbage"],
                              ids=["empty-list", "empty-dict", "candles-empty", "string"])
     def test_payload_without_enough_candles_degrades(self, payload):
-        assert routers.ai._higher_tf_context_line("H4", _resp(payload)) == "- H4: Unavailable"
+        assert routers.ai._higher_tf_context_line("H4", _resp(payload), "EURUSD") == "- H4: Unavailable"
 
     def test_short_series_degrades_to_unavailable(self):
         # <30 velas no sostienen ni RSI14 ni ADX con honestidad
         assert routers.ai._higher_tf_context_line(
-            "H4", _resp(_candles(20)),
+            "H4", _resp(_candles(20)), "EURUSD",
         ) == "- H4: Unavailable"
 
 
@@ -296,25 +296,25 @@ class TestContinuityGuard:
         recent = _candles(16, t0="2026-10-12T00:00")   # DESC (más nueva 1ª)
         old = _candles(200, t0="2025-11-01T00:00")      # DESC
         with caplog.at_level(logging.WARNING):
-            line = routers.ai._higher_tf_context_line("H4", _resp(recent + old))
+            line = routers.ai._higher_tf_context_line("H4", _resp(recent + old), "EURUSD")
         assert line == "- H4: Unavailable"
         assert "hueco" in caplog.text, "la degradación por hueco debe dejar warning"
 
     def test_weekend_gap_still_builds_line(self):
         # cierre de finde ~50h: legítimo → la línea se construye
-        line = routers.ai._higher_tf_context_line("H4", _resp(_split_with_gap(50)))
+        line = routers.ai._higher_tf_context_line("H4", _resp(_split_with_gap(50)), "EURUSD")
         assert line.startswith("- H4: ") and "Unavailable" not in line
         assert "RSI" in line and "ADX" in line
 
     def test_long_holiday_gap_still_builds_line(self):
         # festivo largo (viernes→martes ≈120h): legítimo → se construye
-        line = routers.ai._higher_tf_context_line("D1", _resp(_split_with_gap(120)))
+        line = routers.ai._higher_tf_context_line("D1", _resp(_split_with_gap(120)), "EURUSD")
         assert line.startswith("- D1: ") and "Unavailable" not in line
 
     def test_gap_just_over_seven_days_degrades(self):
         # frontera: >168h nunca es un cierre de mercado → inválido
         assert routers.ai._higher_tf_context_line(
-            "H4", _resp(_split_with_gap(169)),
+            "H4", _resp(_split_with_gap(169)), "EURUSD",
         ) == "- H4: Unavailable"
 
 

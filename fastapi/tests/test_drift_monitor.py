@@ -242,6 +242,60 @@ class TestRunDriftCheck:
         # alertas: una por features_error; sin otra (decay ok, sin ofensores)
         dm.send_alert.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_feed_hole_filled_with_csv_before_psi(self, tmp_path, monkeypatch):
+        """El agujero del feed se rellena con el CSV ANTES de muestrear PSI.
+
+        En vivo 2026-10-07→12 el monitor muestreó el feed roto y el PSI
+        saturó (max_psi≈11.2 por overflow de sma20, atr 6.7) — drift CIEGO.
+        Con el parche (orden Félix 2026-10-13), si el feed vuelve a cortar,
+        la ventana de PSI sale contigua del CSV.
+        """
+        from tests.test_feed_hole_csv import _write_csv
+        _patch_env(monkeypatch, tmp_path)
+        dm.save_baseline(_engineered())
+        monkeypatch.setattr(dm.settings, "csv_history_dir", str(tmp_path))
+        # CSV H1: 24 barras de 2026-10-11 (cierran contra el bloque vivo)
+        _write_csv(tmp_path, "EURUSD", "H1", [
+            (f"2026.10.11T{h:02d}:00:00", 1.10 + 0.0003 * h) for h in range(24)
+        ])
+        # fetch con agujero: bloque viejo (sep) + bloque vivo (oct) ≫168h
+        old = _candles(80, seed=1)
+        live = [
+            {**c, "time": (pd.Timestamp("2026-10-12")
+                           + pd.Timedelta(hours=i)).isoformat()}
+            for i, c in enumerate(_candles(40, seed=2))
+        ]
+        monkeypatch.setattr(
+            "services.auto_retrain._fetch_historical_candles",
+            AsyncMock(return_value=old + live),
+        )
+        monkeypatch.setattr("services.drift_monitor._recent_pnl",
+                            AsyncMock(return_value=[5.0] * 25))
+        # espía: la muestra que llega a _build_training_dataframe (input del PSI)
+        import services.auto_retrain as ar
+        real_btd = ar._build_training_dataframe
+        captured: dict = {}
+
+        def spy(candles_in):
+            captured["candles"] = candles_in
+            return real_btd(candles_in)
+
+        monkeypatch.setattr(ar, "_build_training_dataframe", spy)
+
+        report = await dm.run_drift_check()
+
+        times = pd.to_datetime(
+            [c["time"] for c in captured["candles"]], utc=True,
+        ).sort_values()
+        gaps_h = np.diff(times.values) / np.timedelta64(1, "h")
+        assert float(gaps_h.max()) <= 168.0, \
+            f"la muestra de PSI conserva un hueco de {gaps_h.max():.0f}h"
+        assert not any(c["time"].startswith("2026-09-0") for c in captured["candles"])
+        assert any(c["time"].startswith("2026-10-11") for c in captured["candles"])
+        assert "features_error" not in report
+
+
 
 class TestEndpoint:
     def test_route_exists(self):
