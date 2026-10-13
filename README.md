@@ -2264,3 +2264,43 @@ Relación **INVERSA**: con un gate armado ≥0.7 esa semana se habrían bloquead
 **Efecto operativo (deseado, fail-closed):** mientras el modelo parrotea, los ciclos out-of-window reciben `quality=0` → **veto de calidad bloquea cualquier entrada** (antes: quality 8.5 prestado = veto decorativo); se **recupera automáticamente** cuando el modelo emita una razón genuinamente distinta (p. ej. el juicio in-window con contexto de cierre — pendiente de verificar con el próximo cierre, SHORT orden 54 abierto, time-stop ~03:00 UTC). El time-stop y los vetos mecánicos no dependen de Qwen → intactos. El monitor 24h vigila los warnings (esperados, log-only).
 
 **Archivos:** `fastapi/services/qwen_client.py`, `fastapi/tests/test_qwen_prompt_anchoring.py`, README, PROTOCOLO. Sin MQL5 → sin bump.
+
+### Experimento B — temperatura 0.2→0.4 + mapa del basin del ancla (2026-10-13, orden de Félix «quiero que el modelo juzgue de verdad» — suite 831→833 = 831+2, commit `f20f4fe`)
+
+**Cambio (`services/qwen_client.py`):** `QWEN_TEMPERATURE_UNIFIED = 0.4` (constante única, sólo el prompt unificado; el validador SL/TP y `trade_journal` no están en el camino de entrada). TDD: 2 tests nuevos fijan la temperatura del experimento y su uso de la constante; `fresh_qwen_state` (autouse en `conftest.py`) aísla el estado compartido del módulo por test.
+
+**Veredicto medido (`audit_log`, ciclos 17:10→19:15):**
+
+| Fase | Ciclos | Ancla 8.5 | Juicio real | q distintos |
+|---|---|---|---|---|
+| temp 0.2 | 16 | 10 | **0** | 2 |
+| temp 0.4 | 8 | 3 | **1** (19:10, q=7.0/conf=1.10/eff=0.2546, razón genuina) | 3 |
+
+→ **B no es un fix, es una mejora parcial**: a 0.2 el modelo NO juzgaba nunca (0/16); a 0.4 escapa del basin **intermitentemente** (~12 % de ciclos). El ancla 8.5 sigue de atractor dominante.
+
+**MAPA DEL BASIN (replays read-only secuenciales al Jetson, 21:06-21:10):** temperatura 0.2→0.8 y `repeat_penalty` 1.0→1.30 **NO** rompen el ancla numérica (sigue 8.5/1.30; sólo varía la razón). Reordenar los ejemplos few-shot **mueve** el ancla (5.0-primero → q=4.5-5.0 con razones que citan contradicciones reales «H4/D1 bearish SMA200»). **Quitar TODOS los ejemplos devuelve a 8.5/1.30** → el ancla **no es de los ejemplos: es el prior intrínseco del modelo**. Conclusión: `quality` del Qwen3-4B en JSON mode **es función del prompt, no del mercado**; sólo `reason` seguía el contexto. Esto motivó proponer el veto mecánico (D1) y, tras el cambio de modelo de Félix, la prueba del 8B (ver siguiente sección).
+
+### Modelo Llama-3.1-8B + presupuesto de latencia (backend 45s / EA 60s) — el 8B juzga de verdad (2026-10-13, orden de Félix «prueba con el 8B; si es mejor cambiamos el timeout, si no volvemos al 4B» — suite 833→835 = 833+2, deploy 20:47 UTC)
+
+**Contexto:** Félix sustituyó el modelo del Jetson (Qwen3-4B → `Llama-3.1-8B-Instruct`). Decisión pre-registrada: probar el 8B con prompts directos; **si el resultado es mejor → cambiar timeout; si no → volver al 4B + D1**.
+
+**Prueba (replays directos + los 2 últimos prompts de producción):** el 8B **escapa del ancla** — q∈{7.0, 8.0} en replays y 7.5-8.0 en producción (vs el parrota 8.5/1.30 del 4B), razones distintas citando contexto real (ADX, sesión, H1/ML), JSON válido con `reentry_ok` en todas. **Residuo menor:** `conf_mod=1.2` constante (ancla parcial de confianza, no del score). → **Resultado mejor → cambiar timeout.**
+
+**Problema operativo:** la latencia del 8B es **~36-41s** por llamada (vs 11-17s del 4B). Con el timeout viejo el backend cortaba a 20s → **`Qwen unavailable` en cada ciclo** (fail-closed: veto de calidad 0). Presupuesto en escalera: **backend 45s (`QWEN_TIMEOUT_UNIFIED`) < EA WebRequest 60s**.
+
+**Cambios:**
+- `services/qwen_client.py`: `QWEN_TIMEOUT_UNIFIED = 45.0` (constante con comentario; sólo el unificado — el validador SL/TP sin cablear queda en 20s).
+- `mql5/AI_Quant_Terminal_v3.mq5`: **v13.3→v13.4**, `/api/v1/ai/predict` WebRequest `30000→60000`.
+- Tests: `TestLLM8BLatencyBudget` (fija `timeout == 45.0` vía constante) + `TestPredictLatencyBudget` (fija `, 60000,` en el WebRequest del predict) + pin de versión 13.4.
+
+**Verificación en vivo (producción, backend 45s, 20:50-21:00):**
+
+| Ciclo | q | cm | razón | latencia |
+|---|---|---|---|---|
+| 20:50 | 7.5 | 1.2 | «strong ADX and trend alignment» | 40.8s |
+| 20:55 | 7.5 | 1.2 | «TRENDING session with strong ADX» | 41.5s |
+| 21:00 | 8.0 | 1.2 | «strong ADX, aligned with ML» | 39.2s |
+
+✅ **Juicio genuino y estable** (quality variable, razones distintas), latencia <45s, **0 parrota / 0 `reentry_ok ausente` / 0 ancla** desde el deploy. ✅ El EA recibió la respuesta y reportó decisión (`/predict → 200 (40.8s)` → `/ea/decision → 200`). **Discriminación en setups BEARISH/RANGING aún no verificada** (sólo se ha observado dato trending); `conf_mod` aún anclado a 1.2.
+
+**Archivos:** `fastapi/services/qwen_client.py`, `mql5/AI_Quant_Terminal_v3.mq5` (**bump 13.4**), `fastapi/tests/test_qwen_prompt_anchoring.py`, `fastapi/tests/test_ea_close_outbox.py`, README, PROTOCOLO. `QUALITY_THRESHOLD` intacto.
