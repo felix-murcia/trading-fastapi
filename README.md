@@ -2208,3 +2208,19 @@ Relación **INVERSA**: con un gate armado ≥0.7 esa semana se habrían bloquead
 **Aplicación (13:17 UTC):** `.env` `RETRAIN_AUTO_APPROVE=true` + `docker compose up -d fastapi` (recreate). Verificado: `printenv=true` en el contenedor, `settings.retrain_auto_approve=True`, `/health` ok (equity 463.82), ciclo predict 13:20 → **200 completo** tras el recreate. Suite **816 passed** (sin cambios de código → sin bump EA).
 
 **Comportamiento nuevo:** (1) el primer cierre EURUSD tras expirar el cooldown de #33 (**10-14 13:04 UTC** — `filled_count=18 ≥ 5` ya pendiente) disparará un retrain automático `trade_count`; (2) el calendario 168h pasa a disparar solo (próximo due ~10-20, exento de cooldown); (3) `forced`/`approve` siguen disponibles para orden manual. Cada intento: ~5 min de cómputo, gate decide, sin repetición forzada (cooldown 24h).
+
+### Drift baseline reconstruido — primera señal limpia (2026-10-13, orden de Félix «Reconstruir» — data-only, sin cambios de código)
+
+**Qué:** el baseline de drift (congelado 10-07 en la promoción #25) se reconstruyó desde el **snapshot limpio de #33** (`19bcf8c9cfdb`, H1 2021-12-16→2026-10-13 contiguo) replicando exactamente el mecanismo de promoción: mismo `build_walk_forward_split` + `RetrainConfig` → `train_end=20986` (idéntico al WF de #33, split determinista) → `save_baseline(train_df, symbol="EURUSD")` → **15 features, sha `816a74d9…`**. Backup del baseline anterior en `fastapi/ml/backups/feature_drift_baseline_20261007_pre-rebuild.json`. Ningún umbral, `PSI_EPS` o config tocado.
+
+**Primer drift report contra señal limpia (13:28:57 UTC):**
+
+| Nivel | Features | PSI | Lectura |
+|---|---|---|---|
+| **ok** | returns 0.09 · rsi14 0.09 · bb_pos 0.08 · lag_return_1..5 0.08–0.09 | <0.15 | Microestructura y momentum **en soporte** del entreno |
+| warning | range 0.13 · tr 0.14 | <0.25 | Dispersión intrabarra algo mayor |
+| **critical** | **sma20 12.43** · macd_signal 1.45 · macd 1.41 · atr 1.49 · dist_sma20 0.32 | ≥0.25 | **Nivel de precio y volatilidad fuera del soporte 2021-2025** (era 1.13+; amplificado por `PSI_EPS`) |
+
+**Interpretación:** el monitor dejó de estar ciego y discrimina: *la forma del mercado se comporta como el entreno; el nivel/la vol son un régimen nuevo*. Ésta es la señal que el drift debe dar. Nota de honestidad: el bundle activo (`bb70b582`) entrenó sobre el feed roto — esta baseline es la referencia limpia **elegida por orden**; la próxima promoción la sobreescribirá con su propio `train_df` (que ya será limpio). Verificado en vivo: `GET /api/v1/ai/model/drift` → 200 con el nuevo baseline (`created_at 13:28:29`).
+
+**Evidencia:** suite **816 passed** (sin cambios de código, sólo artefacto de datos + docs → sin bump EA). Archivos: `fastapi/ml/feature_drift_baseline.json` (rebuild), `README.md`, `PROTOCOLO_ANTI_BUCLE.md`.
