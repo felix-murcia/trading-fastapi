@@ -19,9 +19,12 @@ Propiedad fijada por estos tests (2026-10-09):
 
 RCA 2026-10-13 (ancla determinista out-of-window) añade:
   5. >= 3 ejemplos few-shot + advertencia de copia POST-ejemplos.
-  6. Guarda anti-ancla: reason == razón de ejemplo SIN reentry_ok →
-     degradada fail-closed (nunca quality=8.5 prestado).
-  7. Sincronía FORMAT_EXAMPLE_REASONS ↔ razones reales del prompt.
+
+S2 (orden Félix 2026-10-14, retirada de la guarda runtime anti-ancla):
+la guarda (c) que degradaba reason==ejemplo SIN reentry_ok se retiró —
+con el Llama-3.1-8B nunca copió el ejemplo (0 disparos desde 20:47 UTC
+del 10-13; el 4B@temp0.2 era el que anclaba). Se conservan: el DISEÑO
+del prompt (H2/H9, puntos 1-5) y el test del fail-open R1 documentado.
 
 Si alguien vuelve a un solo valor ancla en cualquiera de los dos prompts,
 estos tests caen a rojo.
@@ -207,20 +210,13 @@ class TestJournalPromptAnchoring:
 #
 # Evidencia: 10/10 ciclos sin bloque Reentry devolvieron byte a byte
 # `{"quality": 8.5, "reason": "trend and ADX align", ...}` SIN reentry_ok
-# (copia del ejemplo FORMAT #1). Replay en vivo 18:04 UTC: mismo servidor,
-# variante out-of-window → ancla 100% reproducible; variante in-window →
-# juzga bien. La guarda anti-ancla degrada fail-closed esa respuesta.
+# (copia del ejemplo FORMAT #1) — comportamiento del Qwen3-4B@temp 0.2.
+# S2 (orden Félix 2026-10-14): la guarda runtime anti-ancla se RETIRÓ
+# (con el Llama-3.1-8B, 0 disparos desde 20:47 UTC del 10-13) y con ella
+# las fixtures `_ANCHOR_COPY` / `_ANCHOR_COPY_WITH_FIELD` y su test de
+# sincronía con la constante FORMAT_EXAMPLE_REASONS (también retirada).
+# El diseño del prompt (3 ejemplos + advertencia) se conserva abajo.
 # ---------------------------------------------------------------------------
-
-_ANCHOR_COPY = (
-    '{"quality": 8.5, "reason": "trend and ADX align", "bias": "BULLISH", '
-    '"confidence_modifier": 1.3, "regime": "TRENDING"}'
-)
-
-_ANCHOR_COPY_WITH_FIELD = (
-    '{"quality": 8.5, "reason": "trend and ADX align", "bias": "BULLISH", '
-    '"confidence_modifier": 1.3, "reentry_ok": true, "regime": "TRENDING"}'
-)
 
 
 async def _unified_with(canned: str, **overrides) -> tuple:
@@ -230,29 +226,19 @@ async def _unified_with(canned: str, **overrides) -> tuple:
     return result, client.captured["prompt"]
 
 
-class TestAnchorCopyGuardRCA:
-    """Guarda anti-ancla (RCA 2026-10-13) + refuerzo de la variante fina."""
+class TestPromptAntiAnchorDesign:
+    """Diseño anti-ancla del prompt (H2/H9 + RCA 2026-10-13) — SE CONSERVA.
 
-    @pytest.mark.asyncio
-    async def test_anchor_copy_without_reentry_is_degraded(self):
-        """Copia del ejemplo #1 sin reentry_ok → degradada fail-closed."""
-        result, _ = await _unified_with(_ANCHOR_COPY)
-        assert result["ok"] is False, (
-            "la copia ancla pasó por juicio real: quality=8.5 prestado"
-        )
-        assert result["quality"] == 0.0, "debe ser quality=0 (fail-closed)"
-
-    @pytest.mark.asyncio
-    async def test_anchor_reason_with_reentry_field_not_degraded(self):
-        """Especificidad: razón de ejemplo CON el campo → no es copia."""
-        result, _ = await _unified_with(_ANCHOR_COPY_WITH_FIELD)
-        assert result["ok"] is True, (
-            "guarda demasiado agresiva: juzgó con reentry_ok presente"
-        )
+    S2 (orden Félix 2026-10-14): la guarda runtime anti-ancla (c) se retiró
+    (0 disparos con el 8B); estos tests protegen el DISEÑO del prompt y el
+    fail-open R1 documentado, ambos intactos."""
 
     @pytest.mark.asyncio
     async def test_genuine_reason_without_reentry_field_not_degraded(self):
-        """Razón propia sin reentry_ok → el fail-open documentado sigue vivo."""
+        """Razón propia sin reentry_ok → el fail-open R1 documentado sigue vivo.
+
+        Preservado por decisión aparte (S2 no toca R1): la ausencia del campo
+        emite WARNING y asume true — veto sólo por juicio explícito."""
         result, _ = await _unified_with(_UNIFIED_CANNED)
         assert result["ok"] is True
         assert result["quality"] == 6.5
@@ -278,16 +264,6 @@ class TestAnchorCopyGuardRCA:
         _, prompt = await _unified_with(_UNIFIED_CANNED)
         assert "Reentry check" in prompt, (
             "variante out-of-window sin sección Reentry check (regresión RCA)"
-        )
-
-    @pytest.mark.asyncio
-    async def test_format_example_reasons_synced_with_prompt(self):
-        """FORMAT_EXAMPLE_REASONS debe reflejar las razones EJEMPLO del prompt."""
-        _, prompt = await _unified_with(_UNIFIED_CANNED)
-        example_reasons = set(re.findall(r'"reason":\s*"([^"]+)"', prompt))
-        assert example_reasons == set(qwen_client.FORMAT_EXAMPLE_REASONS), (
-            f"desincronizados: prompt={example_reasons} "
-            f"const={set(qwen_client.FORMAT_EXAMPLE_REASONS)}"
         )
 
 

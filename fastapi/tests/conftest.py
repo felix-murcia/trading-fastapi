@@ -28,8 +28,9 @@ from unittest.mock import patch, MagicMock, AsyncMock
 @pytest.fixture(autouse=True)
 def fresh_qwen_state(monkeypatch):
     """Estado de Qwen aislado POR TEST — el módulo es estado compartido
-    (salud P1-6 + guardas anti-ancla/anti-parrota con racha por símbolo;
-    la racha filtraría desde tests anteriores si no se resetea)."""
+    (salud P1-6 + guarda anti-parrota con racha por símbolo [la anti-ancla
+    se retiró en S2 2026-10-14]; la racha filtraría desde tests anteriores
+    si no se resetea)."""
     import services.qwen_client as qwen_client
     monkeypatch.setattr(qwen_client, "_QWEN_STATE", qwen_client.QwenHealthState())
 

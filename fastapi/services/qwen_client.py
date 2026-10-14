@@ -88,18 +88,15 @@ def _degraded_unified(regime: str, ml_prob: float, reason: str) -> dict:
     }
 
 
-# RCA 2026-10-13 — razones EXACTAS de los ejemplos FORMAT del prompt
-# unificado. Si la respuesta devuelve una de estas razones SIN el campo
-# `reentry_ok` (que los ejemplos SIEMPRE llevan), el modelo copió el
-# ejemplo (ancla determinista: temperature=0.2, Qwen3-4B, contexto fino =
-# variante out-of-window) en lugar de juzgar: se degrada fail-closed en
-# vez de fiarse del quality prestado (8.5) y del bias/×1.3 anclados.
-# Sincronizado con el prompt por test_format_example_reasons_synced.
-FORMAT_EXAMPLE_REASONS = frozenset({
-    "trend and ADX align",
-    "range chop against signal",
-    "Mixed trend and momentum signals",
-})
+# RCA 2026-10-13 — la guarda anti-ancla (c) degradaba fail-closed la razón
+# exacta de un ejemplo FORMAT devuelta SIN `reentry_ok` = el modelo copió
+# el ancla en lugar de juzgar (Qwen3-4B@temp 0.2, replay 18:04 UTC 100 %
+# reproducible). RETIRADA en S2 (orden Félix 2026-10-14): el Llama-3.1-8B
+# nunca copió el ejemplo (0 disparos, 20:47 UTC 10-13 → 10:10 UTC 10-14) —
+# el ancla era un defecto de decodificación del 4B, no del prompt. Con la
+# guarda se retiró la constante FORMAT_EXAMPLE_REASONS (las razones
+# ejemplo viven sólo en el prompt). El campo `reentry_ok` ausente sigue
+# emitiendo WARNING + fail-open R1 (decisión aparte, intacta).
 
 # Orden Félix 2026-10-13 (opción C): razón idéntica ≥3 ciclos consecutivos
 # por símbolo = plantilla parrota, no juicio (Qwen3-4B@temp 0.2 emite la
@@ -127,8 +124,9 @@ PARROT_SIMILARITY_THRESHOLD = 0.5
 # 0.2 → 0.4 — el modelo (Qwen3-4B) a 0.2 cae en un basin determinista de
 # plantilla (parrota con q=8.5 / conf_mod=1.30 constantes en 100 % de los
 # ciclos out-of-window desde 10:35). 0.4 busca diversidad de decodificación
-# para que discrimine de verdad. Las guardas anti-ancla y anti-parrota (C+)
-# quedan como red de seguridad: si el síntoma persiste, fail-closed.
+# para que discrimine de verdad. La guarda anti-parrota (C+, recalibrada
+# en S1) queda como red de seguridad: si el síntoma persiste, fail-closed.
+# (La guarda anti-ancla se retiró en S2 — 0 disparos con el 8B.)
 QWEN_TEMPERATURE_UNIFIED = 0.4
 
 # Orden Félix 2026-10-13: el Jetson sirve ahora Llama-3.1-8B-Instruct
@@ -485,30 +483,14 @@ async def query_qwen_unified(
 
         conf_mod = _clamp(float(parsed.get("confidence_modifier", 1.0)), 0.5, 1.5)
 
-        # Guarda anti-ancla (RCA 2026-10-13): razón == razón de ejemplo FORMAT
-        # SIN `reentry_ok` (campo que los ejemplos SIEMPRE llevan) = el modelo
-        # copió el ancla en lugar de juzgar (10/10 ciclos out-of-window desde
-        # 10:35; replay 18:04 UTC reproducido 100%). Fail-closed: degradada
-        # (quality=0 → veto de calidad) en vez de fiarse del quality prestado.
-        # Con `reentry_ok` presente se asume juicio real (test de especificidad).
-        if "reentry_ok" not in parsed and reason.strip() in FORMAT_EXAMPLE_REASONS:
-            logger.warning(
-                "[%s] QWEN-UNIFIED ancla detectada (reason de ejemplo FORMAT sin "
-                "reentry_ok) → respuesta degradada fail-closed",
-                cycle_id,
-            )
-            _record_failure("anchor-copy")
-            return _degraded_unified(
-                regime, ml_prob, "Qwen degraded: anchor-copy (reason de ejemplo sin reentry_ok)",
-            )
-
         # Guarda anti-parrota (orden Félix 2026-10-13, opción C → C+; S1
         # 2026-10-14): razón SIMILAR (Jaccard ≥ umbral) Y quality SIN
         # variar ≥ PARROT_STREAK_LIMIT ciclos consecutivos por símbolo =
-        # plantilla parrota, no juicio. Sólo cuenta respuestas que
-        # superaron la guarda anti-ancla. La racha se resetea con cualquier
-        # razón disímil O quality distinta (juicio genuino del 8B: razones
-        # trending similares pero q variable 6-9 → NO degrada).
+        # plantilla parrota, no juicio. Cada respuesta parseada cuenta la
+        # racha (S2 retiró la guarda anti-ancla que interceptaba antes).
+        # La racha se resetea con cualquier razón disímil O quality
+        # distinta (juicio genuino del 8B: razones trending similares pero
+        # q variable 6-9 → NO degrada).
         rsn = reason.strip()
         if rsn:
             tokens = _reason_tokens(rsn)
