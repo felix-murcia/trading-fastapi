@@ -2326,3 +2326,21 @@ Relación **INVERSA**: con un gate armado ≥0.7 esa semana se habrían bloquead
 ✅ 5 ciclos, **0 falsos positivos**, quality variable 7.0-9.0, **0 disparos de guardas**. Nota: 10:30 y 10:40 repiten razón byte a byte con q 9.0 vs 8.0 — exactamente el patrón que S1 deja de castigar. **Estado lateral observado:** orden 54 cerró el 13-10 15:54 (SL −14.51, el time-stop no hizo falta); orden 55 SELL creada 10:35 (pending, mismo patrón que 54). `QUALITY_THRESHOLD` intacto. Sin MQL5 → sin bump.
 
 **Pendiente (TD-1):** S2 (retirar anti-ancla (c), dormida = 0 disparos post-8B) y S3 (higiene de tests) requieren orden. Seguir monitoreando que la firma parrota (q constante + razón similar ×3) sigue degradando en vivo si reaparece.
+
+### S2+S3 — retirada de la guarda anti-ancla (c) e higiene de tests (2026-10-14, orden de Félix «continúa con S2 y S3» — suite 837→833 = 837−3−2+1, deploy 11:21 UTC)
+
+**S2 — retiro de la guarda runtime anti-ancla (c):** la guarda degradaba fail-closed la razón exacta de un ejemplo FORMAT devuelta SIN `reentry_ok` (copia del ancla = defecto de decodificación del **Qwen3-4B@temp 0.2**, replay 100 % reproducible el 10-13). Con el **Llama-3.1-8B: 0 disparos** (20:47 UTC 10-13 → 10:10 UTC 10-14). Se retiró: bloque del guard + constante `FORMAT_EXAMPLE_REASONS` + 3 tests (degradación, especificidad, sincronía constante↔prompt). **Se conserva:** el diseño del prompt H2/H9 (3 ejemplos + advertencia post-ejemplos + sección Reentry — tests 4-6 intactos) y el test del **fail-open R1** (decisión aparte, sin tocar: ausencia de `reentry_ok` → WARNING + true). Red de seguridad residual: si algún modelo volviera a anclar, su quality constante dispararía la anti-parrota recalibrada (S1) en ≤3 ciclos.
+
+**S3 — higiene de tests sobreajustados al 4B:** retirados `test_live_rotating_variants_degrade_at_third` y `test_live_variants_pairwise_similar` (citas literales de strings vivos del 4B: `_LIVE_V1/V2/V3`). Sustituidos por `test_rotated_variants_constant_quality_degrade_at_third`: variantes **sintéticas auto-verificadas** (Jaccard por parejas ≥ umbral assertado dentro del test, quality byte a byte fija) → degradan en el 3er ciclo. La cobertura C+ (escape por rotación) queda sin depender de un modelo retirado; el test del hueco (S1, quality variable no degrada) es la otra cara de la calibración. La fixture `fresh_qwen_state` se mantiene (la anti-parrota sigue con estado por-símbolo).
+
+**Verificación en vivo (deploy 11:21:47 UTC):**
+
+| Ciclo | q | razón | degradada |
+|---|---|---|---|
+| 11:25 | 7.5 | «TRENDING regime and ADX align with ML signal» | no |
+| 11:30 | 8.0 | «session with aligned trend and ADX, ML signal agrees» | no |
+| 11:35 | 7.0 | «setup with ADX and session aligned, ML signal agrees» | no |
+
+✅ 3 ciclos, quality variable 7.0-8.0, **0 disparos** (ya sin el guard anti-ancla en el código). **Monitor 24h cerrado (11:36):** 104 health failures = MT5/MCP caído overnight (máquina apagada ~01:10-09:56; el monitor exige `mcp.connected=true`), 0 FAIL_OPEN hoy (los 2 del monitor son del 10-13, era 4B), errores nuevos = GCS backup (conocido-benigno, local OK) + drift crítico `sma20 12.43` (conocido del baseline rebuild por orden del 10-13, umbrales intactos).
+
+**Archivos:** `fastapi/services/qwen_client.py` (guard retirado + constante), `fastapi/tests/test_qwen_prompt_anchoring.py` (clase renombrada `TestPromptAntiAnchorDesign`, fixtures sintéticas S3), `fastapi/tests/conftest.py` (docstring), README, PROTOCOLO. **Commits `b84fbbe` (S2) + `0be6194` (S3).** `QUALITY_THRESHOLD` y `walk_forward` intactos. Sin MQL5 → sin bump. **TD-1 cerrado:** las 5 piezas de deuda clasificadas quedan resueltas (presupuesto 8B = vivo; anti-ancla = retirada; anti-parrota = recalibrada S1; temp B = neutral; H2/H9 = diseño) — sólo queda la decisión R1 (fail-open) pendiente aparte.
