@@ -313,23 +313,26 @@ _PARROT_B = (
 
 
 class TestParrotGuardRCA:
-    """Guarda anti-parrota (opción C, orden 2026-10-13)."""
+    """Guarda anti-parrota (opción C/C+, orden 2026-10-13; S1 2026-10-14)."""
 
-    # Variantes REALES observadas en vivo 17:10-17:40 (rotación de la
-    # plantilla parrota): Jaccard entre ellas 0.58-0.67 ≥ umbral 0.5.
-    _LIVE_V1 = (
-        '{"quality": 8.5, "reason": "Trend, ADX, session and ML signal align", '
+    # S3 (orden Félix 2026-10-14): variantes CONSTRUIDAS que replican el
+    # patrón del parrota del 4B (rotación de la plantilla con jitter de
+    # palabras: Jaccard ≥0.5 entre todas las parejas, quality byte a byte
+    # fija). Sustituyen a las 3 citas reales del 4B (17:10-17:40), que
+    # quedaban sobreajustadas a un modelo retirado.
+    _ROT_V1 = (
+        '{"quality": 8.0, "reason": "Trend and ADX align with the ML signal", '
         '"bias": "BULLISH", "confidence_modifier": 1.3, "reentry_ok": true, '
         '"regime": "TRENDING"}'
     )
-    _LIVE_V2 = (
-        '{"quality": 8.5, "reason": "Trend, ADX, and ML signal align with bullish bias", '
+    _ROT_V2 = (
+        '{"quality": 8.0, "reason": "Trend and ADX align with ML signal context", '
         '"bias": "BULLISH", "confidence_modifier": 1.3, "reentry_ok": true, '
         '"regime": "TRENDING"}'
     )
-    _LIVE_V3 = (
-        '{"quality": 8.5, "reason": "trend, ADX, session align with ML HOLD signal", '
-        '"bias": "NEUTRAL", "confidence_modifier": 1.3, "reentry_ok": true, '
+    _ROT_V3 = (
+        '{"quality": 8.0, "reason": "Trend and ADX and session align with ML", '
+        '"bias": "BULLISH", "confidence_modifier": 1.3, "reentry_ok": true, '
         '"regime": "TRENDING"}'
     )
 
@@ -369,28 +372,26 @@ class TestParrotGuardRCA:
         assert results == [True, True, True, True, True, False], results
 
     @pytest.mark.asyncio
-    async def test_live_rotating_variants_degrade_at_third(self):
-        """C+: las 3 variantes REALES de la plantilla rotada (Jaccard
-        ≥0.5 entre adyacentes) degradan en el 3er ciclo — el escape
-        observado en vivo queda cubierto."""
-        r1, _ = await _unified_with(self._LIVE_V1)
-        r2, _ = await _unified_with(self._LIVE_V2)
-        r3, _ = await _unified_with(self._LIVE_V3)
+    async def test_rotated_variants_constant_quality_degrade_at_third(self):
+        """C+: variantes ROTADAS (Jaccard ≥ umbral entre todas las parejas,
+        calidad constante = firma parrota) degradan en el 3er ciclo — el
+        escape por rotación observado con el 4B queda cubierto sin depender
+        de sus strings (S3: fixtures sintéticas auto-verificadas)."""
+        variants = (self._ROT_V1, self._ROT_V2, self._ROT_V3)
+        tokens = [
+            qwen_client._reason_tokens(json.loads(v)["reason"]) for v in variants
+        ]
+        thr = qwen_client.PARROT_SIMILARITY_THRESHOLD
+        assert qwen_client._jaccard(tokens[0], tokens[1]) >= thr
+        assert qwen_client._jaccard(tokens[1], tokens[2]) >= thr
+        assert qwen_client._jaccard(tokens[0], tokens[2]) >= thr
+
+        r1, _ = await _unified_with(self._ROT_V1)
+        r2, _ = await _unified_with(self._ROT_V2)
+        r3, _ = await _unified_with(self._ROT_V3)
         assert r1["ok"] is True and r2["ok"] is True
         assert r3["ok"] is False, "la rotación de variantes escapó a la guarda C+"
         assert r3["quality"] == 0.0
-
-    @pytest.mark.asyncio
-    async def test_live_variants_pairwise_similar(self):
-        """Fijar la separación medida: variantes vivas ≥0.5, genuinas <0.5."""
-        v1 = qwen_client._reason_tokens("Trend, ADX, session and ML signal align")
-        v2 = qwen_client._reason_tokens("Trend, ADX, and ML signal align with bullish bias")
-        v3 = qwen_client._reason_tokens("trend, ADX, session align with ML HOLD signal")
-        gen1 = qwen_client._reason_tokens("Mixed trend and range signals; momentum fading")
-        gen2 = qwen_client._reason_tokens("Breakout in downtrend with weak volume")
-        assert qwen_client._jaccard(v1, v2) >= 0.5
-        assert qwen_client._jaccard(v2, v3) >= 0.5
-        assert qwen_client._jaccard(gen1, gen2) < 0.5
 
     @pytest.mark.asyncio
     async def test_streak_is_per_symbol(self):
