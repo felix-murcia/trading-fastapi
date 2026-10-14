@@ -2304,3 +2304,25 @@ Relación **INVERSA**: con un gate armado ≥0.7 esa semana se habrían bloquead
 ✅ **Juicio genuino y estable** (quality variable, razones distintas), latencia <45s, **0 parrota / 0 `reentry_ok ausente` / 0 ancla** desde el deploy. ✅ El EA recibió la respuesta y reportó decisión (`/predict → 200 (40.8s)` → `/ea/decision → 200`). **Discriminación en setups BEARISH/RANGING aún no verificada** (sólo se ha observado dato trending); `conf_mod` aún anclado a 1.2.
 
 **Archivos:** `fastapi/services/qwen_client.py`, `mql5/AI_Quant_Terminal_v3.mq5` (**bump 13.4**), `fastapi/tests/test_qwen_prompt_anchoring.py`, `fastapi/tests/test_ea_close_outbox.py`, README, PROTOCOLO. `QUALITY_THRESHOLD` intacto.
+
+### S1 — anti-parrota recalibrada: el disparador exige quality constante (2026-10-14, orden de Félix «ejecuta S1» — suite 835→837 = 835+2, deploy 10:10 UTC)
+
+**Contexto (TD-1, hallazgo C):** la guarda anti-parrota C/C+ (razón similar ≥3 ciclos → degradar) fue calibrada contra el **Qwen3-4B** (parrota: razones rotadas 0.58-0.67 **con q=8.5 byte a byte**; genuino: 0.0-0.4). Con el **Llama-3.1-8B** los juicios genuinos en trending son similares por texto (Jaccard 0.50-0.60 ≥ umbral) pero su quality **varía** (6.0-9.0) → la guarda degradaba juicio real: **falso positivo medido 2/12 ciclos (21:25 y 21:30, rachas 3 y 4 sobre juicios q≈7-8)**. Es decir, la guarda había pasado de protector a liability.
+
+**Cambio (recalibración, no retirada):** el disparador ahora exige **AMBAS condiciones** — razón similar (Jaccard ≥0.5) **Y quality sin variar** (`q == prev_q`) ≥3 ciclos consecutivos por símbolo. La firma parrota real del 4B (q fijo) **sigue degradando**; el patrón del 8B (razón trending similar + q variable) ya no. Estado nuevo: `QwenHealthState.last_quality` (por símbolo, se resetea con el fixture `fresh_qwen_state`). `PARROT_SIMILARITY_THRESHOLD=0.5` y `PARROT_STREAK_LIMIT=3` intactos.
+
+**TDD:** test nuevo `test_similar_reasons_with_varied_quality_not_degraded` (razones live 21:15/21:20 con Jaccard 0.50/0.60 y q variable 8.0/7.0/6.0) → **ROJO confirmado** bajo el código viejo (degradaba), VERDE con S1. Guardarrail `test_same_quality_and_similar_reason_still_degrades` (firma parrota: razón idéntica + q 7.0 fijo ×3 → degrada). Los 10 tests existentes de la guarda siguen en verde (sus fixtures ya tenían quality constante = firma parrota).
+
+**Verificación en vivo (producción, deploy 10:10:16 UTC):** sin ciclos 10:15-10:25 = **blackout de noticias (EU Economic Summit) → HOLD fast-path** (comportamiento esperado, no regresión); ciclos completos se reanudan 10:30:
+
+| Ciclo | q | razón | degradada |
+|---|---|---|---|
+| 10:30 | 9.0 | «strong ADX and trend alignment» | no |
+| 10:35 | 7.0 | «falling SMA200, RSI and ADX align» | no |
+| 10:40 | 8.0 | «strong ADX and trend alignment» (idéntica a 10:30, q distinta) | no |
+| 10:45 | 7.0 | «falling SMA200 and ADX aligning with ML» | no |
+| 10:50 | 8.5 | «aligns with MACD and ADX» | no |
+
+✅ 5 ciclos, **0 falsos positivos**, quality variable 7.0-9.0, **0 disparos de guardas**. Nota: 10:30 y 10:40 repiten razón byte a byte con q 9.0 vs 8.0 — exactamente el patrón que S1 deja de castigar. **Estado lateral observado:** orden 54 cerró el 13-10 15:54 (SL −14.51, el time-stop no hizo falta); orden 55 SELL creada 10:35 (pending, mismo patrón que 54). `QUALITY_THRESHOLD` intacto. Sin MQL5 → sin bump.
+
+**Pendiente (TD-1):** S2 (retirar anti-ancla (c), dormida = 0 disparos post-8B) y S3 (higiene de tests) requieren orden. Seguir monitoreando que la firma parrota (q constante + razón similar ×3) sigue degradando en vivo si reaparece.

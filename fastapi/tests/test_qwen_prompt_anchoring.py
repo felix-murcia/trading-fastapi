@@ -438,6 +438,56 @@ class TestParrotGuardRCA:
         r3, _ = await _unified_with(no_reason)
         assert r1["ok"] is True and r2["ok"] is True and r3["ok"] is True
 
+    # ── S1 (orden Félix 2026-10-14): el disparador exige quality CONSTANTE ──
+    # Razones genuinas del 8B en vivo (21:15/21:20, quality variable 6-9)
+    # con Jaccard 0.50/0.60 ≥ umbral → la guarda solo-por-texto degradaba
+    # juicio real (falso positivo medido: 2/12 ciclos, 21:25/21:30).
+    _S1_VARIED_1 = (
+        '{"quality": 8.0, "reason": "TRENDING setup with strong ADX and '
+        'session context", "bias": "BULLISH", "confidence_modifier": 1.2, '
+        '"reentry_ok": true, "regime": "TRENDING"}'
+    )
+    _S1_VARIED_2 = (
+        '{"quality": 7.0, "reason": "TRENDING signal with ADX and session '
+        'aligned", "bias": "BULLISH", "confidence_modifier": 1.2, '
+        '"reentry_ok": true, "regime": "TRENDING"}'
+    )
+    _S1_VARIED_3 = (
+        '{"quality": 6.0, "reason": "TRENDING setup with ADX and session '
+        'aligned in trend", "bias": "BULLISH", "confidence_modifier": 1.2, '
+        '"reentry_ok": true, "regime": "TRENDING"}'
+    )
+
+    @pytest.mark.asyncio
+    async def test_similar_reasons_with_varied_quality_not_degraded(self):
+        """S1: razón similar (Jaccard ≥0.5) PERO quality variable = juicio
+        genuino (patrón del 8B: q 6.0-9.0 con razones trending similares),
+        NO parrota — el disparador exige quality SIN variar (el 4B parroteaba
+        q=8.5 byte a byte). Regresión del falso positivo medido 21:25/21:30."""
+        # Verificar las condiciones del fixture: similar por texto…
+        t1 = qwen_client._reason_tokens("TRENDING setup with strong ADX and session context")
+        t2 = qwen_client._reason_tokens("TRENDING signal with ADX and session aligned")
+        t3 = qwen_client._reason_tokens("TRENDING setup with ADX and session aligned in trend")
+        assert qwen_client._jaccard(t1, t2) >= qwen_client.PARROT_SIMILARITY_THRESHOLD
+        assert qwen_client._jaccard(t2, t3) >= qwen_client.PARROT_SIMILARITY_THRESHOLD
+        # …pero con quality distinto en cada ciclo → los 3 son juicio.
+        for canned in (self._S1_VARIED_1, self._S1_VARIED_2, self._S1_VARIED_3):
+            r, _ = await _unified_with(canned)
+            assert r["ok"] is True, (
+                "falso positivo S1: quality variable degradó juicio real"
+            )
+            assert r["quality"] != 0.0
+
+    @pytest.mark.asyncio
+    async def test_same_quality_and_similar_reason_still_degrades(self):
+        """S1: el disparador sigue activo para la firma parrota real —
+        razón similar Y quality constante ≥3 ciclos → degradada."""
+        # _PARROT_A = q 7.0 constante con la misma razón (firma parrota).
+        await _unified_with(_PARROT_A)
+        await _unified_with(_PARROT_A)
+        r3, _ = await _unified_with(_PARROT_A)
+        assert r3["ok"] is False and r3["quality"] == 0.0
+
 
 class TestLLM8BLatencyBudget:
     """Orden Félix 2026-10-13: el Jetson sirve ahora Llama-3.1-8B-Instruct

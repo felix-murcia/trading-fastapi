@@ -42,8 +42,12 @@ class QwenHealthState:
     # Guarda anti-parrota (orden Félix 2026-10-13, opción C/C+): tokens de
     # la última razón y racha de razones SIMILARES consecutivas POR
     # SÍMBOLO (preparado para G2: estados por mundo, cero acoplamiento).
+    # S1 (orden Félix 2026-10-14): la racha sólo cuenta si la quality NO
+    # varía — `last_quality` guarda la quality del último juicio por
+    # símbolo para poder compararla (ver PARROT_STREAK_LIMIT).
     last_reason: dict = field(default_factory=dict)
     reason_streak: dict = field(default_factory=dict)
+    last_quality: dict = field(default_factory=dict)
 
 
 _QWEN_STATE = QwenHealthState()
@@ -102,6 +106,13 @@ FORMAT_EXAMPLE_REASONS = frozenset({
 # MISMA razón con datos de mercado distintos). Fail-closed. Los «falsos
 # positivos» (juicio genuino repetido) producen el mismo outcome que el
 # veto de re-entrada (HOLD) → costo de oportunidad nulo.
+# S1 (orden Félix 2026-10-14): el disparador exige AMBAS condiciones —
+# razón similar (Jaccard ≥0.5) Y quality SIN variar. Motivo medido: con el
+# Llama-3.1-8B las razones genuinas en trending son similares por texto
+# (Jaccard 0.50-0.60 ≥ umbral) pero su quality VARÍA (6.0-9.0) → la guarda
+# solo-por-texto degradaba juicio real (falso positivo 21:25/21:30 = 2/12
+# ciclos). La firma parrota real del 4B tenía quality byte a byte fija
+# (8.5) — ese patrón sigue degradando.
 PARROT_STREAK_LIMIT = 3
 
 # Orden Félix 2026-10-13 (opción C+): la comparación de la racha es por
@@ -491,25 +502,27 @@ async def query_qwen_unified(
                 regime, ml_prob, "Qwen degraded: anchor-copy (reason de ejemplo sin reentry_ok)",
             )
 
-        # Guarda anti-parrota (orden Félix 2026-10-13, opción C → C+): razón
-        # SIMILAR (Jaccard de tokens ≥ PARROT_SIMILARITY_THRESHOLD) a la
-        # anterior ≥ PARROT_STREAK_LIMIT ciclos consecutivos por símbolo =
-        # plantilla parrota, no juicio — inmune a cualquier ancla futura y
-        # a la rotación de variantes observada en vivo (casi idénticas
-        # byte a byte NO; con jitter de palabras SÍ). Sólo cuenta
-        # respuestas que superaron la guarda anti-ancla. La racha se
-        # resetea con cualquier razón disímil (p. ej. la variante
-        # in-window que sí juzga).
+        # Guarda anti-parrota (orden Félix 2026-10-13, opción C → C+; S1
+        # 2026-10-14): razón SIMILAR (Jaccard ≥ umbral) Y quality SIN
+        # variar ≥ PARROT_STREAK_LIMIT ciclos consecutivos por símbolo =
+        # plantilla parrota, no juicio. Sólo cuenta respuestas que
+        # superaron la guarda anti-ancla. La racha se resetea con cualquier
+        # razón disímil O quality distinta (juicio genuino del 8B: razones
+        # trending similares pero q variable 6-9 → NO degrada).
         rsn = reason.strip()
         if rsn:
             tokens = _reason_tokens(rsn)
             prev_tokens = _QWEN_STATE.last_reason.get(symbol)
+            prev_q = _QWEN_STATE.last_quality.get(symbol)
             similar = (
                 prev_tokens is not None
+                and prev_q is not None
                 and _jaccard(tokens, prev_tokens) >= PARROT_SIMILARITY_THRESHOLD
+                and q == prev_q
             )
             streak = _QWEN_STATE.reason_streak.get(symbol, 0) + 1 if similar else 1
             _QWEN_STATE.last_reason[symbol] = tokens
+            _QWEN_STATE.last_quality[symbol] = q
             _QWEN_STATE.reason_streak[symbol] = streak
             if streak >= PARROT_STREAK_LIMIT:
                 logger.warning(
