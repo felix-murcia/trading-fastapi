@@ -75,6 +75,16 @@ class Settings(BaseSettings):
     # justifique, o (b) orden explícita de Félix (env MIN_ENTRY_CONFIDENCE).
     min_entry_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
 
+    # ─── LR-1: skip de Qwen con posición abierta (Félix 2026-10-14) ──────────
+    # Con posición abierta el juicio del LLM es decisionalmente neutro
+    # (entradas vetadas por position_rejected en backend+EA, ventana de
+    # reentrada apagada, CLOSE del PPO y time-stop sin veto LLM) → la llamada
+    # al 8B (~40 s) sólo consumía GPU: 59 % de los ciclos de 7 días. true
+    # (default) = stub neutro + traza `qwen_skipped` en audit; el ciclo
+    # (PPO+dead-zone+time-stop+vetos+audit) sigue completo. Rollback
+    # operativo sin redeploy: QWEN_SKIP_WHILE_OPEN=false.
+    qwen_skip_while_open: bool = True
+
     # ─── Parche del agujero del feed (Félix 2026-10-12) ──────────────────────
     # El feed del MCP corta la historia en 2025-12-31 y sólo entrega el día
     # vivo (agujero 2026-01-01→10-11). Los CSV de `resultadosBT/` (MT5, UTC

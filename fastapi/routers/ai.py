@@ -819,77 +819,114 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     sl_pips_final = sl_pips
     tp_pips_final = tp_pips
 
-    live_news = "Macro data unavailable"
-    from services.news_scraper import get_macro_news
-    live_news = await get_macro_news(req.symbol)
-
-    from services.trade_journal import get_recent_insights
-    try:
-        recent_insights = await get_recent_insights(req.symbol, limit=5)
-    except Exception as e:
-        logger.warning("[%s] get_recent_insights falló: %s", cycle_id, e)
-        recent_insights = []
-
-    # Paquete 1-4 (ítem 2): calendario económico en el prompt — ventana
-    # −120…+240 min (lo reciente ya reaccionado + lo próximo), orden
-    # ascendente y tope 3 (presupuesto de tokens). `None` con el filtro de
-    # noticias deshabilitado (el prompt lo dice explícitamente). Fetch DESPUÉS
-    # del bloque MT5: httpx está garantizado parcheado en la suite.
-    calendar_events: Optional[list[dict]] = None
-    if settings.news_filter_enabled:
-        upcoming = await get_upcoming_news([req.symbol])
-        calendar_events = [
-            ev for ev in upcoming
-            if -120.0 <= float(ev["minutes_until"]) <= 240.0
-        ]
-        calendar_events.sort(key=lambda ev: float(ev["minutes_until"]))
-        calendar_events = calendar_events[:3]
-
-    # R1: contexto de re-entrada para el juicio del cerebro — sólo dentro
-    # de la ventana y con entrada propuesta (lo único que el veto puede
-    # bloquear); así la consulta extra al último cierre ocurre únicamente
-    # cuando su resultado puede cambiar la decisión. `last_exit=None`
-    # (cierre fuera de la ventana de velas) → el prompt instruye juzgar
-    # sólo con las velas.
-    reentry = None
-    if reentry_window and decision in ("BUY", "SELL"):
-        reentry = {
-            "bars_since_close": bars_since_close,
-            "last_exit": await fetch_last_exit(
-                sym, df=df, current_price=current_price, pip_size=pip_size,
-            ),
+    # ── LR-1 (Félix 2026-10-14): SKIP DE QWEN CON POSICIÓN ABIERTA ──────────
+    # Con `env_position != 0` el juicio del LLM es decisionalmente neutro:
+    # (a) las entradas BUY/SELL están vetadas por `position_rejected`
+    # (backend, autoridad absoluta en `_veto_reason`) Y por el auto-rechazo
+    # del EA (`rejected_position_open`); (b) la ventana de re-entrada exige
+    # `env_position == 0`; (c) el CLOSE del PPO (dead-zone K=2) y el
+    # time-stop pasan la cadena SIN veto LLM. La llamada al 8B (~40 s)
+    # sólo consumía GPU: 769/1303 ciclos (59 %) de los 7 días previos.
+    # Flag `QWEN_SKIP_WHILE_OPEN` (default true; rollback por env sin
+    # redeploy). Efectos del stub neutro:
+    #   - contadores de salud NO avanzan (ni ok ni failed): la función
+    #     query_qwen_unified no se invoca,
+    #   - estado anti-parrota intacto (no se actualiza durante el skip),
+    #   - audit marca `qwen_skipped=true` + `quality_reason` explícito
+    #     (nada degradado: `qwen_degraded` queda false),
+    #   - veto de calidad NO evalúa con la quality sintética 0.0 (guard
+    #     `not qwen_skipped`) — la atribución real (position_veto/time_stop)
+    #     manda en `_veto_reason` y el log no se llena de falsos VETO CALIDAD.
+    qwen_skipped = bool(settings.qwen_skip_while_open) and env_position != 0
+    reentry: Optional[dict] = None
+    if qwen_skipped:
+        logger.info(
+            "[%s] QWEN-SKIP ║ posición abierta → juicio LLM neutro omitido; "
+            "PPO+dead-zone+time-stop siguen activos",
+            cycle_id,
+        )
+        qwen = {
+            "ok": True,
+            "quality": 0.0,
+            "reason": "position_open: qwen skipped",
+            "bias": "NEUTRAL",
+            "confidence": 0.0,
+            "confidence_modifier": 1.0,
+            "regime": "SKIPPED_POSITION_OPEN",
+            "reentry_ok": None,
+            "effective_prob": ml_prob,
         }
+    else:
+        live_news = "Macro data unavailable"
+        from services.news_scraper import get_macro_news
+        live_news = await get_macro_news(req.symbol)
 
-    qwen = await query_qwen_unified(
-        symbol=req.symbol,
-        decision=decision,
-        ml_prob=ml_prob,
-        rsi=float(df['rsi14'].iloc[-1]) * 100.0,
-        atr=current_atr,
-        atr_pct=current_atr / current_price,
-        macd_hist=float(df['macd_hist'].iloc[-1]),
-        bb_pos=float(df['bb_pos'].iloc[-1]),
-        range_pct=float(df['range'].iloc[-1]),
-        last_ret=float(df['returns'].iloc[-1]),
-        hour=utc_hour_from_candle(pd.to_datetime(df['time'].iloc[-1])),
-        news=live_news,
-        candle_context=candle_context,
-        cycle_id=cycle_id,
-        logger=logger,
-        recent_insights=recent_insights,
-        # Fase 2: Context injection for Qwen
-        adx=float(df['adx'].iloc[-1]) if 'adx' in df.columns else None,
-        # Paquete 1-4: estructura de largo plazo + niveles S/R + calendario
-        sma200_dist=sma200_dist,
-        sma200_slope=sma200_slope,
-        support_level=support_level,
-        resistance_level=resistance_level,
-        calendar_events=calendar_events,
-        # Foco ampliado H4/D: marcos superiores (bloque ya formateado)
-        higher_tf_context=higher_tf_context,
-        # R1: juicio de re-entrada con el contexto del cierre reciente
-        reentry=reentry,
-    )
+        from services.trade_journal import get_recent_insights
+        try:
+            recent_insights = await get_recent_insights(req.symbol, limit=5)
+        except Exception as e:
+            logger.warning("[%s] get_recent_insights falló: %s", cycle_id, e)
+            recent_insights = []
+
+        # Paquete 1-4 (ítem 2): calendario económico en el prompt — ventana
+        # −120…+240 min (lo reciente ya reaccionado + lo próximo), orden
+        # ascendente y tope 3 (presupuesto de tokens). `None` con el filtro
+        # de noticias deshabilitado (el prompt lo dice explícitamente). Fetch
+        # DESPUÉS del bloque MT5: httpx está garantizado parcheado en suite.
+        calendar_events: Optional[list[dict]] = None
+        if settings.news_filter_enabled:
+            upcoming = await get_upcoming_news([req.symbol])
+            calendar_events = [
+                ev for ev in upcoming
+                if -120.0 <= float(ev["minutes_until"]) <= 240.0
+            ]
+            calendar_events.sort(key=lambda ev: float(ev["minutes_until"]))
+            calendar_events = calendar_events[:3]
+
+        # R1: contexto de re-entrada para el juicio del cerebro — sólo
+        # dentro de la ventana y con entrada propuesta (lo único que el veto
+        # puede bloquear); así la consulta extra al último cierre ocurre
+        # únicamente cuando su resultado puede cambiar la decisión.
+        # `last_exit=None` (cierre fuera de la ventana de velas) → el prompt
+        # instruye juzgar sólo con las velas.
+        if reentry_window and decision in ("BUY", "SELL"):
+            reentry = {
+                "bars_since_close": bars_since_close,
+                "last_exit": await fetch_last_exit(
+                    sym, df=df, current_price=current_price, pip_size=pip_size,
+                ),
+            }
+
+        qwen = await query_qwen_unified(
+            symbol=req.symbol,
+            decision=decision,
+            ml_prob=ml_prob,
+            rsi=float(df['rsi14'].iloc[-1]) * 100.0,
+            atr=current_atr,
+            atr_pct=current_atr / current_price,
+            macd_hist=float(df['macd_hist'].iloc[-1]),
+            bb_pos=float(df['bb_pos'].iloc[-1]),
+            range_pct=float(df['range'].iloc[-1]),
+            last_ret=float(df['returns'].iloc[-1]),
+            hour=utc_hour_from_candle(pd.to_datetime(df['time'].iloc[-1])),
+            news=live_news,
+            candle_context=candle_context,
+            cycle_id=cycle_id,
+            logger=logger,
+            recent_insights=recent_insights,
+            # Fase 2: Context injection for Qwen
+            adx=float(df['adx'].iloc[-1]) if 'adx' in df.columns else None,
+            # Paquete 1-4: estructura de largo plazo + niveles S/R + calendario
+            sma200_dist=sma200_dist,
+            sma200_slope=sma200_slope,
+            support_level=support_level,
+            resistance_level=resistance_level,
+            calendar_events=calendar_events,
+            # Foco ampliado H4/D: marcos superiores (bloque ya formateado)
+            higher_tf_context=higher_tf_context,
+            # R1: juicio de re-entrada con el contexto del cierre reciente
+            reentry=reentry,
+        )
 
     final_decision = decision
     # P1 / H4 (Félix 2026-10-08): TIME-STOP — posición abierta ≥ 12 velas H1
@@ -1100,6 +1137,11 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             "quality_score": round(qwen["quality"], 2),
             "quality_reason": qwen["reason"],
             "qwen_degraded": not qwen.get("ok", True),
+            # LR-1 (2026-10-14): true = el juicio LLM se omitió a propósito
+            # (posición abierta, decisiónalmente neutro) — distingue el
+            # skip deliberado de cualquier degradación real (`qwen_degraded`
+            # queda false: nada falló).
+            "qwen_skipped": qwen_skipped,
             "confidence_modifier": round(qwen["confidence_modifier"], 2),
             "regime": qwen["regime"],
             "volume": final_lots if final_decision in ("BUY", "SELL") else None,
