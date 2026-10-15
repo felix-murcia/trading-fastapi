@@ -21,6 +21,10 @@ import pandas as pd
 from config import settings
 from core.rules import is_winning_close
 from db.connection import get_pool
+# T-02 (2026-10-15): el journal comparte el PRESUPUESTO de latencia del
+# camino unificado — el escalonamiento 45 s (backend) < 60 s (EA) del 8B
+# (b397353) nunca llegó aquí y el 100 % de los insights moría en timeout.
+from services.qwen_client import QWEN_TIMEOUT_UNIFIED
 
 logger = logging.getLogger(__name__)
 
@@ -211,7 +215,12 @@ quality_score: how good was the original setup (0-10) — score on evidence:
 WIN with clean trend → higher, LOSS from chop or bad timing → lower"""
 
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
+        # T-02 (2026-10-15): 20 s → QWEN_TIMEOUT_UNIFIED (45 s). Con el
+        # Llama-3.1-8B (~41 s reales) el timeout viejo mataba el 100 % de
+        # los insights en ReadTimeout (0 insights 14/10 13:40→15/10, 16
+        # fallos/48 h). El journal NO está en el camino caliente de
+        # decisión (fire-and-forget por cierre) → 45 s no aprieta nada.
+        async with httpx.AsyncClient(timeout=QWEN_TIMEOUT_UNIFIED) as client:
             res = await client.post(QWEN_URL, json={
                 "messages": [
                     {"role": "system", "content": "You are a quantitative trading analyst. Always respond in valid JSON."},

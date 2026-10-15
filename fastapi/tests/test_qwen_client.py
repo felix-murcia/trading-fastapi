@@ -648,3 +648,46 @@ class TestQueryQwenSltpValidator:
         state = get_qwen_state()
         assert state.calls_ok == 1
         assert state.consecutive_failures == 0
+
+
+class TestEffProbRawTelemetry:
+    """T-05 (2026-10-15): telemetría de saturación de effective_prob.
+
+    El valor DECISIONAL no cambia (recorte a [0,1] intacto — gates y
+    vetos reciben el mismo número que antes); `effective_prob_raw` expone
+    el producto sin recortar para auditar el techo (17/17 entradas a
+    1.0000: conf_mod > 1 con prob alta era invisible).
+    """
+
+    @pytest.mark.asyncio
+    async def test_saturation_exposes_raw_above_one(self):
+        """conf_mod 1.5 × ml_prob 0.99 → decisional 1.0 (recortado),
+        raw 1.485 (auditable)."""
+        client = _mock_qwen_client(
+            '{"quality": 8.0, "reason": "strong bearish trend", '
+            '"bias": "BEARISH", "confidence_modifier": 1.5, '
+            '"regime": "TRENDING", "reentry_ok": true}'
+        )
+        with patch("httpx.AsyncClient", return_value=client):
+            result = await _call_unified(ml_prob=0.99)
+
+        assert result["ok"] is True
+        assert result["effective_prob"] == 1.0
+        assert result["effective_prob_raw"] == pytest.approx(0.99 * 1.5, rel=1e-6)
+        assert result["effective_prob_raw"] > 1.0
+
+    @pytest.mark.asyncio
+    async def test_no_saturation_raw_equals_decisional(self):
+        """Sin saturación el bruto y el decisional coinciden — la
+        telemetría no inventa divergencia."""
+        client = _mock_qwen_client(
+            '{"quality": 6.0, "reason": "mixed signals fade", '
+            '"bias": "NEUTRAL", "confidence_modifier": 0.8, '
+            '"regime": "RANGING", "reentry_ok": true}'
+        )
+        with patch("httpx.AsyncClient", return_value=client):
+            result = await _call_unified(ml_prob=0.60)
+
+        assert result["effective_prob"] == pytest.approx(0.60 * 0.8, rel=1e-6)
+        assert result["effective_prob_raw"] == pytest.approx(0.60 * 0.8, rel=1e-6)
+        assert result["effective_prob_raw"] <= 1.0

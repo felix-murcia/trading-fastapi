@@ -572,6 +572,42 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     blacked_out, news_event = await is_news_blackout(sym)
     if blacked_out:
         logger.warning("[%s] BLACKOUT noticias (%s) → HOLD", cycle_id, news_event)
+        # T-03 (2026-10-15): traza en audit_log ANTES del return. El hueco
+        # del CPI 14/10 (12:15→12:40 sin fila) era indistinguible de «EA no
+        # llamó» desde BBDD — el warning de log no sobrevive a reinicios de
+        # contenedor. Mismas claves que el camino normal para que las
+        # queries de ciclos lo cubran sin casos especiales.
+        await log_to_audit(
+            "ai_predict_cycle",
+            {
+                "symbol": req.symbol,
+                "timeframe": req.timeframe,
+                "position": req.position,
+                "decision": "HOLD",
+                "ml_prob": 0.5,
+                "effective_prob": 0.5,
+                "eff_prob_raw": None,
+                "llm_bias": "NEUTRAL",
+                "quality_score": 0.0,
+                "quality_reason": f"news_blackout:{news_event}",
+                # LR-1: false = nada falló ni se omitió por posición — el
+                # motivo es exclusivamente la ventana de noticias.
+                "qwen_degraded": False,
+                "qwen_skipped": False,
+                "confidence_modifier": 1.0,
+                "regime": "NEWS_BLACKOUT",
+                "volume": None,
+                "sl_pips": None,
+                "tp_pips": None,
+                "latency_ms": round((time.time() - t_start) * 1000, 2),
+                "veto": True,
+                "veto_reason": "news_blackout",
+                "news_blackout": True,
+                "news_event": news_event,
+                "mt5_time": mt5_ts,
+            },
+            cycle_id=cycle_id,
+        )
         return PredictResponse(
             cycle_id=cycle_id,
             ml_prob=0.5,
@@ -1133,6 +1169,13 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             "decision": final_decision,
             "ml_prob": round(ml_prob, 4),
             "effective_prob": round(qwen["effective_prob"], 4),
+            # T-05 (2026-10-15): producto sin recortar (ver qwen_client) —
+            # None en degradados/skip (no hay juicio que saturar).
+            "eff_prob_raw": (
+                round(qwen["effective_prob_raw"], 4)
+                if qwen.get("effective_prob_raw") is not None
+                else None
+            ),
             "llm_bias": qwen["bias"],
             "quality_score": round(qwen["quality"], 2),
             "quality_reason": qwen["reason"],

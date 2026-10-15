@@ -382,6 +382,7 @@ def test_predict_holds_during_news_blackout():
          patch("main.close_pool", AsyncMock()), \
          patch("routers.ai.get_pool", return_value=MagicMock(execute=AsyncMock())), \
          patch("routers.ai.is_news_blackout", AsyncMock(return_value=(True, "Non-Farm Payrolls"))), \
+         patch("routers.ai.log_to_audit", AsyncMock()) as mock_audit, \
          patch("httpx.AsyncClient", FakeAsyncClient):
         with TestClient(app) as client:
             response = client.post(
@@ -397,6 +398,21 @@ def test_predict_holds_during_news_blackout():
     assert payload["quality_reason"] == "news_blackout:Non-Farm Payrolls"
     assert payload["volume"] is None
     assert payload["sl_pips"] is None
+
+    # T-03 (2026-10-15): el blackout DEJA FILA en audit_log — antes el
+    # return temprano borraba el ciclo de la BBDD (hueco del CPI 14/10
+    # indistinguible de «EA no llamó»).
+    mock_audit.assert_awaited_once()
+    args, kwargs = mock_audit.await_args
+    assert args[0] == "ai_predict_cycle"
+    aud = args[1]
+    assert aud["decision"] == "HOLD"
+    assert aud["quality_reason"] == "news_blackout:Non-Farm Payrolls"
+    assert aud["news_blackout"] is True
+    assert aud["news_event"] == "Non-Farm Payrolls"
+    assert aud["llm_bias"] == "NEUTRAL"
+    assert aud["qwen_degraded"] is False
+    assert aud["qwen_skipped"] is False
 
 
 def test_ea_backend_predict_contract_fields_are_aligned():

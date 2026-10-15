@@ -519,8 +519,13 @@ async def query_qwen_unified(
 
         # Paquete 1-4: sin parse de SL/TP — si el modelo ecoa sl_adjusted/
         # tp_adjusted se ignoran (no se piden en el prompt, no se devuelven).
-        effective_prob = float(np.exp(np.log(max(ml_prob, 1e-6)) + np.log(conf_mod)))
-        effective_prob = _clamp(effective_prob, 0.0, 1.0)
+        # T-05 (2026-10-15): `effective_prob` sigue recortado a [0,1] — es
+        # el valor DECISIONAL (gates intactos). `effective_prob_raw` expone
+        # el producto sin recortar: con conf_mod > 1 y prob alta el techo se
+        # satura en 1.0000 (17/17 entradas) y la gradación de confianza era
+        # invisible. Telemetría pura, cero cambio de semántica.
+        effective_prob_raw = float(np.exp(np.log(max(ml_prob, 1e-6)) + np.log(conf_mod)))
+        effective_prob = _clamp(effective_prob_raw, 0.0, 1.0)
 
         # R1: juicio de re-entrada — default true (fail-open) si el modelo
         # no devolvió el campo: veto sólo por juicio explícito, nunca
@@ -546,6 +551,7 @@ async def query_qwen_unified(
             "bias": bias,
             "confidence_modifier": conf_mod,
             "effective_prob": effective_prob,
+            "effective_prob_raw": effective_prob_raw,
             "regime": parsed.get("regime", regime),
             "reentry_ok": reentry_ok,
         }
