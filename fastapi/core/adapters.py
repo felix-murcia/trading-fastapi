@@ -118,6 +118,7 @@ class QwenLLMAdapter:
         reentry: Optional[dict] = None,
         calendar_events: Optional[list[dict]] = None,
         higher_tf_context: Optional[str] = None,
+        memories: Optional[list[dict]] = None,
     ) -> dict:
         from services import qwen_client
         return await qwen_client.query_qwen_unified(
@@ -146,4 +147,5 @@ class QwenLLMAdapter:
             reentry=reentry,
             calendar_events=calendar_events,
             higher_tf_context=higher_tf_context,
+            memories=memories,
         )

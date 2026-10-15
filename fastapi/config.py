@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import Field
 from pydantic_settings import BaseSettings
 
@@ -94,6 +96,18 @@ class Settings(BaseSettings):
     # constante) y el MCP respira para los críticos equity/H1. Env:
     # H4D_BREAKER_COOLDOWN_MINUTES.
     h4d_breaker_cooldown_minutes: int = Field(default=30, ge=1, le=240)
+
+    # ─── T-10: memoria a largo plazo (Félix 2026-10-15) ──────────────────────
+    # Inyección DETERMINISTA (memory como dato, no como tool): el backend
+    # consulta memory_api (LanceDB+fastembed, T5.4) directamente — nunca vía
+    # el proxy :8090 (paridad 2026-10-15: 0 tool_calls en json_mode + system
+    # inyectado = deriva). Modos: off (sin fetch, default) | shadow (fetch +
+    # candidatos trazados en audit `memory`, CERO inyección — patrón D-5) |
+    # on (inyección real del bloque `Relevant memories` tras las velas).
+    # Kill switch sin redeploy: MEMORY_INJECTION_MODE=off. Diseño congelado
+    # en backlog T-10 (categorías, umbral ≤0.4, top-K 3, fail-open 2 s).
+    memory_api_url: str = "http://100.90.16.33:8095"
+    memory_injection_mode: Literal["off", "shadow", "on"] = "off"
 
     # ─── Parche del agujero del feed (Félix 2026-10-12) ──────────────────────
     # El feed del MCP corta la historia en 2025-12-31 y sólo entrega el día

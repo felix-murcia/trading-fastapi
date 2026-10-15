@@ -17,6 +17,8 @@ from typing import Optional
 import httpx
 import numpy as np
 
+from services.memory_client import format_memory_lines
+
 logger = logging.getLogger(__name__)
 
 QWEN_URL = os.getenv("QWEN_URL", "http://100.90.16.33:8080/v1/chat/completions")
@@ -282,6 +284,11 @@ async def query_qwen_unified(
     # «Unavailable» si el fetch falló). `None` = sin bloque (back-compat).
     # Contexto de tendencia mayor, nunca de puntuación (restricción H2).
     higher_tf_context: Optional[str] = None,
+    # T-10 (Félix 2026-10-15): memorias a largo plazo — inyección
+    # DETERMINISTA (memory como dato, ver services/memory_client). Bloque en
+    # el USER prompt tras las velas, nunca en system (restricción H2).
+    # `None`/[] = sin bloque → prompt byte-idéntico al pre-T-10 (back-compat).
+    memories: Optional[list[dict]] = None,
 ) -> dict:
     """
     Unified Qwen query — single call per candle.
@@ -383,6 +390,10 @@ async def query_qwen_unified(
     context_lines.extend([
         f"- Candles: {candle_context}",
         "",
+        # T-10: memoria a largo plazo — sección tras las velas (dato de
+        # contexto, nunca instrucción); con lista vacía no hay líneas y el
+        # prompt queda byte-idéntico al pre-T-10 (back-compat testada).
+        *format_memory_lines(memories),
         f"News: {news_context[:400] if news_context != 'Unavailable' else 'Unavailable'}",
         # Paquete 1-4: calendario económico tras News (misma sección)
         _calendar_line(calendar_events),

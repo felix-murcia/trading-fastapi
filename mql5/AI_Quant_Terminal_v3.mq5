@@ -6,10 +6,10 @@ Terminal de Ejecución y Telemetría para Cerebro Autónomo (FastAPI + PPO v3).
 - Rol del Servidor: Decisión direccional, dimensionamiento de lotes, SL, TP y gestión de riesgo.
 */
 #property copyright "AI Quant Terminal v3"
-#property version   "13.4"
+#property version   "13.5"
 #property strict
 
-#define EA_VERSION "13.4"
+#define EA_VERSION "13.5"
 
 #include <Trade\Trade.mqh>
 
@@ -33,6 +33,12 @@ input int    TrailingMinPips = 15;                      // Distancia mínima de 
 input int    TrailingATRMult  = 2;                      // Multiplicador ATR para distancia mínima dinámica
 input int    TrailingATRPeriod = 14;                    // Periodo ATR para trailing dinámico
 input int    TrailingManageEverySec = 5;                 // Cada cuántos segundos revisar trailing (0 = cada tick)
+
+input group "=== Safe-4 (Félix 2026-10-15): bloqueo mínimo de +SL_LockSafetyNetEur ==="
+input bool   EnableSafeLock      = true;    // Activar el cierre arriba de pérdida (lock mínimo)
+input double SL_LockSafetyNetEur = 4.0;     // Beneficio en EUR mínimo para proteger el stop antes de 1R
+input int    SafeLockTrailMinPips  = 15;      // Pips mínimos para el primer disparo de acoplamiento
+```
 
 input group "=== Breakeven ==="
 input bool   EnableBreakeven = true;                    // Mover SL a la entrada cuando el precio recupera 1R (P1)
@@ -583,8 +589,16 @@ void ManageTrailingStop()
       double riskDist = openPrice - currentSL;
       if(riskDist <= 0) return;
       double trailDistPrice = riskDist * TrailingPercent;
+      double surgTickValue = SymbolInfoDouble(Symbol(), SYMBOL_TRADE_TICK_VALUE);
+      double surgTickSize = SymbolInfoDouble(Symbol(), SYMBOL_TRADE_TICK_SIZE);
+      double surgLot = PositionGetDouble(POSITION_VOLUME);
+      double surgPipMoney = (surgTickSize > 0) ? (surgTickValue/surgTickSize) * pipSize * surgLot : 0.0;
+      double riskMoney = (riskDist / pipSize) * surgPipMoney;
+      if (EnableSafeLock && riskMoney < SL_LockSafetyNetEur) return;
       double minTrailPrice = minTrailPips * pipSize;
-      double newSL = NormalizeDouble(openPrice + MathMax(trailDistPrice, minTrailPrice), digits);
+      double surgLockPips = (surgPipMoney > 0) ? (SL_LockSafetyNetEur / surgPipMoney) : 0.0;
+      double surgLockDist = surgLockPips * pipSize;
+      double newSL = NormalizeDouble(openPrice + MathMax(MathMax(trailDistPrice, minTrailPrice), surgLockDist), digits);
 
        double currentPr = SymbolInfoDouble(Symbol(), SYMBOL_ASK);
        if(currentPr >= (openPrice + riskDist) && newSL > currentSL && newSL <= (currentPr - minStopDist))
@@ -607,7 +621,15 @@ void ManageTrailingStop()
        if(riskDist <= 0) return;
        double trailDistPrice = riskDist * TrailingPercent;
        double minTrailPrice = minTrailPips * pipSize;
-       double newSL = NormalizeDouble(openPrice - MathMax(trailDistPrice, minTrailPrice), digits);
+       double surgTickValue = SymbolInfoDouble(Symbol(), SYMBOL_TRADE_TICK_VALUE);
+       double surgTickSize = SymbolInfoDouble(Symbol(), SYMBOL_TRADE_TICK_SIZE);
+       double surgLot = PositionGetDouble(POSITION_VOLUME);
+       double surgPipMoney = (surgTickSize > 0) ? (surgTickValue/surgTickSize) * pipSize * surgLot : 0.0;
+       double surgRiskMoney = (riskDist / pipSize) * surgPipMoney;
+       if (EnableSafeLock && surgRiskMoney < SL_LockSafetyNetEur) return;
+       double surgLockPips = (surgPipMoney > 0) ? (SL_LockSafetyNetEur / surgPipMoney) : 0.0;
+       double surgLockDist = surgLockPips * pipSize;
+       double newSL = NormalizeDouble(openPrice - MathMax(MathMax(trailDistPrice, minTrailPrice), surgLockDist), digits);
 
        double currentPr = SymbolInfoDouble(Symbol(), SYMBOL_BID);
        if(currentPr <= (openPrice - riskDist) && newSL < currentSL && newSL >= (currentPr + minStopDist))
@@ -678,7 +700,12 @@ void ManageBreakeven()
       // entrada exige al menos stopsLevel de distancia bajo el bid.
       if((bid - openPrice) >= riskDist && (openPrice + minStopDist) <= bid)
         {
-         double newSL = NormalizeDouble(openPrice, digits);
+         double _tv = SymbolInfoDouble(Symbol(), SYMBOL_TRADE_TICK_VALUE);
+         double _ts = SymbolInfoDouble(Symbol(), SYMBOL_TRADE_TICK_SIZE);
+         double _lot = PositionGetDouble(POSITION_VOLUME);
+         double _pm = (_ts > 0)? (_tv/_ts) * pipSize * _lot : 0.0;
+         double _lp = (_pm > 0)? (SL_LockSafetyNetEur / _pm) : 0.0;
+         double newSL = NormalizeDouble(openPrice + _lp * pipSize, digits);
          if(trade.PositionModify(ticket, newSL, currentTP))
            {
             PrintFormat("[BREAKEVEN] BUY ticket=%I64u SL -> entrada %.5f (risk=%.1f pips, bid=%.5f)",
@@ -699,7 +726,12 @@ void ManageBreakeven()
       // entrada exige al menos stopsLevel de distancia sobre el ask.
       if((openPrice - ask) >= riskDist && (openPrice - minStopDist) >= ask)
         {
-         double newSL = NormalizeDouble(openPrice, digits);
+         double _tv = SymbolInfoDouble(Symbol(), SYMBOL_TRADE_TICK_VALUE);
+         double _ts = SymbolInfoDouble(Symbol(), SYMBOL_TRADE_TICK_SIZE);
+         double _lot = PositionGetDouble(POSITION_VOLUME);
+         double _pm = (_ts > 0)? (_tv/_ts) * pipSize * _lot : 0.0;
+         double _lp = (_pm > 0)? (SL_LockSafetyNetEur / _pm) : 0.0;
+         double newSL = NormalizeDouble(openPrice - _lp * pipSize, digits);
          if(trade.PositionModify(ticket, newSL, currentTP))
            {
             PrintFormat("[BREAKEVEN] SELL ticket=%I64u SL -> entrada %.5f (risk=%.1f pips, ask=%.5f)",

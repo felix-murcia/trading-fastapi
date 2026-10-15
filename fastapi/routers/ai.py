@@ -45,6 +45,7 @@ from services.auto_retrain import (
 from services.feed_breaker import h4d_breaker_is_open, h4d_breaker_trip
 from services.feed_patcher import fill_feed_hole as _fill_feed_hole
 from services.market_time import utc_hour_from_candle
+from services.memory_client import build_memory_query, fetch_relevant_memories
 from services.news_filter import get_upcoming_news, is_news_blackout
 from services.performance_metrics import record_cycle_metrics
 from services.risk_guardian import observe_equity
@@ -914,6 +915,10 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     #     manda en `_veto_reason` y el log no se llena de falsos VETO CALIDAD.
     qwen_skipped = bool(settings.qwen_skip_while_open) and env_position != 0
     reentry: Optional[dict] = None
+    # T-10: traza de memoria — inicializada AQUÍ (antes del if/else) para que
+    # el payload de audit tenga la clave también en la rama skip LR-1 (null:
+    # sin fetch ni inyección — no hay prompt que enriquecer).
+    memory_audit: Optional[dict] = None
     if qwen_skipped:
         logger.info(
             "[%s] QWEN-SKIP ║ posición abierta → juicio LLM neutro omitido; "
@@ -958,6 +963,39 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             calendar_events.sort(key=lambda ev: float(ev["minutes_until"]))
             calendar_events = calendar_events[:3]
 
+        # T-10 (Félix 2026-10-15): MEMORIA A LARGO PLAZO — inyección
+        # determinista (memory como dato, no como tool; el proxy :8090 nunca
+        # toca este camino). Sólo con llamada real a Qwen (el skip LR-1 no
+        # fetcha: no hay prompt que enriquecer). shadow = fetch + candidatos
+        # trazados en audit con CERO inyección (patrón estratega D-5: se arma
+        # con evidencia de N días, no con diseño). Fallo de memory_api → []
+        # con WARNING (enriquecedor, nunca crítico — misma clase que H4/D1).
+        memories: Optional[list[dict]] = None
+        if settings.memory_injection_mode != "off":
+            _mem_cands = await fetch_relevant_memories(
+                build_memory_query(
+                    symbol=req.symbol,
+                    decision=decision,
+                    rsi=float(df['rsi14'].iloc[-1]) * 100.0,
+                    adx=float(df['adx'].iloc[-1]) if 'adx' in df.columns else None,
+                    hour=utc_hour_from_candle(pd.to_datetime(df['time'].iloc[-1])),
+                ),
+                symbol=req.symbol,
+            )
+            _mem_inject = settings.memory_injection_mode == "on" and bool(_mem_cands)
+            if _mem_inject:
+                memories = _mem_cands
+            memory_audit = {
+                "mode": settings.memory_injection_mode,
+                "candidates": len(_mem_cands),
+                "injected": _mem_inject,
+                # Sólo la distancia del más cercano: la lista completa vive
+                # en QWEN-PROMPT cuando se inyecta (traza del prompt).
+                "top_distance": (
+                    round(_mem_cands[0]["score"], 4) if _mem_cands else None
+                ),
+            }
+
         # R1: contexto de re-entrada para el juicio del cerebro — sólo
         # dentro de la ventana y con entrada propuesta (lo único que el veto
         # puede bloquear); así la consulta extra al último cierre ocurre
@@ -1001,6 +1039,8 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             higher_tf_context=higher_tf_context,
             # R1: juicio de re-entrada con el contexto del cierre reciente
             reentry=reentry,
+            # T-10: memorias a largo plazo ([]/None = prompt byte-idéntico)
+            memories=memories,
         )
 
     final_decision = decision
@@ -1230,6 +1270,11 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             # "ok" (fetch respondió) | "unavailable" (fetch falló → breaker
             # abierto) | "breaker_open" (omitido por cooldown del breaker).
             "h4d_context": h4d_context,
+            # T-10: memoria a largo plazo en este ciclo — None (off / skip
+            # LR-1 sin fetch) | {mode, candidates, injected, top_distance}.
+            # En modo `on` la lista completa de memorias inyectadas vive en
+            # el log QWEN-PROMPT (traza del prompt, fuente única de verdad).
+            "memory": memory_audit,
             "volume": final_lots if final_decision in ("BUY", "SELL") else None,
             "sl_pips": round(sl_pips_final, 1) if final_decision in ("BUY", "SELL") else None,
             "tp_pips": round(tp_pips_final, 1) if final_decision in ("BUY", "SELL") else None,
