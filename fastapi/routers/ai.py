@@ -972,16 +972,18 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         # con WARNING (enriquecedor, nunca crítico — misma clase que H4/D1).
         memories: Optional[list[dict]] = None
         if settings.memory_injection_mode != "off":
-            _mem_cands = await fetch_relevant_memories(
-                build_memory_query(
-                    symbol=req.symbol,
-                    decision=decision,
-                    rsi=float(df['rsi14'].iloc[-1]) * 100.0,
-                    adx=float(df['adx'].iloc[-1]) if 'adx' in df.columns else None,
-                    hour=utc_hour_from_candle(pd.to_datetime(df['time'].iloc[-1])),
-                ),
+            _memory_q = build_memory_query(
                 symbol=req.symbol,
+                decision=decision,
+                rsi=float(df['rsi14'].iloc[-1]) * 100.0,
+                adx=float(df['adx'].iloc[-1]) if 'adx' in df.columns else None,
+                hour=utc_hour_from_candle(pd.to_datetime(df['time'].iloc[-1])),
             )
+            _mem_cands = await fetch_relevant_memories(_memory_q, req.symbol)
+            logger.info("[%s] MEMORY query=%r | n=%d top_score=%s",
+                        cycle_id, _memory_q, len(_mem_cands),
+                        (round(_mem_cands[0]["score"],4) if _mem_cands else None))
+
             _mem_inject = settings.memory_injection_mode == "on" and bool(_mem_cands)
             if _mem_inject:
                 memories = _mem_cands
