@@ -85,6 +85,16 @@ class Settings(BaseSettings):
     # operativo sin redeploy: QWEN_SKIP_WHILE_OPEN=false.
     qwen_skip_while_open: bool = True
 
+    # ─── T-07: breaker del feed H4/D1 (Félix 2026-10-15) ─────────────────────
+    # El incidente MCP 14/10 mostró que el bug vive en el binding: la 1ª
+    # petición H4/D1 al servidor wedgado vuelve a tumbar su sesión (cada
+    # ciclo re-mataba el MCP). Tras el PRIMER fallo de fetch H4/D1, los
+    # ciclos /predict omiten H4/D1 durante estos minutos (half-open: sonda
+    # única al expirar) — la línea del prompt queda «Unavailable» (esquema
+    # constante) y el MCP respira para los críticos equity/H1. Env:
+    # H4D_BREAKER_COOLDOWN_MINUTES.
+    h4d_breaker_cooldown_minutes: int = Field(default=30, ge=1, le=240)
+
     # ─── Parche del agujero del feed (Félix 2026-10-12) ──────────────────────
     # El feed del MCP corta la historia en 2025-12-31 y sólo entrega el día
     # vivo (agujero 2026-01-01→10-11). Los CSV de `resultadosBT/` (MT5, UTC

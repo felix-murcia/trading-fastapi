@@ -42,6 +42,7 @@ from services.auto_retrain import (
     record_trade_filled,
     TRAINING_SYMBOL as _TRAINING_SYMBOL,
 )
+from services.feed_breaker import h4d_breaker_is_open, h4d_breaker_trip
 from services.feed_patcher import fill_feed_hole as _fill_feed_hole
 from services.market_time import utc_hour_from_candle
 from services.news_filter import get_upcoming_news, is_news_blackout
@@ -379,6 +380,11 @@ def _higher_tf_context_line(tf: str, res, symbol: str) -> str:
       - NaN en RSI/ADX → se omite el campo (el SMA200 ya tiene sus guardas
         en `_sma200_context`: ≥205 velas y no-NaN).
     """
+    if res is None:
+        # T-07: breaker abierto → sin fetch. Sin warning: la apertura ya se
+        # registró (BREAKER-H4D) y el audit lleva `h4d_context=breaker_open`;
+        # warnar en cada ciclo del cooldown haría ruido inútil.
+        return f"- {tf}: Unavailable"
     if isinstance(res, Exception):
         logger.warning("higher-TF %s fetch falló: %s", tf, res)
         return f"- {tf}: Unavailable"
@@ -618,6 +624,12 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
 
     equity_val = 0.0
     candles = []
+    # T-07 (2026-10-15): breaker H4/D1 — con el feed wedgado (incidente
+    # 14/10) cada petición H4 volvía a tumbar la sesión del MCP. Con el
+    # breaker abierto los ciclos del cooldown NO fetchan H4/D1 (la línea
+    # del prompt se renderiza «Unavailable», esquema constante) y el
+    # servidor queda solo para los críticos equity/H1.
+    h4d_skipped = h4d_breaker_is_open()
     try:
         async with httpx.AsyncClient() as client:
             equity_task = client.get(
@@ -631,26 +643,32 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
                 f"{settings.mt5_http_url}/api/v1/market/candles/latest?symbol_name={req.symbol}&timeframe=H1&count=240",
                 timeout=3.0,
             )
-            # Foco ampliado H4/D (Félix 2026-10-12): marcos SUPERIORES para el
-            # contexto de Qwen — 250 velas por TF (SMA200 + 5 de margen). Van en
-            # el MISMO gather (sin latencia secuencial) y con
-            # return_exceptions: su fallo degrada la línea a «Unavailable»
-            # (son contexto, no críticos); equity/H1 conservan su camino HOLD.
-            h4_task = client.get(
-                f"{settings.mt5_http_url}/api/v1/market/candles/latest?symbol_name={req.symbol}&timeframe=H4&count=250",
-                timeout=3.0,
-            )
-            d1_task = client.get(
-                f"{settings.mt5_http_url}/api/v1/market/candles/latest?symbol_name={req.symbol}&timeframe=D1&count=250",
-                timeout=3.0,
-            )
-            equity_res, candles_res, h4_res, d1_res = await asyncio.gather(
-                equity_task, candles_task, h4_task, d1_task,
-                return_exceptions=True,
-            )
+            _tasks = [equity_task, candles_task]
+            if not h4d_skipped:
+                # Foco ampliado H4/D (Félix 2026-10-12): marcos SUPERIORES para
+                # el contexto de Qwen — 250 velas por TF (SMA200 + 5 de margen).
+                # Van en el MISMO gather (sin latencia secuencial) y con
+                # return_exceptions: su fallo degrada la línea a «Unavailable»
+                # (son contexto, no críticos); equity/H1 conservan su camino
+                # HOLD. El fallo además ABRE el breaker (T-07, ver más abajo).
+                _tasks.append(client.get(
+                    f"{settings.mt5_http_url}/api/v1/market/candles/latest?symbol_name={req.symbol}&timeframe=H4&count=250",
+                    timeout=3.0,
+                ))
+                _tasks.append(client.get(
+                    f"{settings.mt5_http_url}/api/v1/market/candles/latest?symbol_name={req.symbol}&timeframe=D1&count=250",
+                    timeout=3.0,
+                ))
+            _results = await asyncio.gather(*_tasks, return_exceptions=True)
     except (httpx.ConnectTimeout, httpx.TimeoutException, httpx.HTTPError) as exc:
         logger.warning("[%s] MT5 connection error in predict: %s", cycle_id, exc)
         return PredictResponse(cycle_id=cycle_id, ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
+
+    equity_res, candles_res = _results[0], _results[1]
+    if h4d_skipped:
+        h4_res = d1_res = None  # breaker en cooldown → «Unavailable», sin fetch
+    else:
+        h4_res, d1_res = _results[2], _results[3]
 
     # equity y H1 son CRÍTICOS: el return_exceptions del gather no puede
     # enmascarar su tratamiento de siempre (mismo camino HOLD / re-lanzado).
@@ -660,6 +678,27 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
                 logger.warning("[%s] MT5 connection error in predict: %s", cycle_id, _critico)
                 return PredictResponse(cycle_id=cycle_id, ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
             raise _critico
+
+    # T-07: el PRIMER fallo de fetch H4/D1 abre el breaker — durante el
+    # cooldown los ciclos no los fetchan y el MCP deja de recibir el golpe
+    # (semántica half-open: sonda única al expirar; fallo de la sonda =
+    # reabre otro cooldown). La línea del prompt ya degrada sola a
+    # «Unavailable» con res Exception/None (esquema constante intacto).
+    for _h4d_tf, _h4d_res in (("H4", h4_res), ("D1", d1_res)):
+        if isinstance(_h4d_res, Exception):
+            h4d_breaker_trip(f"{_h4d_tf}: {type(_h4d_res).__name__}: {str(_h4d_res)[:80]}")
+            logger.warning(
+                "[%s] BREAKER-H4D abierto %d min (%s) — los ciclos del "
+                "cooldown omiten H4/D1 (equity/H1 intactos)",
+                cycle_id, settings.h4d_breaker_cooldown_minutes, _h4d_tf,
+            )
+            break
+    if h4d_skipped:
+        h4d_context = "breaker_open"
+    elif isinstance(h4_res, Exception) or isinstance(d1_res, Exception):
+        h4d_context = "unavailable"
+    else:
+        h4d_context = "ok"
 
     try:
         equity_val = (
@@ -1187,6 +1226,10 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             "qwen_skipped": qwen_skipped,
             "confidence_modifier": round(qwen["confidence_modifier"], 2),
             "regime": qwen["regime"],
+            # T-07: estado del feed de marcos superiores en este ciclo —
+            # "ok" (fetch respondió) | "unavailable" (fetch falló → breaker
+            # abierto) | "breaker_open" (omitido por cooldown del breaker).
+            "h4d_context": h4d_context,
             "volume": final_lots if final_decision in ("BUY", "SELL") else None,
             "sl_pips": round(sl_pips_final, 1) if final_decision in ("BUY", "SELL") else None,
             "tp_pips": round(tp_pips_final, 1) if final_decision in ("BUY", "SELL") else None,
