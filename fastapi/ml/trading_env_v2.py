@@ -18,6 +18,10 @@ ForexTradingEnv v3 — Arquitectura Óptima para RL (PPO)
   * Memoria: canal 8º `bars_since_close` (normalizado a max_holding_steps) —
     contrato obs `(20,24) → (20,25)`; `memory_channel=False` evalúa el
     contrato legado de un bundle pre-memoria (transición).
+  * T-22 (2026-10-16, REQ-1): bloque de tendencia compartido PPO↔LLM —
+    `TREND_MARKET_FEATURES` (dist_sma200, sma200_slope, adx) entra al obs
+    sólo con el contrato trend (obs 27/28, ver `derive_obs_contract`);
+    `trend_features=False` (default) conserva el contrato vivo byte-idéntico.
   * R-1 / regla 3 €: un close con pnl ∈ (0, 3 €) es PÉRDIDA también en la
     recompensa (su aporte se invierte; el balance de dinero no se toca).
   * Anti-churn (Félix, 2026-10-01; ancla declarada O-2, 2026-10-01): reabrir
@@ -58,16 +62,35 @@ MARKET_FEATURES = (
 # Fase 3 (SL/TP estructural, backlog H3/P0): swing_high/low, last_swing_*,
 # resistance/support_level, dist_* y adx se calculan en `engineer_market_features`
 # como columnas del df y alimentan `production_stops()`/Qwen por AMBOS lados del
-# contrato, pero NO entran en el obs: el contrato de observación sigue siendo
-# 17 features de mercado (plan §7 Fase 3: (20,24)→(20,25) sólo con el canal de
-# memoria; añadir canales exige retrain pre-registrado de por medio).
+# contrato. T-22 (2026-10-16): el obs sigue con 17 features de mercado por
+# defecto ((20,24)→(20,25) sólo con el canal de memoria); el bloque de
+# tendencia (`TREND_MARKET_FEATURES`) entra al obs SÓLO cuando el contrato
+# del bundle lo declara (obs 27/28 → `derive_obs_contract`), y añadir canales
+# exige retrain pre-registrado de por medio (T-27).
+
+# T-22 (2026-10-16, REQ-1): bloque de tendencia compartido PPO↔LLM. `adx` ya
+# existía (normalizada [0,1]); `dist_sma200`/`sma200_slope` se calculan en
+# `engineer_market_features` con el MISMO close/rolling(200)/shift(5) que
+# `_sma200_context` del prompt (mismo hecho, mismo signo — el LLM lo renderiza
+# en crudo, el PPO normalizado). NO entra en MARKET_FEATURES (17 base): el
+# contrato se decide por el ANCHO del obs (`derive_obs_contract`), así el
+# bundle vivo (20,25) sigue servible intacto hasta que T-27 promueva (20,28).
+TREND_MARKET_FEATURES = ("dist_sma200", "sma200_slope", "adx")
 
 # Ancho base del tensor: canales de mercado + 7 de estado. El contrato Fase 3
 # añade +1 (bars_since_close) → obs (20, 25); 24 canales = bundle pre-memoria.
+# T-22: +3 tendencia → (20,27)/(20,28); derive_obs_contract resuelve los 4.
 FOREX_MARKET_FEATURE_COUNT = len(MARKET_FEATURES)
 
 EXTRA_STATE_FEATURES = 7  # [entry_norm, pos, unrealized_pnl, balance_norm, dist_sl, dist_tp, holding_time]
 # Fase 3: +1 canal opcional `bars_since_close` (obs 25) — ver memory_channel.
+
+# T-22: ventana mínima de velas H1 para un obs trend HONESTO en serve —
+# 204 filas de warm-up (SMA200 formado desde la fila 199; la pendiente a 5
+# barras necesita fila 204) + las 20 del obs. Por debajo, /predict emite
+# HOLD con error explícito: jamás se sirve un obs con tendencia de relleno
+# (cero inventado). El entrenamiento (30000 H1) no lo alcanza nunca.
+TREND_FEATURE_WINDOW_MIN = 204 + 20
 
 # Filtro de volatilidad para evitar mercados de ruido (P2: mejora de selectividad)
 MIN_ATR_FOR_ENTRY = 0.0004 
@@ -116,6 +139,22 @@ def engineer_market_features(df: pd.DataFrame) -> pd.DataFrame:
     result["range"] = (high - low) / (close + 1e-10)
     result["sma20"] = close.rolling(20).mean()
     result["dist_sma20"] = (close - result["sma20"]) / (close + 1e-10)
+
+    # T-22 · bloque de tendencia compartido PPO↔LLM (REQ-1) — mismos números
+    # que `_sma200_context` del prompt (mismo close/rolling(200)/shift(5); el
+    # signo es idéntico por construcción: LLM lo renderiza en crudo, el PPO
+    # normalizado). Clip defensivo acotado (espejo de bb_pos) y warm-up
+    # (SMA200 aún no formado, filas 0..203) rellena con el neutro 0.0 =
+    # «precio EN la media, pendiente plana» (mismo patrón que adx→0.5): sin
+    # el relleno, dropna() vaciaría enteras las rutas de ventana corta (serve
+    # bundle vivo con 120 velas, fixtures de test). El obs del bundle trend se
+    # alimenta con ≥ TREND_FEATURE_WINDOW_MIN velas (guard en serve), donde
+    # sus 20 últimas filas son SMA200 REAL — nunca ve valores de relleno.
+    sma200 = close.rolling(200).mean()
+    result["dist_sma200"] = np.clip((close - sma200) / (close + 1e-10), -0.1, 0.1)
+    result["sma200_slope"] = np.clip((sma200 - sma200.shift(5)) / (close + 1e-10), -0.1, 0.1)
+    result["dist_sma200"] = result["dist_sma200"].fillna(0.0)
+    result["sma200_slope"] = result["sma200_slope"].fillna(0.0)
 
     ema12 = close.ewm(span=12, adjust=False).mean()
     ema26 = close.ewm(span=26, adjust=False).mean()
@@ -240,18 +279,57 @@ def engineer_market_features(df: pd.DataFrame) -> pd.DataFrame:
     # (SMA20/std20 → 19 filas; ATR/RSI → 13, cubiertas por esas 19) y sólo
     # DESPUÉS de ordenar ascendente: se descartan las velas MÁS VIEJAS, nunca
     # las nuevas (P0: test_p0_time_order). dropna exige cero NaN en el resto:
-    # por eso cada feature (ADX, swings, liquidez) se rellena arriba.
+    # por eso cada feature (ADX, swings, liquidez, bloque de tendencia T-22)
+    # se rellena arriba.
     result = result.dropna().reset_index(drop=True)
 
     return result
 
 
-def get_market_features(df: pd.DataFrame) -> list[str]:
-    """Valida la presencia ordenada del vector de features de mercado."""
-    for feature in MARKET_FEATURES:
+def get_market_features(df: pd.DataFrame, include_trend: bool = False) -> list[str]:
+    """Valida la presencia ordenada del vector de features de mercado.
+
+    T-22 (REQ-1): `include_trend=True` añade `TREND_MARKET_FEATURES` al FINAL
+    del vector — misma función, mismo orden en train (`ForexTradingEnvV2`) y
+    serve (`/predict`): paridad por construcción. El default False conserva
+    byte-idéntico el vector de los 17 base (bundle vivo (20,25)).
+    """
+    features = list(MARKET_FEATURES)
+    if include_trend:
+        features += list(TREND_MARKET_FEATURES)
+    for feature in features:
         if feature not in df.columns:
             df[feature] = 0.0
-    return list(MARKET_FEATURES)
+    return features
+
+
+def derive_obs_contract(obs_width: Optional[int]) -> Optional[Tuple[bool, bool]]:
+    """Deriva (trend_features, memory_channel) del ancho del observation_space.
+
+    T-22: única fuente de verdad del contrato por ancho — la usan ambos lados
+    (`routers/ai.load_inference_artifacts` en serve y
+    `services.auto_retrain._evaluate_model` en retrain), de modo que un bundle
+    se construye igual donde se mire. Anchuras válidas:
+
+    - 24 = 17 market + 7 state            → pre-memoria legado (Fase 3)
+    - 25 = 24 + memoria                   → CONTRATO VIVO (20,25)
+    - 27 = 20 market + 7 state            → trend pre-memoria (T-22)
+    - 28 = 27 + memoria                   → OBJETIVO T-27 (20,28)
+
+    Devuelve None si el ancho no corresponde a ningún contrato construible:
+    el llamador decide el RuntimeError contextual (sin degradación silenciosa).
+    """
+    base_width = FOREX_MARKET_FEATURE_COUNT + EXTRA_STATE_FEATURES
+    trend_width = base_width + len(TREND_MARKET_FEATURES)
+    if obs_width == base_width:
+        return (False, False)
+    if obs_width == base_width + 1:
+        return (False, True)
+    if obs_width == trend_width:
+        return (True, False)
+    if obs_width == trend_width + 1:
+        return (True, True)
+    return None
 
 
 def build_v3_observation(
@@ -449,6 +527,7 @@ class ForexTradingEnvV2(gym.Env):
         trailing_atr_mult: float = 2.0,
         min_stop_dist_pips: float = 1.0,
         memory_channel: bool = True,
+        trend_features: bool = False,
     ):
         super(ForexTradingEnvV2, self).__init__()
         self.df = df.reset_index(drop=True)
@@ -490,13 +569,17 @@ class ForexTradingEnvV2(gym.Env):
         # para evaluar bundles viejos (auto_retrain._evaluate_model decide
         # según observation_space del modelo que se evalúa).
         self.memory_channel = bool(memory_channel)
+        # T-22: bloque de tendencia en el obs (20 market → obs 27/28). False
+        # (default) = contrato vivo de 17 base, byte-idéntico. Quien decide es
+        # derive_obs_contract(obs_width) — ver auto_retrain/routers.ai.
+        self.trend_features = bool(trend_features)
         # Memoria desde el último cierre (0 = cerró en esta vela; el arranque
         # usa max_holding_steps → normalizado a 1.0 = "sin cierre reciente").
         self.bars_since_close = int(max_holding_steps)
         self.ever_closed = False
         self.trade_pnls: list = []
 
-        self.features = get_market_features(self.df)
+        self.features = get_market_features(self.df, include_trend=self.trend_features)
         # P2-1 / D3: el modelo decide [direction, volume]; SL/TP los pone
         # production_stops() igual que en /predict (cabezas muertas fuera).
         self.action_space = spaces.Box(

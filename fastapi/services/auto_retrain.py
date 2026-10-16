@@ -593,10 +593,10 @@ def _evaluate_model(model, df: pd.DataFrame, env_cfg: dict, obs_rms=None) -> dic
       el MISMO segmento → la comparación es válida.
     - `obs_rms`: estadísticas congeladas de VecNormalize (None = bundle crudo):
       cada política se evalúa en el espacio de entrada con el que fue entrenada.
-    - Contrato de obs por modelo (Fase 3): el env se construye con el número
-      de canales del observation_space del modelo evaluado — baseline (20,24)
-      pre-memoria vs candidato (20,25). Contrato desconocido = RuntimeError
-      (sin degradación silenciosa).
+    - Contrato de obs por modelo (Fase 3 / T-22): el env se construye con los
+      canales que declara el observation_space del modelo evaluado — derive_obs_contract
+      resuelve pre-memoria (20,24), vivo (20,25), trend (20,27) y trend+memoria (20,28).
+      Contrato desconocido = RuntimeError (sin degradación silenciosa).
     - Devuelve además curvas (equity, rewards por paso) para que el harness
       walk-forward calcule Sharpe/Sortino/DD.
     - wins/losses derivan de info['trades'] e info['win_rate'] (el env NO
@@ -606,7 +606,9 @@ def _evaluate_model(model, df: pd.DataFrame, env_cfg: dict, obs_rms=None) -> dic
     from ml.trading_env_v2 import (
         EXTRA_STATE_FEATURES,
         FOREX_MARKET_FEATURE_COUNT as _MARKET_FEATURE_COUNT,
+        TREND_MARKET_FEATURES,
         ForexTradingEnvV2,
+        derive_obs_contract,
     )
 
     eval_cfg = dict(env_cfg)
@@ -614,17 +616,23 @@ def _evaluate_model(model, df: pd.DataFrame, env_cfg: dict, obs_rms=None) -> dic
     eval_cfg["real_outcomes"] = []
     eval_cfg["random_reset"] = False  # episodio fijo: baseline y candidato idénticos
 
+    # T-22: contrato por ancho vía derive_obs_contract — MISMA fuente que el
+    # serve (routers.ai.load_inference_artifacts): trend_features (obs 27/28)
+    # y memory_channel (obs 25/28) deciden igual en ambos lados. Contrato
+    # desconocido = RuntimeError (sin degradación silenciosa).
     obs_shape = tuple(getattr(getattr(model, "observation_space", None), "shape", ()))
-    base_width = _MARKET_FEATURE_COUNT + EXTRA_STATE_FEATURES
-    if len(obs_shape) == 2 and obs_shape[-1] == base_width:
-        eval_cfg["memory_channel"] = False   # bundle pre-memoria (20,24)
-    elif len(obs_shape) == 2 and obs_shape[-1] == base_width + 1:
-        eval_cfg["memory_channel"] = True    # contrato Fase 3 (20,25)
-    else:
+    obs_width = obs_shape[-1] if len(obs_shape) == 2 else None
+    contract = derive_obs_contract(obs_width)
+    if contract is None:
+        base_width = _MARKET_FEATURE_COUNT + EXTRA_STATE_FEATURES
+        trend_width = base_width + len(TREND_MARKET_FEATURES)
         raise RuntimeError(
             f"[RETRAIN] Contrato de observación desconocido: {obs_shape} "
-            f"(esperado {base_width} o {base_width + 1} canales) — no se evalúa"
+            f"(esperado {base_width} pre-memoria, {base_width + 1} con "
+            f"memoria, {trend_width} trend o {trend_width + 1} trend+memoria)"
+            " — no se evalúa"
         )
+    eval_cfg["trend_features"], eval_cfg["memory_channel"] = contract
 
     dummy = DummyVecEnv([lambda: ForexTradingEnvV2(**eval_cfg)])
     if obs_rms is not None:
@@ -851,6 +859,10 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int, symbol: str = TRAINING
         # canal 8º bars_since_close → obs (20,25). El eval de cada modelo
         # pisa este flag según el observation_space del modelo evaluado.
         memory_channel=True,
+        # T-22 (2026-10-16): el bloque de tendencia NO entra aún en el obs —
+        # su activación es el retrain PRE-REGISTRADO T-27 (obs (20,28)).
+        # Explícito para que el salto de contrato sea una línea revisable.
+        trend_features=False,
     )
     logger.warning(
         "[RETRAIN] Costes del env (O-2): spread=%.2f pips, comisión_bróker=%.4f €/lot, ancla_churn=%.2f €/lot",

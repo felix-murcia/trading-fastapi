@@ -29,8 +29,11 @@ from ml.trading_env_v2 import (
     FOREX_MARKET_FEATURE_COUNT,
     MARKET_FEATURES,
     TIME_STOP_BARS,
+    TREND_FEATURE_WINDOW_MIN,
+    TREND_MARKET_FEATURES,
     build_v3_observation,
     decode_v3_direction,
+    derive_obs_contract,
     engineer_market_features,
     get_market_features,
     production_stops,
@@ -216,6 +219,11 @@ class Brain:
     # bars_since_close; False = (20,24) pre-memoria (derivado en load, nunca
     # inferido a mano).
     memory_channel: bool = False
+    # T-22: bloque de tendencia compartido PPO↔LLM (REQ-1) — True = obs con
+    # 20 canales de mercado (27/28: dist_sma200, sma200_slope, adx) y ventana
+    # de features ≥ TREND_FEATURE_WINDOW_MIN (SMA200 honesto); False = 17 base
+    # y ventana tail(120) byte-idéntica al contrato vivo (20,25).
+    trend_features: bool = False
 
 
 _BRAINS: dict[str, Brain] = {}
@@ -257,25 +265,25 @@ def load_inference_artifacts(symbol: str) -> None:
     obs_space = getattr(model, "observation_space", None)
     assert_obs_shape(manifest, getattr(obs_space, "shape", None))
 
-    # Fase 3: el ancho del observation_space del bundle decide si el obs
-    # lleva el canal de memoria (20,25) o es pre-memoria (20,24). Ancho
+    # Fase 3 / T-22: el ancho del observation_space del bundle decide el
+    # contrato (canal de memoria y bloque de tendencia) vía
+    # derive_obs_contract — única fuente de verdad con el retrain. Ancho
     # desconocido = RuntimeError: nunca se sirve un contrato que no se
     # construye.
     obs_width = None
     obs_shape = getattr(obs_space, "shape", None)
     if obs_shape:
         obs_width = obs_shape[-1]
-    base_width = FOREX_MARKET_FEATURE_COUNT + EXTRA_STATE_FEATURES
-    if obs_width == base_width:
-        memory_channel = False
-    elif obs_width == base_width + 1:
-        memory_channel = True
-    else:
+    contract = derive_obs_contract(obs_width)
+    if contract is None:
+        base_width = FOREX_MARKET_FEATURE_COUNT + EXTRA_STATE_FEATURES
+        trend_width = base_width + len(TREND_MARKET_FEATURES)
         raise RuntimeError(
             f"[AI-STARTUP] Contrato de observación desconocido para {symbol}: "
-            f"{obs_shape} (esperado {base_width} pre-memoria "
-            f"o {base_width + 1} con memoria)"
+            f"{obs_shape} (esperado {base_width} pre-memoria, {base_width + 1} "
+            f"con memoria, {trend_width} trend o {trend_width + 1} trend+memoria)"
         )
+    trend_features, memory_channel = contract
 
     vec_norm_file = manifest.get("vec_norm_file")
     if vec_norm_file:
@@ -296,6 +304,7 @@ def load_inference_artifacts(symbol: str) -> None:
         model=model,
         vec_norm=vec_norm,
         memory_channel=memory_channel,
+        trend_features=trend_features,
         bundle={
             "model_sha256": manifest["model_sha256"],
             "vec_norm_sha256": manifest.get("vec_norm_sha256"),
@@ -740,21 +749,57 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     if raw_df.empty or len(raw_df) < 30:
         return PredictResponse(cycle_id=cycle_id, ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
 
-    # Paquete 1-4: la serie COMPLETA (hasta 240 velas) alimenta el contexto de
-    # estructura (SMA200); las features se calculan sólo sobre las 120 más
-    # recientes — idénticas al contrato de siempre (obs byte-idéntico con
-    # cualquier profundidad de fetch). Sin columna `time` → previo (sin orden
-    # fiable no hay SMA200 honesto).
+    # T-22: el brain se resuelve ANTES de elegir la ventana de features — el
+    # contrato del bundle (trend_features) decide cuántas velas alimentan el
+    # obs. (Antes vivía tras el contexto de Qwen; nada entre aquí y su sitio
+    # anterior depende del brain.)
+    brain = _BRAINS.get(sym)
+    if brain is None:
+        load_inference_artifacts(sym)
+        brain = _BRAINS.get(sym)
+    if brain is None:
+        logger.error("[%s] No hay modelo PPO disponible para %s.", cycle_id, sym)
+        return PredictResponse(cycle_id=cycle_id, ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
+
+    # Paquete 1-4 / T-22: la serie COMPLETA (hasta 240 velas) alimenta el
+    # contexto de estructura (SMA200 del prompt); las features del MODELO se
+    # calculan sobre una ventana FIJA — tail(120) con el contrato vivo
+    # (byte-idéntico al contrato de siempre) o tail(TREND_FEATURE_WINDOW_MIN)
+    # con contrato trend (SMA200 honesto en las últimas 20 velas del obs).
+    # Sin columna `time` → previo (sin orden fiable no hay SMA200 honesto) y,
+    # con contrato trend, HOLD: jamás se sirve tendencia de relleno.
     if "time" in raw_df.columns:
         raw_sorted = raw_df.sort_values("time").reset_index(drop=True)
         sma200_dist, sma200_slope = _sma200_context(raw_sorted)
-        features_input = raw_sorted.tail(120)
+        if brain.trend_features:
+            if len(raw_sorted) < TREND_FEATURE_WINDOW_MIN:
+                logger.error(
+                    "[%s] T-22: %d velas H1 insuficientes para el contrato "
+                    "trend (>= %d: warm-up SMA200 + ventana del obs) → HOLD",
+                    cycle_id, len(raw_sorted), TREND_FEATURE_WINDOW_MIN,
+                )
+                return PredictResponse(cycle_id=cycle_id, ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
+            # Ventana FIJA = el guard (224): con cualquier profundidad de
+            # fetch ≥224 las features se calculan sobre las MISMAS 224 velas
+            # recientes → obs byte-idéntico (el EWM del macd tiene memoria
+            # infinita: con ventanas de distinto tamaño sus ULPs divergen).
+            # Sus últimas 20 velas (filas 204..223) tienen SMA200 real.
+            features_input = raw_sorted.tail(TREND_FEATURE_WINDOW_MIN)
+        else:
+            features_input = raw_sorted.tail(120)
     else:
         sma200_dist, sma200_slope = None, None
+        if brain.trend_features:
+            logger.error(
+                "[%s] T-22: serie H1 sin columna `time` — sin orden no hay "
+                "SMA200 honesto para el contrato trend → HOLD",
+                cycle_id,
+            )
+            return PredictResponse(cycle_id=cycle_id, ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
         features_input = raw_df
 
     df = engineer_market_features(features_input)
-    features_list = get_market_features(df)
+    features_list = get_market_features(df, include_trend=brain.trend_features)
     # P0: leer de `df` (ordenada por engineer) — con raw_df (descendente del
     # MCP) el "reciente" eran las velas más ANTIGUAS y la hora de sesión la de
     # una semana atrás.
@@ -769,14 +814,6 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         f"{_higher_tf_context_line('H4', h4_res, req.symbol)}\n"
         f"{_higher_tf_context_line('D1', d1_res, req.symbol)}"
     )
-
-    brain = _BRAINS.get(sym)
-    if brain is None:
-        load_inference_artifacts(sym)
-        brain = _BRAINS.get(sym)
-    if brain is None:
-        logger.error("[%s] No hay modelo PPO disponible para %s.", cycle_id, sym)
-        return PredictResponse(cycle_id=cycle_id, ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
 
     current_price = float(df['close'].iloc[-1])
     current_atr = float(df['atr'].iloc[-1]) if 'atr' in df.columns else 0.0001
