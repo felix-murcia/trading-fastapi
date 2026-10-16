@@ -68,6 +68,10 @@ FOREX_MARKET_FEATURE_COUNT = len(MARKET_FEATURES)
 
 EXTRA_STATE_FEATURES = 7  # [entry_norm, pos, unrealized_pnl, balance_norm, dist_sl, dist_tp, holding_time]
 # Fase 3: +1 canal opcional `bars_since_close` (obs 25) — ver memory_channel.
+# Fase T-19 (2026-10-16): +4 canales opcionales teacher (bias/Qwen, calidad,
+# régimen, memoria-match) — obs 29 si `teacher_feature_channel=True`. Todo OFF
+# por default; la cadena PPO actual permanece en 25 sin promocionar bundles.
+TEACHER_EXTRA_STATE_FEATURES = 4
 
 # Filtro de volatilidad para evitar mercados de ruido (P2: mejora de selectividad)
 MIN_ATR_FOR_ENTRY = 0.0004 
@@ -269,6 +273,9 @@ def build_v3_observation(
     initial_balance: float,
     window_size: int = 20,
     bars_since_close_norm: Optional[float] = None,
+    # T-19 (Félix 2026-10-16): 4 canales teacher (bias/Qwen), calidad,
+    # régimen, match. Optional, default None → contrato 20,25 invariante.
+    teacher_features: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Genera el tensor de estado (window_size, total_features) invariante al par de divisas.
 
@@ -311,6 +318,16 @@ def build_v3_observation(
     ]
     if bars_since_close_norm is not None:
         state_rows.append(float(np.clip(bars_since_close_norm, 0.0, 1.0)))
+
+    # T-19 canales teacher: si existe, 4 floats (escalados internamente a
+    # [-1,1]) se convierten en nuevas filas al window. `None` conserva
+    # el contrato actual (memory_channel ya aprobado por bundle).
+    if teacher_features is not None:
+        extras = np.asarray(teacher_features, dtype=np.float32).reshape(-1)
+        if extras.shape[0] != 4:
+            raise ValueError("teacher_features expected length 4")
+        for val in extras:
+            state_rows.append(float(np.clip(val, -1.0, 1.0)))
 
     state_extensions = np.tile(
         np.array(state_rows, dtype=np.float32),
@@ -449,6 +466,8 @@ class ForexTradingEnvV2(gym.Env):
         trailing_atr_mult: float = 2.0,
         min_stop_dist_pips: float = 1.0,
         memory_channel: bool = True,
+        # T-19: canales teacher (LLM-grade) en la observación (default off).
+        teacher_feature_channel: bool = False,
     ):
         super(ForexTradingEnvV2, self).__init__()
         self.df = df.reset_index(drop=True)
@@ -490,6 +509,8 @@ class ForexTradingEnvV2(gym.Env):
         # para evaluar bundles viejos (auto_retrain._evaluate_model decide
         # según observation_space del modelo que se evalúa).
         self.memory_channel = bool(memory_channel)
+        # teacher channel can be enabled independently (obs width +4).
+        self.teacher_feature_channel = bool(teacher_feature_channel)
         # Memoria desde el último cierre (0 = cerró en esta vela; el arranque
         # usa max_holding_steps → normalizado a 1.0 = "sin cierre reciente").
         self.bars_since_close = int(max_holding_steps)
@@ -509,7 +530,8 @@ class ForexTradingEnvV2(gym.Env):
             high=np.inf,
             shape=(
                 window_size,
-                len(self.features) + EXTRA_STATE_FEATURES + (1 if self.memory_channel else 0),
+                len(self.features) + EXTRA_STATE_FEATURES + (1 if self.memory_channel else 0)
+                + (TEACHER_EXTRA_STATE_FEATURES if self.teacher_feature_channel else 0),
             ),
             dtype=np.float32
         )
@@ -576,11 +598,14 @@ class ForexTradingEnvV2(gym.Env):
 
         bars_norm = None
         if self.memory_channel:
-            # Paridad serve: min(1, bars/max_holding_steps) — el bundle
-            # pre-memoria recibe None (canal ausente).
             bars_norm = min(
                 1.0, self.bars_since_close / max(1, self.max_holding_steps)
             )
+
+        teacher_feats = None
+        if self.teacher_feature_channel:
+            # T-19 shadow: zeros pre-retrain (4 floats apiladas).
+            teacher_feats = np.zeros(TEACHER_EXTRA_STATE_FEATURES, dtype=np.float32)
 
         return build_v3_observation(
             market_values=market_slice,
@@ -597,6 +622,7 @@ class ForexTradingEnvV2(gym.Env):
             initial_balance=self.initial_balance,
             window_size=self.window_size,
             bars_since_close_norm=bars_norm,
+            teacher_features=teacher_feats,
         )
 
     def reset(self, seed=None, options=None):
