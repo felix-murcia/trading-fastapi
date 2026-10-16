@@ -122,6 +122,13 @@ class Settings(BaseSettings):
     volume_profile_lookback: int = 20     # Velas para calcular VP
     orderbook_levels: int = 5             # Niveles de profundidad para Orderbook Imbalance
 
+    # ─── T-09 (Félix 2026-10-16): retrain report-only (no-promote) ─────────
+    # El holdout congelado se reporta siempre, pero con report-only activo NO
+    # se promociona SIEMPRE (cualquier gate.ok queda registrado como traza, sin
+    # escritura de bundle). Habilidad de salir del modo (env RE领导班子) y
+    # permitir promoción real es una Orden explícita.
+    retrain_report_only: bool = False
+
     class Config:
         env_file = "/app/.env"
 

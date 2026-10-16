@@ -931,6 +931,29 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int, symbol: str = TRAINING
         }, symbol=symbol)
         return
 
+    # ─── T-09 (Félix 2026-10-16): holdout report-only — no escrituras si el
+    # gateway se está validando. Promoción requiere Orden explícita (env
+    # REHamilton report-only False + env REPORT_ONLY_ENABLED False).
+    if settings.retrain_report_only:
+        logger.warning(
+            "[RETRACE][REPORT-ONLY] gate=%s (%s) -> NO se promociona (solo traza OOS)",
+            decision.ok, decision.reason,
+        )
+        await experiment_tracker.finish_experiment(
+            exp_id, "rejected",
+            gate_reason=f"report_only:{decision.reason}",
+            gate_metrics=report.to_dict(),
+        )
+        state = await _ensure_retrain_state(symbol)
+        state.last_retrain_time = time.time()
+        await _save_retrain_state(state, symbol)
+        await _log_retrain_event("retrain_report_only", {
+            "gate_ok": decision.ok,
+            "gate_reason": decision.reason,
+            "report": report.to_dict(),
+        }, symbol=symbol)
+        return
+
     # Promoción del BUNDLE completo: stats + zip + manifest certifican el conjunto.
     # Si el proceso muere entre archivos, validate_bundle falla en el próximo arranque.
     norm_path = os.path.splitext(model_path)[0] + "_vec_norm.pkl"
