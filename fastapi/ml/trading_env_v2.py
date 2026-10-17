@@ -107,6 +107,29 @@ CHURN_BARS = 2
 # (PeriodSeconds(H1)/PeriodSeconds(M5)) — ver routers/ai.py `_TIME_STOP_M5_BARS`.
 TIME_STOP_BARS = 12
 
+# T-24 (2026-10-17) — candidato «Sat-Align», DISEÑO PRE-REGISTRADO en
+# audits/t24-reward-redesign-2026-10-17.md §4. Constantes CONGELADAS por
+# reglas de anclaje a-priori (d0/λ/s0 con anclas anti-hacking): NO retunear
+# — si el gate T-27 falla, se reporta y se para (protocolo anti-multiple-
+# testing). Dos términos sobre v1 sin tocar la economía (Δe/B0×S, churn,
+# regla 3 €, risk_penalty intactos):
+#   (a) saturación: recargo creciente sólo para |dir| más allá del techo
+#       d0 — higiene de la decisión saturada (decode_v3 es magnitud-libre →
+#       el término es autoextinguible);
+#   (b) alineación: recompensa por mantener la posición EN el sentido del
+#       régimen de tendencia (slope ∧ adx) — supervisiona el atajo
+#       momentum+intercepto medido en T-25. Usa los canales del bloque de
+#       tendencia T-22 (mismo slope/adx que pregunta al LLM → REQ-1) y es
+#       neutro en warm-up (slope relleno a 0).
+REWARD_V2_D0_CEIL = 0.90         # onset del techo; sat(d)=max(0,|d|-d0)²/(1-d0)²
+REWARD_V2_LAMBDA_SAT = 0.001     # × reward_scale → 0,10 u a pleno techo
+REWARD_V2_S0_SLOPE = 0.0002      # pendiente mediana |slope| en régimen tendencial
+REWARD_V2_LAMBDA_ALIGN = 0.000298  # × reward_scale → 0,0298 u/paso (ancla anti-
+                                 # hacking: 0,25 × |pnl| típico 14,315 € por
+                                 # trade de 12 barras / (1000 × 12))
+REWARD_V2_ADX_TREND = 0.25       # mismo umbral ADX tendencial del bloque de régimen
+REWARD_V2_VERSIONS = ("v1", "v2_align")  # contrato del parámetro reward_version
+
 
 def engineer_market_features(df: pd.DataFrame) -> pd.DataFrame:
     """Calcula indicadores técnicos normalizados y acotados para redes neuronales.
@@ -517,6 +540,7 @@ class ForexTradingEnvV2(gym.Env):
         max_episode_steps: int = 1000,
         max_holding_steps: int = 120,
         reward_scale: float = 100.0,
+        reward_version: str = "v1",   # T-24: "v1" (byte-idéntico, default) | "v2_align"
         random_reset: bool = True,
         real_outcomes: Optional[list] = None,
         real_outcome_weight: float = 0.1,
@@ -543,6 +567,15 @@ class ForexTradingEnvV2(gym.Env):
         self.max_episode_steps = max_episode_steps
         self.max_holding_steps = max_holding_steps
         self.reward_scale = reward_scale
+        # T-24: versión de la recompensa. Contrato declarado (v1/v2_align);
+        # cualquier otro valor es un error EXPLÍCITO — jamás caer a v1 en
+        # silencio (convención del repo: sin fallbacks).
+        if reward_version not in REWARD_V2_VERSIONS:
+            raise ValueError(
+                f"reward_version={reward_version!r} desconocida; "
+                f"esperadas {REWARD_V2_VERSIONS} (T-24)."
+            )
+        self.reward_version = reward_version
         self.random_reset = random_reset
 
         # Trailing espejo de los inputs del EA (mql5 §V): EnableTrailing,
@@ -957,6 +990,35 @@ class ForexTradingEnvV2(gym.Env):
         # Penalización por estancamiento si supera tiempo máximo sugerido
         if self.steps_in_trade > self.max_holding_steps:
             reward -= 0.001
+
+        # -------------------------------------------------------------
+        # T-24 «Sat-Align» (sólo reward_version="v2_align"; default v1 no
+        # entra aquí — byte-idéntico). Dos términos PUNTUALES sobre la suma
+        # v1 completa, sin tocar la economía:
+        #   (a) higiene de saturación — recargo cuadrático para |dir| > d0;
+        #   (b) alineación de posición con la tendencia del régimen —
+        #       A_t = sign(pos)·clip(slope/s0,±1)·min(1, adx/0.25); sólo
+        #       con posición mantenida (flat → sin término) y neutro en
+        #       warm-up (slope relleno 0 / NaN → 0, paridad con el fallback
+        #       conservador de current_adx). `candle` es la vela del paso
+        #       (L: entrada al step) y `current_adx` el de la detección de
+        #       régimen de arriba → mismos inputs que ve el LLM (REQ-1).
+        # -------------------------------------------------------------
+        if self.reward_version == "v2_align":
+            # (a) sat(d): 0 hasta d0; en |dir|=1 → 1 (recargo completo 0,10 u)
+            _excess = max(0.0, abs(dir_val) - REWARD_V2_D0_CEIL)
+            _sat = (_excess * _excess) / ((1.0 - REWARD_V2_D0_CEIL) ** 2)
+            reward -= REWARD_V2_LAMBDA_SAT * self.reward_scale * _sat
+
+            # (b) alineación — sólo con posición viva al final del paso
+            if self.position != 0:
+                _slope = float(candle.get("sma200_slope", 0.0))
+                if np.isnan(_slope):
+                    _slope = 0.0
+                _a_t = float(np.sign(self.position)) * float(
+                    np.clip(_slope / REWARD_V2_S0_SLOPE, -1.0, 1.0)
+                ) * min(1.0, current_adx / REWARD_V2_ADX_TREND)
+                reward += REWARD_V2_LAMBDA_ALIGN * self.reward_scale * _a_t
 
         # Reward shaping auxiliar por trades reales
         reward += self._apply_real_outcome_feedback(action)

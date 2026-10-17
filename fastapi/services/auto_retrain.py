@@ -84,6 +84,10 @@ class RetrainConfig:
     churn_friction_per_lot: float = 7.0  # ancla anti-churn (decisión Félix "fricción completa";
                                          # plan: fricción 7 €/lot) — parámetro de política,
                                          # NO coste de bróker (separado desde O-2)
+    reward_version: str = "v1"           # T-24 (2026-10-17): "v1" byte-idéntico (default)
+                                         # | "v2_align" («Sat-Align») — la activa el retrain
+                                         # pre-registrado T-27; eval y train comparten la MISMA
+                                         # versión (env_cfg → _evaluate_model los copia a ambos)
     n_epochs: int = 3                    # Epochs de entrenamiento (compatibilidad/auditoría)
     total_timesteps: int = 100_000      # PPO steps por retrain; 1.500 era insuficiente
     learning_rate: float = 3e-4
@@ -863,6 +867,10 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int, symbol: str = TRAINING
         # su activación es el retrain PRE-REGISTRADO T-27 (obs (20,28)).
         # Explícito para que el salto de contrato sea una línea revisable.
         trend_features=False,
+        # T-24 (2026-10-17): versión de recompensa explícita igual que
+        # trend_features — default "v1" inerte; T-27 lo cambia a "v2_align"
+        # en LA MISMA línea revisable (eval y train heredan este env_cfg).
+        reward_version=cfg.reward_version,
     )
     logger.warning(
         "[RETRAIN] Costes del env (O-2): spread=%.2f pips, comisión_bróker=%.4f €/lot, ancla_churn=%.2f €/lot",
