@@ -45,6 +45,8 @@ from services.auto_retrain import (
     record_trade_filled,
     TRAINING_SYMBOL as _TRAINING_SYMBOL,
 )
+# T-28 (REQ-1): alineación direccional PPO↔LLM — registro por ciclo + gate.
+from services.alignment_metric import pair_state, rolling_alignment
 from services.feed_breaker import h4d_breaker_is_open, h4d_breaker_trip
 from services.feed_patcher import fill_feed_hole as _fill_feed_hole
 from services.market_time import utc_hour_from_candle
@@ -1268,6 +1270,25 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             "error": f"{type(exc).__name__}: {exc}",
         }
 
+    # ── T-28 (REQ-1, 2026-10-17): ALINEACIÓN PPO↔LLM POR CICLO ─────────────
+    # Registro por ciclo en audit (acceptance (b); pre-registrado D5/D6):
+    # `ppo_direction` = decisión CRUDA del PPO (tras histeresis K=2, ANTES de
+    # la cadena de vetos — lo que el LLM debe compartir), `pair_state` =
+    # clasificación del par de ESTE ciclo y `alignment_rolling` = reporte T-28
+    # sobre la ventana PREVIA (patrón snapshot de min_entry_confidence:
+    # reproducible sin recompute; el ciclo actual se inserta después).
+    # Capa observacional → contención como en la deliberación: su fallo NO
+    # tumba el ciclo; el error queda EXPLÍCITO en el payload (nada silencioso).
+    t28_pair = pair_state(decision, qwen["bias"])
+    try:
+        t28_rolling = await rolling_alignment(req.symbol)
+    except Exception as exc:
+        logger.warning(
+            "[%s] T-28 rolling alignment falló (%s: %s) → error declarado en audit",
+            cycle_id, type(exc).__name__, exc,
+        )
+        t28_rolling = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
     record_cycle_metrics(
         symbol=req.symbol,
         decision=final_decision,
@@ -1295,6 +1316,13 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
                 else None
             ),
             "llm_bias": qwen["bias"],
+            # T-28 (REQ-1, 2026-10-17): acuerdo direccional PPO↔LLM por ciclo —
+            # `decision` (arriba) es la FINAL del ciclo; `ppo_direction` es la
+            # cruda del PPO. `pair_state` clasifica este par; `alignment_rolling`
+            # es el reporte de la ventana previa (o {"error": ...} explícito).
+            "ppo_direction": decision,
+            "pair_state": t28_pair,
+            "alignment_rolling": t28_rolling,
             "quality_score": round(qwen["quality"], 2),
             "quality_reason": qwen["reason"],
             "qwen_degraded": not qwen.get("ok", True),

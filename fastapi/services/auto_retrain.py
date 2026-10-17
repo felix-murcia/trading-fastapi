@@ -25,6 +25,9 @@ from core.pair import default_model_path
 from core.rules import is_winning_close
 from services import data_snapshot, drift_monitor, experiment_tracker
 from services.alerting import AlertLevel, send_alert
+# T-28 (REQ-1, c): condición de alineación PPO↔LLM del gate de retrain —
+# pre-registrada en audits/t28-alignment-metric-2026-10-17.md (D6).
+from services.alignment_metric import alignment_gate
 from services.walk_forward import (
     build_walk_forward_split,
     evaluate_walk_forward,
@@ -941,6 +944,12 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int, symbol: str = TRAINING
         "APROBADO" if decision.ok else "RECHAZADO", decision.reason,
     )
 
+    # T-28 (REQ-1, c — pre-registrado D6): segunda condición del gate de
+    # retrain — ALINEACIÓN PPO↔LLM del par que SIRVE (ventana reciente de
+    # ciclos auditados con juicio LLM existente). Fail-closed: muestra
+    # insuficiente o error de cómputo = no promovible, con la causa explícita.
+    t28_alignment = await alignment_gate(symbol)
+
     # T-27 (D3 pre-registrado): artefactos del candidato para el gate de
     # aceptación (métricas 3-6) y para T-28 (métrica 7) SIN promover — bajo
     # RETRAIN_REPORT_ONLY el modelo se pierde en memoria al retornar. Paths
@@ -967,6 +976,9 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int, symbol: str = TRAINING
                 "rows": int(len(df)),
             },
             "gate": {"ok": decision.ok, "reason": decision.reason},
+            # T-28: condición de alineación PPO↔LLM congelada junto al
+            # candidato (auditable aunque no se promueva).
+            "t28_alignment": t28_alignment,
             "walk_forward": report.to_dict(),
         }, fh, indent=2, default=_jsonable)
     logger.warning("[RETRAIN] Candidato + informe en %s", artifact_dir)
@@ -989,6 +1001,36 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int, symbol: str = TRAINING
         await _log_retrain_event("retrain_rejected", {
             "reason": decision.reason,
             "gate": decision.details,
+            "t28_alignment": t28_alignment,
+            "report": report.to_dict(),
+        }, symbol=symbol)
+        return
+
+    # T-28 (REQ-1, c — pre-registrado D6): gate wf OK pero el par PPO↔LLM no
+    # demuestra alineación (o sin muestra suficiente — fail-closed) → rechazo
+    # declarado con SU causa, misma mecánica anti-tormenta que el rechazo wf.
+    if not t28_alignment.get("ok"):
+        reasons_t28 = t28_alignment.get("reasons") or ["unknown"]
+        reason_t28 = f"t28_alignment:{','.join(reasons_t28)}"
+        logger.warning(
+            "[RETRAIN] Candidato no promovible — alineación PPO↔LLM no demostrada "
+            "(%s): active=%s agreement=%s conflict=%s entropy_bits=%s",
+            reason_t28,
+            t28_alignment.get("n_active"), t28_alignment.get("agreement_rate"),
+            t28_alignment.get("conflict_rate"), t28_alignment.get("joint_entropy_bits"),
+        )
+        await experiment_tracker.finish_experiment(
+            exp_id, "rejected",
+            gate_reason=reason_t28,
+            gate_metrics=report.to_dict(),
+        )
+        state = await _ensure_retrain_state(symbol)
+        state.last_retrain_time = time.time()
+        await _save_retrain_state(state, symbol)
+        await _log_retrain_event("retrain_rejected", {
+            "reason": reason_t28,
+            "gate": decision.details,
+            "t28_alignment": t28_alignment,
             "report": report.to_dict(),
         }, symbol=symbol)
         return
@@ -1012,6 +1054,7 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int, symbol: str = TRAINING
         await _log_retrain_event("retrain_report_only", {
             "gate_ok": decision.ok,
             "gate_reason": decision.reason,
+            "t28_alignment": t28_alignment,
             "report": report.to_dict(),
         }, symbol=symbol)
         return
@@ -1044,6 +1087,9 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int, symbol: str = TRAINING
         extra={
             "walk_forward": report.to_dict(),
             "gate": {"ok": decision.ok, "reason": decision.reason},
+            # T-28: la promoción certifica TAMBIÉN la alineación PPO↔LLM
+            # medida (la condición pasó — el dict completo queda en el bundle).
+            "t28_alignment": t28_alignment,
             "drift_baseline": baseline_info,
         },
     )
@@ -1093,6 +1139,7 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int, symbol: str = TRAINING
     await _log_retrain_event("retrain_promoted", {
         "reason": decision.reason,
         "gate": decision.details,
+        "t28_alignment": t28_alignment,
         "report": report.to_dict(),
         "bundle": {
             "model": os.path.basename(model_path),

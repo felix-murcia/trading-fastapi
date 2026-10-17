@@ -511,6 +511,17 @@ class TestDoRetrainPromotion:
                             AsyncMock(return_value=_candles(candles)))
         monkeypatch.setattr(ar, "_load_persisted_outcomes", AsyncMock(return_value=[]))
         monkeypatch.setattr(ar, "_log_retrain_event", AsyncMock())
+        # T-28 (REQ-1, c): gate de alineación PPO↔LLM — por defecto OK para que
+        # los tests existentes prueben SU concern (wf/promoción); los tests
+        # T-28 lo sobreescriben con fallos. Fail-closed documentado: sin este
+        # patch, la falta de BD en suite haría ok=false y tumbaría la promoción.
+        monkeypatch.setattr(ar, "alignment_gate", AsyncMock(return_value={
+            "window": 1000, "n_window": 100, "n_neutral": 20, "n_unknown": 0,
+            "n_active": 80, "n_aligned": 64, "n_conflict": 8, "n_split": 8,
+            "agreement_rate": 0.8, "conflict_rate": 0.1, "split_rate": 0.1,
+            "joint_entropy_bits": 1.4, "sufficient": True, "ok": True,
+            "reasons": [],
+        }))
         # P3-2a: snapshot + experimentos (sin BD real ni escritura en repo/ml)
         from services.data_snapshot import SnapshotInfo
         monkeypatch.setattr(
