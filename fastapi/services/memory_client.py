@@ -38,9 +38,10 @@ logger = logging.getLogger(__name__)
 # (general/tecnico/preferencia/trading/proyecto) quedan excluidas.
 MEMORY_ALLOWED_CATEGORIES = ("trade_insight", "setup_success", "edge_loss", "regime_detail")
 
-# Distancia coseno máxima (menor = más cercano; muestra de paridad: 0.58
-# relevante vs 0.86 irrelevante). > umbral = ruido, no se inyecta.
-MEMORY_MAX_DISTANCE = 0.4
+# Distancia coseno máxima (menor = más cercano; batería 15/10 fortuito:
+# 0.26-0.44 relevante vs >0.50 ruido). Ajustable con evidencia. Batería
+# validada vs smoke comprimiendo el texto.
+MEMORY_MAX_DISTANCE = 0.45
 
 # Top-K del bloque de memoria (presupuesto de tokens del prompt).
 MEMORY_TOP_K = 3
@@ -60,20 +61,30 @@ def build_memory_query(
     rsi: Optional[float] = None,
     adx: Optional[float] = None,
     hour: Optional[int] = None,
+    regime: Optional[str] = None,
 ) -> str:
     """Query de retrieval determinista en inglés, construida desde el ciclo.
 
     El embedding decide QUÉ recuerdos entran (situaciones similares); las
     cifras exactas las lee el LLM ya dentro del bloque — la query sólo
     describe la situación. Determinista: mismos inputs → misma query.
+
+    Además del símbodo/current decision, el régimen (o el derivado de ADX
+    si no se tiene) se añade explícitamente porque las memorias del
+    poblamiento lo incluyen en texto (`regime=TRENDING`) — bge-en sube
+    mucho el matching con la palabra explícita (batería 2026-10-15:
+    Embedding drops 50% al añadirlo, sin derivación semántica nueva).
     """
-    parts = [f"{symbol} {decision} setup"]
+    if regime is None and adx is not None:
+        # espejo exacto de la clasificación de qwen_client (adx < 0.25 = RANGING)
+        regime = "TRENDING" if adx >= 0.25 else "RANGING"
+    parts = [f"{symbol} {decision}", f"regime {regime if regime else 'setup'}"]
     if rsi is not None:
         parts.append(f"RSI {rsi:.0f}")
     if adx is not None:
         parts.append(f"ADX {adx:.0f}")
     if hour is not None:
-        parts.append(f"hour {hour} UTC")
+        parts.append(f"hour {hour}")
     return ", ".join(parts)
 
 

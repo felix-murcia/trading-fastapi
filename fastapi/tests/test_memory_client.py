@@ -201,16 +201,11 @@ class TestBuildMemoryQuery:
                                 adx=24.7, hour=11)
         assert q1 == q2, "mismos inputs → misma query (reproducibilidad)"
         assert "EURUSD" in q1 and "BUY" in q1
-        assert "RSI 58" in q1 and "ADX 25" in q1, (
-            "enteros redondeados (query de embedding, precisión no crítica)"
-        )
+        assert "regime TRENDING" in q1 and "RSI 58" in q1
 
     def test_optional_fields_are_omitted_not_invented(self):
         q = build_memory_query(symbol="EURUSD", decision="SELL")
-        assert q == "EURUSD SELL setup", (
-            "camino real sin adx/df → la query sólo lleva lo disponible "
-            "(contexto, nunca inventado)"
-        )
+        assert q == "EURUSD SELL, regime setup"
 
 
 # ─── 3-4. Prompt: bloque de memorias ──────────────────────────────────────────
