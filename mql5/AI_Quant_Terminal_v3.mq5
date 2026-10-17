@@ -6,10 +6,10 @@ Terminal de Ejecución y Telemetría para Cerebro Autónomo (FastAPI + PPO v3).
 - Rol del Servidor: Decisión direccional, dimensionamiento de lotes, SL, TP y gestión de riesgo.
 */
 #property copyright "AI Quant Terminal v3"
-#property version   "13.5"
+#property version   "13.6"
 #property strict
 
-#define EA_VERSION "13.5"
+#define EA_VERSION "13.6"
 
 #include <Trade\Trade.mqh>
 
@@ -38,7 +38,6 @@ input group "=== Safe-4 (Félix 2026-10-15): bloqueo mínimo de +SL_LockSafetyNe
 input bool   EnableSafeLock      = true;    // Activar el cierre arriba de pérdida (lock mínimo)
 input double SL_LockSafetyNetEur = 4.0;     // Beneficio en EUR mínimo para proteger el stop antes de 1R
 input int    SafeLockTrailMinPips  = 15;      // Pips mínimos para el primer disparo de acoplamiento
-```
 
 input group "=== Breakeven ==="
 input bool   EnableBreakeven = true;                    // Mover SL a la entrada cuando el precio recupera 1R (P1)
