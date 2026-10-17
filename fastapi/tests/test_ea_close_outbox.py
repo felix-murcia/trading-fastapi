@@ -11,8 +11,8 @@ import re
 
 def _ea_source() -> str:
     candidates = (
-        "/mql5/AI_Quant_Terminal_v3.mq5",  # Docker: volumen de solo lectura
-        os.path.join(os.path.dirname(__file__), "..", "..", "mql5", "AI_Quant_Terminal_v3.mq5"),
+        "/mql5/AI_Quant_Terminal_EURUSD.mq5",  # Docker: volumen de solo lectura
+        os.path.join(os.path.dirname(__file__), "..", "..", "mql5", "AI_Quant_Terminal_EURUSD.mq5"),
     )
     for path in candidates:
         if os.path.exists(path):

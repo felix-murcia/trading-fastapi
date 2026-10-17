@@ -20,7 +20,7 @@ después del gate de desfase.
 import re
 from pathlib import Path
 
-_EA = Path(__file__).resolve().parents[2] / "mql5" / "AI_Quant_Terminal_v3.mq5"
+_EA = Path(__file__).resolve().parents[2] / "mql5" / "AI_Quant_Terminal_EURUSD.mq5"
 
 
 def _ea_source() -> str:
