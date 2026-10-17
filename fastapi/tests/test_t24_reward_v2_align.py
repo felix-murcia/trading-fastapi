@@ -272,9 +272,13 @@ class TestAutoRetrainWiring:
     (los fallos son ruidosos: TypeError/ValueError) — se fija la línea de
     cableado con precedente de lectura de fuente (test_e2e_ai_predict)."""
 
-    def test_config_default_is_v1(self):
+    def test_config_default_is_v2_align(self):
+        # T-27 (2026-10-17): la activación PRE-REGISTRADA del retrain único
+        # T-27 flipa el default "v1" → "v2_align" (diseño T-24 §8: línea
+        # revisable — si el gate de T-27 cae, revertir este default; decisión
+        # de Félix). El default del ENV sigue siendo "v1" (test de arriba).
         from services.auto_retrain import RetrainConfig
-        assert RetrainConfig().reward_version == "v1"
+        assert RetrainConfig().reward_version == "v2_align"
 
     def test_env_cfg_carries_reward_version(self):
         src = (Path(__file__).resolve().parent.parent

@@ -496,7 +496,10 @@ class TestDoRetrainPromotion:
     """_do_retrain end-to-end (red/BD parcheadas): walk-forward gate + bundle."""
 
     @staticmethod
-    def _patch_common(monkeypatch, tmp_path, *, candles=500, model_path=None):
+    def _patch_common(monkeypatch, tmp_path, *, candles=800, model_path=None):
+        # T-27: _do_retrain aplica el trim de warm-up (−204 filas tras engineer,
+        # que además descarta su propio warm-up) → 800 velas dejan ~577 filas,
+        # holgadas para la región de pliegues (≥4×10 + embargo).
         import stable_baselines3 as sb3
         from services import auto_retrain as ar
 
@@ -673,6 +676,76 @@ class TestDoRetrainPromotion:
         reason = ar._log_retrain_event.await_args.args[1]["reason"]
         # Con el nuevo gate, holdout se verifica primero: empate en holdout → rechazo
         assert reason == "holdout_vs_baseline_sum_reward"
+
+    @pytest.mark.asyncio
+    async def test_candidate_artifacts_saved_for_t27_gate(self, tmp_path, monkeypatch):
+        """T-27 (D3 pre-registrado): cada corrida deja el candidato en
+        `retrain_artifacts/exp<id>/` (zip + vecnorm + informe) — el gate de
+        aceptación de T-27 (métricas 3-6) y T-28 (métrica 7) evalúan SIN
+        promover; bajo RETRAIN_REPORT_ONLY el modelo se pierde en memoria."""
+        ar, state, model_path, *_ = self._patch_common(monkeypatch, tmp_path)
+        monkeypatch.setattr(ar, "_evaluate_model", self._fake_metrics)
+
+        await ar._do_retrain()
+
+        art = tmp_path / "retrain_artifacts" / "exp42"   # exp_id del tracker parcheado
+        assert os.path.exists(art / "candidate.zip")
+        assert os.path.exists(art / "candidate_vec_norm.pkl")
+        payload = json.loads((art / "report.json").read_text(encoding="utf-8"))
+        from services.auto_retrain import _build_training_dataframe
+        n_eng = len(_build_training_dataframe(_candles(800)))   # pre-trim
+        assert payload["exp_id"] == 42
+        assert payload["symbol"] == "EURUSD"
+        assert payload["obs_shape"] == [20, 28]   # T-27: trend + memoria
+        # Eco de la activación pre-registrada (lo que corrió, auditable)
+        assert payload["cfg"]["reward_version"] == "v2_align"
+        assert payload["cfg"]["trend_features"] is True
+        assert payload["cfg"]["warmup_trim_rows"] == 204
+        assert payload["cfg"]["total_timesteps"] == RetrainConfig.total_timesteps
+        assert payload["cfg"]["rows"] == n_eng - 204   # snapshot recortado (D1)
+        assert payload["gate"]["ok"] is True
+        assert payload["walk_forward"]["n_folds"] == 4
+        assert payload["walk_forward"]["holdout"]["candidate"]["reward"] > 0
+
+
+class TestT27Activation:
+    """T-27 (2026-10-17): activación pre-registrada — trim de warm-up y
+    flips de las dos líneas revisables (diseño T-22 §/T-24 §8)."""
+
+    def test_trim_drops_204_rows_and_reindexes(self):
+        from services.auto_retrain import (
+            WARMUP_TRIM_ROWS,
+            _build_training_dataframe,
+            _trim_trend_warmup,
+        )
+        df = _build_training_dataframe(_candles(500))
+        n = len(df)
+        out = _trim_trend_warmup(df)
+        assert WARMUP_TRIM_ROWS == 204          # TREND_FEATURE_WINDOW_MIN − window
+        assert len(df) == n                     # input sin mutar (n<500: engineer
+        assert len(out) == n - 204              # descarta su propio warm-up)
+        # reset OBLIGATORIO: _index_real_outcomes y el paso del env indexan
+        # por posición — sin el reset sería off-by-204.
+        assert list(out.index[:2]) == [0, 1]
+        assert out["time"].iloc[0] == df["time"].iloc[204]
+
+    def test_retrain_trims_before_snapshot(self):
+        """Orden: builder → trim → snapshot (sha256 = df exacto que consumen
+        train y gate). Precedente de lectura de fuente (test_e2e_ai_predict)."""
+        from pathlib import Path
+        src = (Path(__file__).resolve().parent.parent
+               / "services" / "auto_retrain.py").read_text(encoding="utf-8")
+        build = src.index("_build_training_dataframe(candles)")
+        trim = src.index("_trim_trend_warmup(df)")
+        snap = src.index("save_snapshot(df")
+        assert build < trim < snap
+
+    def test_revisable_lines_flipped(self):
+        from pathlib import Path
+        src = (Path(__file__).resolve().parent.parent
+               / "services" / "auto_retrain.py").read_text(encoding="utf-8")
+        assert "trend_features=True" in src
+        assert 'reward_version: str = "v2_align"' in src
 
 
 class TestExperimentLifecycle:

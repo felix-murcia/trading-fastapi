@@ -25,12 +25,15 @@ Mecánica del estado ROJO→VERDE: `xfail(strict=True)` sobre la clase que hoy
 falla — la suite queda VERDE mientras el bundle vigente la tenga en rojo, y
 el strict convierte el primer pase en FALLO hasta que se quite el marker
 (el handoff obligatorio de T-27: promover bundle (20,28) → quitar marker →
-aserción viva).
+aserción viva). Para EVALUAR el candidato del gate de T-27 sin promover:
+`T26_MODEL_PATH=… T26_VECNORM_PATH=… pytest --runxfail …` (passthrough de
+`xfail` → PASSED = verde real).
 
 Decisiones del PPO en estado plano (protocolo T-23/T-25: position=0, canal de
 memoria 1,0, precio/atr de la última vela) — mismo harness de replays.
 """
 import json
+import os
 from pathlib import Path
 
 import gymnasium as gym
@@ -52,8 +55,15 @@ OBS = 20
 SELL, FLAT, BUY = -1, 0, +1
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "t26_dip_vs_trend.json"
-_MODEL = Path(__file__).parent.parent / "ml" / "ppo_trading_bot_v3.zip"
-_VECNORM = Path(__file__).parent.parent / "ml" / "ppo_trading_bot_v3_vec_norm.pkl"
+# T-27 (D3 pre-registrado): el gate puede apuntar el test al CANDIDATO sin
+# promoverlo (zip+vecnorm en retrain_artifacts/expN/) vía T26_MODEL_PATH /
+# T26_VECNORM_PATH. Default = bundle vigente (comportamiento sin cambios).
+# El contrato se deriva del ancho del bundle cargado → el mismo fixture sirve
+# para (20,25) hoy y (20,28) tras T-27.
+_MODEL = Path(os.environ.get("T26_MODEL_PATH") or
+              Path(__file__).parent.parent / "ml" / "ppo_trading_bot_v3.zip")
+_VECNORM = Path(os.environ.get("T26_VECNORM_PATH") or
+                Path(__file__).parent.parent / "ml" / "ppo_trading_bot_v3_vec_norm.pkl")
 
 
 class _DummyEnv(gym.Env):

@@ -84,10 +84,12 @@ class RetrainConfig:
     churn_friction_per_lot: float = 7.0  # ancla anti-churn (decisión Félix "fricción completa";
                                          # plan: fricción 7 €/lot) — parámetro de política,
                                          # NO coste de bróker (separado desde O-2)
-    reward_version: str = "v1"           # T-24 (2026-10-17): "v1" byte-idéntico (default)
-                                         # | "v2_align" («Sat-Align») — la activa el retrain
-                                         # pre-registrado T-27; eval y train comparten la MISMA
-                                         # versión (env_cfg → _evaluate_model los copia a ambos)
+    reward_version: str = "v2_align"     # T-27 (2026-10-17): ACTIVACIÓN PRE-REGISTRADA —
+                                         # flip del default "v1" (diseño T-24 §8: la activa el
+                                         # retrain único T-27; diff auditable, revertible si el
+                                         # gate cae — decisión de Félix). Eval y train comparten
+                                         # la MISMA versión (env_cfg → _evaluate_model los copia
+                                         # a ambos). Serve no lee reward_version: bundle intacto.
     n_epochs: int = 3                    # Epochs de entrenamiento (compatibilidad/auditoría)
     total_timesteps: int = 100_000      # PPO steps por retrain; 1.500 era insuficiente
     learning_rate: float = 3e-4
@@ -765,6 +767,14 @@ async def _do_retrain(trigger: str = "manual", symbol: str = TRAINING_SYMBOL) ->
     if len(candles) < 100:
         raise RuntimeError(f"[RETRAIN] No hay suficientes velas de {symbol}: {len(candles)}")
     df = _build_training_dataframe(candles)
+    # T-27 (D1 pre-registrado): trim del warm-up de canales de tendencia ANTES
+    # del snapshot → sha256 = df exacto que consumen train y gate.
+    df = _trim_trend_warmup(df)
+    if len(df) < 100:
+        raise RuntimeError(
+            f"[RETRAIN] Sólo {len(df)} filas tras trim de warm-up de {symbol} "
+            f"({len(candles)} velas): insuficiente para train+gate"
+        )
 
     # P3-2a: snapshot del df exacto que consume train+gate → reproducibilidad.
     snap = data_snapshot.save_snapshot(df, purpose="retrain")
@@ -863,10 +873,11 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int, symbol: str = TRAINING
         # canal 8º bars_since_close → obs (20,25). El eval de cada modelo
         # pisa este flag según el observation_space del modelo evaluado.
         memory_channel=True,
-        # T-22 (2026-10-16): el bloque de tendencia NO entra aún en el obs —
-        # su activación es el retrain PRE-REGISTRADO T-27 (obs (20,28)).
-        # Explícito para que el salto de contrato sea una línea revisable.
-        trend_features=False,
+        # T-22/T-27 (2026-10-17): ACTIVACIÓN PRE-REGISTRADA en el retrain
+        # único T-27 — el bloque de tendencia entra en el obs (candidato
+        # (20,28); el eval de cada modelo pisa este flag según su
+        # observation_space). Línea revisable = este diff; revert si gate cae.
+        trend_features=True,
         # T-24 (2026-10-17): versión de recompensa explícita igual que
         # trend_features — default "v1" inerte; T-27 lo cambia a "v2_align"
         # en LA MISMA línea revisable (eval y train heredan este env_cfg).
@@ -928,6 +939,36 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int, symbol: str = TRAINING
         report.holdout["candidate"]["reward"],
         "APROBADO" if decision.ok else "RECHAZADO", decision.reason,
     )
+
+    # T-27 (D3 pre-registrado): artefactos del candidato para el gate de
+    # aceptación (métricas 3-6) y para T-28 (métrica 7) SIN promover — bajo
+    # RETRAIN_REPORT_ONLY el modelo se pierde en memoria al retornar. Paths
+    # aparte del bundle activo (retrain_artifacts/): jamás tocan el sirviente.
+    def _jsonable(o):
+        return o.item() if hasattr(o, "item") else str(o)
+
+    artifact_dir = os.path.join(
+        os.path.dirname(model_path), "retrain_artifacts", f"exp{exp_id}"
+    )
+    os.makedirs(artifact_dir, exist_ok=True)
+    model.save(os.path.join(artifact_dir, "candidate.zip"))
+    train_env.save(os.path.join(artifact_dir, "candidate_vec_norm.pkl"))
+    with open(os.path.join(artifact_dir, "report.json"), "w") as fh:
+        json.dump({
+            "exp_id": exp_id,   # triggered_by vive en training_experiments
+            "symbol": symbol,
+            "obs_shape": list(getattr(model.observation_space, "shape", ())),
+            "cfg": {
+                "reward_version": cfg.reward_version,
+                "trend_features": env_cfg["trend_features"],
+                "total_timesteps": cfg.total_timesteps,
+                "warmup_trim_rows": WARMUP_TRIM_ROWS,
+                "rows": int(len(df)),
+            },
+            "gate": {"ok": decision.ok, "reason": decision.reason},
+            "walk_forward": report.to_dict(),
+        }, fh, indent=2, default=_jsonable)
+    logger.warning("[RETRAIN] Candidato + informe en %s", artifact_dir)
 
     if not decision.ok:
         logger.warning(
@@ -1088,6 +1129,25 @@ def _build_training_dataframe(candles: list) -> pd.DataFrame:
 
     df = pd.DataFrame(candles)
     return engineer_market_features(df)
+
+
+# T-27 (2026-10-17, decisión pre-registrada D1): filas de calentamiento de los
+# canales de tendencia (= TREND_FEATURE_WINDOW_MIN 224 − window 20). En ellas
+# dist_sma200/sma200_slope llevan relleno neutro 0.0 (SMA200 aún no formado).
+WARMUP_TRIM_ROWS = 204
+
+
+def _trim_trend_warmup(df: pd.DataFrame) -> pd.DataFrame:
+    """Recorta las primeras `WARMUP_TRIM_ROWS` filas y REINDEXA a 0..n-1.
+
+    Con `trend_features=True` esas filas serían estados falsos en el obs ("en
+    la media, pendiente plana") que el serve jamás emite (guarda
+    `TREND_FEATURE_WINDOW_MIN` velas) — el trim ALIGNA train con serve.
+    `reset_index(drop=True)` es OBLIGATORIO: `_index_real_outcomes` y el paso
+    del env indexan por posición; sin él, off-by-204. Aplicado ANTES del
+    snapshot para que sha256 = df exacto que consumen train y gate.
+    """
+    return df.iloc[WARMUP_TRIM_ROWS:].reset_index(drop=True)
 
 
 async def _log_retrain_event(event: str, data: dict, symbol: str = TRAINING_SYMBOL) -> None:
