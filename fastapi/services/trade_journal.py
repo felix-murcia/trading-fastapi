@@ -24,7 +24,7 @@ from db.connection import get_pool
 # T-02 (2026-10-15): el journal comparte el PRESUPUESTO de latencia del
 # camino unificado — el escalonamiento 45 s (backend) < 60 s (EA) del 8B
 # (b397353) nunca llegó aquí y el 100 % de los insights moría en timeout.
-from services.qwen_client import QWEN_TIMEOUT_UNIFIED
+from services.qwen_client import QWEN_TIMEOUT_UNIFIED, qwen_serialized
 
 logger = logging.getLogger(__name__)
 
@@ -108,27 +108,35 @@ async def _analyze_trade_async(
     sl_hit: bool,
     tp_hit: bool,
 ) -> None:
-    """Análisis asíncrono del trade con Qwen."""
-    async with JOURNAL_LOCK:
-        insight, confidence, regime, quality = await _query_qwen_trade_insight(
-            symbol=symbol,
-            direction=direction,
-            entry_time=entry_time,
-            exit_time=exit_time,
-            pnl=pnl,
-            pnl_pct=pnl_pct,
-            exit_reason=exit_reason,
-            sl_hit=sl_hit,
-            tp_hit=tp_hit,
+    """Análisis asíncrono del trade con Qwen.
+
+    G2-1 (2026-10-17): la llamada a Qwen corre FUERA de JOURNAL_LOCK —
+    QWEN_LOCK (concurrencia 1 del modelo) es siempre el lock más interno
+    (orden único de adquisición ⇒ sin deadlock). JOURNAL_LOCK queda sólo
+    para la escritura en BD: pasa de bloquear ~41 s (latencia del 8B) a
+    milisegundos. La serialización efectiva de las llamadas a Qwen la pone
+    QWEN_LOCK, no el lock del journal.
+    """
+    insight, confidence, regime, quality = await _query_qwen_trade_insight(
+        symbol=symbol,
+        direction=direction,
+        entry_time=entry_time,
+        exit_time=exit_time,
+        pnl=pnl,
+        pnl_pct=pnl_pct,
+        exit_reason=exit_reason,
+        sl_hit=sl_hit,
+        tp_hit=tp_hit,
+    )
+
+    if confidence < 0.5:
+        logger.info(
+            "[JOURNAL] Insight descartado (conf=%.2f < 0.5) trade=%d: %s",
+            confidence, trade_id, insight[:80]
         )
+        return
 
-        if confidence < 0.5:
-            logger.info(
-                "[JOURNAL] Insight descartado (conf=%.2f < 0.5) trade=%d: %s",
-                confidence, trade_id, insight[:80]
-            )
-            return
-
+    async with JOURNAL_LOCK:
         pool = get_pool()
         await pool.execute(
             """
@@ -140,10 +148,10 @@ async def _analyze_trade_async(
             trade_id, symbol, direction, pnl_pct, exit_reason,
             insight, confidence, regime, quality,
         )
-        logger.info(
-            "[JOURNAL] Insight guardado trade=%d: %s (conf=%.2f)",
-            trade_id, insight[:80], confidence
-        )
+    logger.info(
+        "[JOURNAL] Insight guardado trade=%d: %s (conf=%.2f)",
+        trade_id, insight[:80], confidence
+    )
 
 
 async def _query_qwen_trade_insight(
@@ -220,16 +228,17 @@ WIN with clean trend → higher, LOSS from chop or bad timing → lower"""
         # los insights en ReadTimeout (0 insights 14/10 13:40→15/10, 16
         # fallos/48 h). El journal NO está en el camino caliente de
         # decisión (fire-and-forget por cierre) → 45 s no aprieta nada.
-        async with httpx.AsyncClient(timeout=QWEN_TIMEOUT_UNIFIED) as client:
-            res = await client.post(QWEN_URL, json={
-                "messages": [
-                    {"role": "system", "content": "You are a quantitative trading analyst. Always respond in valid JSON."},
-                    {"role": "user", "content": prompt}
-                ],
-                "temperature": 0.2,
-                "max_tokens": 100,
-                "response_format": {"type": "json_object"},
-            })
+        async with qwen_serialized(f"insight-{symbol}"):
+            async with httpx.AsyncClient(timeout=QWEN_TIMEOUT_UNIFIED) as client:
+                res = await client.post(QWEN_URL, json={
+                    "messages": [
+                        {"role": "system", "content": "You are a quantitative trading analyst. Always respond in valid JSON."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": 0.2,
+                    "max_tokens": 100,
+                    "response_format": {"type": "json_object"},
+                })
     except (httpx.ConnectTimeout, httpx.TimeoutException, httpx.HTTPError) as exc:
         logger.warning("[JOURNAL] QWEN-INSIGHT conexión fallida: %s", exc)
         raise RuntimeError(f"[JOURNAL] QWEN-INSIGHT conexión fallida: {exc}") from exc

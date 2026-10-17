@@ -6,11 +6,13 @@ All functions return safe defaults on ANY failure (connection, HTTP != 200,
 malformed response) — Qwen nunca crashea /predict; el estado degradado se
 registra en QwenHealthState y lo reporta /pipeline/health (P1-6).
 """
+import asyncio
 import json
 import logging
 import os
 import re
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -137,6 +139,47 @@ QWEN_TEMPERATURE_UNIFIED = 0.4
 # en cada ciclo (fail-closed: veto de calidad 0). Presupuesto en escalera:
 # backend 45s < EA WebRequest 60s (mql5 §predict, v13.4).
 QWEN_TIMEOUT_UNIFIED = 45.0
+
+# ── G2-1 (Félix 2026-10-17): serialización global de Qwen — concurrencia 1 ────
+# Un SOLO request en vuelo contra el modelo, siempre. El lock vive DENTRO de
+# las funciones de entrada (query_qwen_unified / query_qwen_sltp_validator /
+# trade-insight) → todos los llamadores quedan serializados sin que tengan
+# que saberlo (cero acoplamiento con routers/). Orden único de adquisición:
+# aquí no se adquiere NINGÚN otro lock ⇒ no puede formarse ciclo ⇒ sin
+# deadlock (test: el path Qwen nunca corre bajo el lock del journal).
+# Métrica de cola: espera registrada en cada adquisición (INFO); WARNING si
+# supera QWEN_LOCK_WARN_S = 90 s = 2 × timeout unificado, el peor caso sano
+# con 2 símbolos apilados + un trade-insight — por encima hay apilamiento
+# anómalo (ciclos solapados más allá del presupuesto de 5 min/par).
+QWEN_LOCK = asyncio.Lock()
+QWEN_LOCK_WARN_S = 90.0
+
+
+@asynccontextmanager
+async def qwen_serialized(cycle_id: str):
+    """Sección crítica de red contra Qwen: 1 request en vuelo + métrica de cola.
+
+    Envuelve SÓLO el `client.post` (la latencia del modelo dentro del lock;
+    nunca parseo ni BD). Libera el lock en cualquier salida, incluida
+    excepción — la serialización es fail-closed: si algo falla, el lock NO
+    queda cogido. La métrica de cola se emite SIEMPRE en el logger de este
+    módulo (infraestructura del cliente, independiente del logger que pase
+    cada caller) — así /pipeline/health y los tests la ven en un solo sitio.
+    """
+    t0 = time.monotonic()
+    await QWEN_LOCK.acquire()
+    wait_s = time.monotonic() - t0
+    try:
+        if wait_s > QWEN_LOCK_WARN_S:
+            logger.warning(
+                "[%s] QWEN-LOCK wait=%.1fs > %.0fs — cola de Qwen apilada",
+                cycle_id, wait_s, QWEN_LOCK_WARN_S,
+            )
+        else:
+            logger.info("[%s] QWEN-LOCK wait=%.3fs", cycle_id, wait_s)
+        yield
+    finally:
+        QWEN_LOCK.release()
 
 
 def _reason_tokens(reason: str) -> frozenset:
@@ -458,13 +501,14 @@ async def query_qwen_unified(
     )
 
     try:
-        async with httpx.AsyncClient(timeout=QWEN_TIMEOUT_UNIFIED) as client:
-            res = await client.post(QWEN_URL, json={
-                "messages": messages,
-                "temperature": QWEN_TEMPERATURE_UNIFIED,
-                "max_tokens": 160,
-                "response_format": {"type": "json_object"},
-            })
+        async with qwen_serialized(cycle_id):
+            async with httpx.AsyncClient(timeout=QWEN_TIMEOUT_UNIFIED) as client:
+                res = await client.post(QWEN_URL, json={
+                    "messages": messages,
+                    "temperature": QWEN_TEMPERATURE_UNIFIED,
+                    "max_tokens": 160,
+                    "response_format": {"type": "json_object"},
+                })
     except (httpx.ConnectTimeout, httpx.TimeoutException, httpx.HTTPError) as exc:
         logger.warning("[%s] QWEN-UNIFIED connection failed: %s", cycle_id, repr(exc))
         _record_failure(f"connection: {repr(exc)[:120]}")
@@ -620,16 +664,17 @@ Reply EXACTLY JSON (no extra text):
 If both are OK, return the same values. If adjustment needed, propose sensible ones."""
 
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            res = await client.post(QWEN_URL, json={
-                "messages": [
-                    {"role": "system", "content": "You are a quantitative risk analyst. Always respond in valid JSON."},
-                    {"role": "user", "content": prompt}
-                ],
-                "temperature": 0.15,
-                "max_tokens": 150,
-                "response_format": {"type": "json_object"},
-            })
+        async with qwen_serialized(cycle_id):
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                res = await client.post(QWEN_URL, json={
+                    "messages": [
+                        {"role": "system", "content": "You are a quantitative risk analyst. Always respond in valid JSON."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": 0.15,
+                    "max_tokens": 150,
+                    "response_format": {"type": "json_object"},
+                })
     except (httpx.ConnectTimeout, httpx.TimeoutException, httpx.HTTPError) as exc:
         logger.warning("[%s] SLTP-VALIDATOR connection failed: %s", cycle_id, exc)
         _record_failure(f"connection: {repr(exc)[:120]}")
