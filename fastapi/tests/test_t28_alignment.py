@@ -6,6 +6,7 @@ fija sus valores exactos como guardia anti-deriva (cambio = nueva pre-registraci
 """
 import json
 import os
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
@@ -404,6 +405,103 @@ class TestRetrainGateT28:
         assert payload["reason"] == (
             "t28_alignment:insufficient_sample,entropy_below_threshold"
         )
+
+    @pytest.mark.asyncio
+    async def test_bootstrap_no_bundle_and_zero_rows_is_na_and_promotes(
+        self, tmp_path, monkeypatch,
+    ):
+        """T-28 opción A (orden Félix 2026-10-17): bootstrap de mundo nuevo.
+
+        Sin bundle previo (el modelo fresco sólo se guarda al promover) y con
+        0 ciclos auditados → la métrica 7 es N/A con `status` EXPLÍCITO (un
+        N/A jamás se confunde con un pase de la métrica) y el gate cae sólo
+        sobre las métricas 1-6 → promoción permitida. El caso contrapuesto
+        (sin bundle pero CON filas → rechazo estricto) lo cubre
+        test_t28_failure_rejects_even_with_wf_ok (n_window=300).
+        """
+        from tests.test_auto_retrain import TestDoRetrainPromotion
+        from services.model_registry import validate_bundle
+
+        ar, state, model_path, record_promo, reload_mock = (
+            TestDoRetrainPromotion._patch_common(monkeypatch, tmp_path)
+        )
+        monkeypatch.setattr(ar, "_evaluate_model", TestDoRetrainPromotion._fake_metrics)
+        # Lo que el gate real devuelve para un par nunca servido: 0 filas.
+        monkeypatch.setattr(ar, "alignment_gate", AsyncMock(return_value={
+            "window": T28_WINDOW, "n_window": 0, "n_neutral": 0, "n_unknown": 0,
+            "n_active": 0, "n_aligned": 0, "n_conflict": 0, "n_split": 0,
+            "agreement_rate": 0.0, "conflict_rate": 0.0, "split_rate": 0.0,
+            "joint_entropy_bits": 0.0, "sufficient": False, "ok": False,
+            "reasons": ["insufficient_sample"],
+        }))
+
+        # GBPUSD está listado (aunque enabled=false): entrenar el canario
+        # ANTES de activarlo es el flujo P3-3 — el gate N/A es su desbloqueo.
+        await ar._do_retrain(symbol="GBPUSD")
+
+        record_promo.assert_awaited_once()
+        reload_mock.assert_called()
+        assert state.last_retrain_time > 1.0
+
+        # El N/A queda certificado con SU status en el manifest del bundle
+        manifest = validate_bundle(model_path)
+        t28 = manifest["extra"]["t28_alignment"]
+        assert t28["ok"] is True
+        assert t28["status"] == "not_applicable_bootstrap"
+        assert t28["reasons"] == ["not_applicable_no_prior_bundle"]
+        assert t28["n_window"] == 0 and t28["n_active"] == 0
+
+        # …y en el evento de promoción (auditable, inequívoco)
+        ar._log_retrain_event.assert_awaited_once()
+        assert ar._log_retrain_event.await_args.args[0] == "retrain_promoted"
+        payload = ar._log_retrain_event.await_args.args[1]
+        assert payload["t28_alignment"]["status"] == "not_applicable_bootstrap"
+
+    @pytest.mark.asyncio
+    async def test_second_retrain_applies_strict_gate_even_with_zero_rows(
+        self, tmp_path, monkeypatch,
+    ):
+        """Transición N/A → estricto (opción A): el 1º retrain promueve con
+        N/A (mundo recién creado, sin bundle y sin ciclos); el 2º NO goza de
+        N/A aunque sigan 0 filas — hay bundle previo en disco ⇒ fail-closed
+        estricto. Un N/A jamás se vuelve costumbre."""
+        from tests.test_auto_retrain import TestDoRetrainPromotion
+
+        ar, state, model_path, record_promo, reload_mock = (
+            TestDoRetrainPromotion._patch_common(monkeypatch, tmp_path)
+        )
+        monkeypatch.setattr(ar, "_evaluate_model", TestDoRetrainPromotion._fake_metrics)
+        zero_rows = {
+            "window": T28_WINDOW, "n_window": 0, "n_neutral": 0, "n_unknown": 0,
+            "n_active": 0, "n_aligned": 0, "n_conflict": 0, "n_split": 0,
+            "agreement_rate": 0.0, "conflict_rate": 0.0, "split_rate": 0.0,
+            "joint_entropy_bits": 0.0, "sufficient": False, "ok": False,
+            "reasons": ["insufficient_sample"],
+        }
+        monkeypatch.setattr(ar, "alignment_gate", AsyncMock(return_value=zero_rows))
+        # El wf compararía candidato==baseline (métricas falsas deterministas)
+        # y rechazaría ANTES de T-28: este test aísla la rama 7, wf tiene los
+        # suyos (walk_forward.py intocado).
+        monkeypatch.setattr(
+            ar, "gate_walk_forward",
+            MagicMock(return_value=SimpleNamespace(
+                ok=True, reason="fake-wf-ok", details={"checks": {}},
+            )),
+        )
+
+        # 1er retrain: bootstrap (sin bundle + 0 filas) → N/A → promueve
+        await ar._do_retrain(symbol="GBPUSD")
+        record_promo.assert_awaited_once()
+        assert os.path.exists(model_path)  # bundle REAL en disco para el 2º
+
+        # 2º retrain: bundle previo + aún 0 filas → estricto, rechazado
+        record_promo.reset_mock()
+        await ar._do_retrain(symbol="GBPUSD")
+        record_promo.assert_not_awaited()
+        assert ar._log_retrain_event.await_args.args[0] == "retrain_rejected"
+        payload = ar._log_retrain_event.await_args.args[1]
+        assert payload["reason"] == "t28_alignment:insufficient_sample"
+        assert "status" not in payload["t28_alignment"]  # jamás un N/A disfrazado
 
     @pytest.mark.asyncio
     async def test_aligned_pair_promotes_and_certifies_t28(self, tmp_path, monkeypatch):

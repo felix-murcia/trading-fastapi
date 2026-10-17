@@ -948,7 +948,35 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int, symbol: str = TRAINING
     # retrain — ALINEACIÓN PPO↔LLM del par que SIRVE (ventana reciente de
     # ciclos auditados con juicio LLM existente). Fail-closed: muestra
     # insuficiente o error de cómputo = no promovible, con la causa explícita.
+    #
+    # T-28 opción A (orden Félix 2026-10-17): bootstrap de un mundo nuevo —
+    # un par SIN bundle previo (el modelo fresco sólo se guarda al promover,
+    # línea ~1070) y con 0 ciclos auditados no puede demostrar alineación
+    # porque jamás sirvió: la métrica 7 se marca N/A y el gate cae sólo sobre
+    # las métricas 1-6 (walk-forward + suelo absoluto + baseline), intactas.
+    # Cualquier fila >0 reactiva el fail-closed estricto — incluido «bundle
+    # borrado con historial vivo»: si hay muestra, se evalúa. El silencio de
+    # un EA vivo lo cubre predict_silence, no esta rama. Queda constancia
+    # explícita (status en report.json, manifest y eventos) para que N/A
+    # jamás se confunda con un pase de la métrica.
+    prior_bundle = os.path.exists(model_path)
     t28_alignment = await alignment_gate(symbol)
+    if not prior_bundle and t28_alignment.get("n_window", 0) == 0:
+        t28_alignment = {
+            "ok": True,
+            "status": "not_applicable_bootstrap",
+            "reasons": ["not_applicable_no_prior_bundle"],
+            "n_window": 0,
+            "n_active": 0,
+            "agreement_rate": None,
+            "conflict_rate": None,
+            "joint_entropy_bits": None,
+        }
+        logger.warning(
+            "[RETRAIN] T-28 N/A (bootstrap %s): sin bundle previo y 0 ciclos "
+            "auditados — gate sobre métricas 1-6; la alineación se aplicará "
+            "estricta desde el 2º retrain", symbol,
+        )
 
     # T-27 (D3 pre-registrado): artefactos del candidato para el gate de
     # aceptación (métricas 3-6) y para T-28 (métrica 7) SIN promover — bajo
