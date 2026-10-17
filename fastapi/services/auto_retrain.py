@@ -84,12 +84,13 @@ class RetrainConfig:
     churn_friction_per_lot: float = 7.0  # ancla anti-churn (decisión Félix "fricción completa";
                                          # plan: fricción 7 €/lot) — parámetro de política,
                                          # NO coste de bróker (separado desde O-2)
-    reward_version: str = "v2_align"     # T-27 (2026-10-17): ACTIVACIÓN PRE-REGISTRADA —
-                                         # flip del default "v1" (diseño T-24 §8: la activa el
-                                         # retrain único T-27; diff auditable, revertible si el
-                                         # gate cae — decisión de Félix). Eval y train comparten
-                                         # la MISMA versión (env_cfg → _evaluate_model los copia
-                                         # a ambos). Serve no lee reward_version: bundle intacto.
+    reward_version: str = "v1"           # T-27 REVERTIDO (2026-10-17, orden «revert T-27»):
+                                         # el gate del retrain único cayó (3/6) ⇒ el candidato
+                                         # «Sat-Align» queda invalidado y el default vuelve a
+                                         # "v1" byte-idéntico (antes: flip pre-registrado a
+                                         # "v2_align"). Eval y train siguen compartiendo la
+                                         # MISMA versión (env_cfg → _evaluate_model los copia
+                                         # a ambos). Serve no lee reward_version.
     n_epochs: int = 3                    # Epochs de entrenamiento (compatibilidad/auditoría)
     total_timesteps: int = 100_000      # PPO steps por retrain; 1.500 era insuficiente
     learning_rate: float = 3e-4
@@ -873,11 +874,11 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int, symbol: str = TRAINING
         # canal 8º bars_since_close → obs (20,25). El eval de cada modelo
         # pisa este flag según el observation_space del modelo evaluado.
         memory_channel=True,
-        # T-22/T-27 (2026-10-17): ACTIVACIÓN PRE-REGISTRADA en el retrain
-        # único T-27 — el bloque de tendencia entra en el obs (candidato
-        # (20,28); el eval de cada modelo pisa este flag según su
-        # observation_space). Línea revisable = este diff; revert si gate cae.
-        trend_features=True,
+        # T-22/T-27: el bloque de tendencia NO entra en el obs — el retrain
+        # pre-registrado T-27 (2026-10-17) lo activó y su GATE CAYÓ (3/6) →
+        # revert por orden de Félix («revert T-27»). Línea revisable: para
+        # re-activar (20,28) hace falta un nuevo experimento pre-registrado.
+        trend_features=False,
         # T-24 (2026-10-17): versión de recompensa explícita igual que
         # trend_features — default "v1" inerte; T-27 lo cambia a "v2_align"
         # en LA MISMA línea revisable (eval y train heredan este env_cfg).

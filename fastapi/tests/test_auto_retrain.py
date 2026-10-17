@@ -680,9 +680,10 @@ class TestDoRetrainPromotion:
     @pytest.mark.asyncio
     async def test_candidate_artifacts_saved_for_t27_gate(self, tmp_path, monkeypatch):
         """T-27 (D3 pre-registrado): cada corrida deja el candidato en
-        `retrain_artifacts/exp<id>/` (zip + vecnorm + informe) — el gate de
-        aceptación de T-27 (métricas 3-6) y T-28 (métrica 7) evalúan SIN
-        promover; bajo RETRAIN_REPORT_ONLY el modelo se pierde en memoria."""
+        `retrain_artifacts/exp<id>/` (zip + vecnorm + informe) — material de
+        auditoría de CICLO (bajo RETRAIN_REPORT_ONLY el modelo se pierde en
+        memoria al retornar). El eco del report refleja la config que corrió:
+        hoy defaults revertidos (v1 / trend off / obs (20,25))."""
         ar, state, model_path, *_ = self._patch_common(monkeypatch, tmp_path)
         monkeypatch.setattr(ar, "_evaluate_model", self._fake_metrics)
 
@@ -696,11 +697,11 @@ class TestDoRetrainPromotion:
         n_eng = len(_build_training_dataframe(_candles(800)))   # pre-trim
         assert payload["exp_id"] == 42
         assert payload["symbol"] == "EURUSD"
-        assert payload["obs_shape"] == [20, 28]   # T-27: trend + memoria
-        # Eco de la activación pre-registrada (lo que corrió, auditable)
-        assert payload["cfg"]["reward_version"] == "v2_align"
-        assert payload["cfg"]["trend_features"] is True
-        assert payload["cfg"]["warmup_trim_rows"] == 204
+        assert payload["obs_shape"] == [20, 25]   # defaults revertidos: sin tendencia
+        # Eco de la config que corrió (auditable; refleja el estado vigente)
+        assert payload["cfg"]["reward_version"] == "v1"
+        assert payload["cfg"]["trend_features"] is False
+        assert payload["cfg"]["warmup_trim_rows"] == 204   # trim D1 se mantiene
         assert payload["cfg"]["total_timesteps"] == RetrainConfig.total_timesteps
         assert payload["cfg"]["rows"] == n_eng - 204   # snapshot recortado (D1)
         assert payload["gate"]["ok"] is True
@@ -709,8 +710,11 @@ class TestDoRetrainPromotion:
 
 
 class TestT27Activation:
-    """T-27 (2026-10-17): activación pre-registrada — trim de warm-up y
-    flips de las dos líneas revisables (diseño T-22 §/T-24 §8)."""
+    """T-27 (2026-10-17): mecanismos del retrain pre-registrado.
+
+    Tras el revert ordenado («revert T-27», gate 3/6 caído) quedan vigentes:
+    el trim de warm-up (D1) y los artefactos de candidato (D3); las dos
+    líneas revisables (reward/trend) vuelven a su default inerte."""
 
     def test_trim_drops_204_rows_and_reindexes(self):
         from services.auto_retrain import (
@@ -740,12 +744,14 @@ class TestT27Activation:
         snap = src.index("save_snapshot(df")
         assert build < trim < snap
 
-    def test_revisable_lines_flipped(self):
+    def test_revisable_lines_at_reverted_defaults(self):
+        # Estado post-revert (orden «revert T-27» 2026-10-17): gate cayó →
+        # ambas líneas revisables de vuelta en su default inerte.
         from pathlib import Path
         src = (Path(__file__).resolve().parent.parent
                / "services" / "auto_retrain.py").read_text(encoding="utf-8")
-        assert "trend_features=True" in src
-        assert 'reward_version: str = "v2_align"' in src
+        assert "trend_features=False" in src
+        assert 'reward_version: str = "v1"' in src
 
 
 class TestExperimentLifecycle:
