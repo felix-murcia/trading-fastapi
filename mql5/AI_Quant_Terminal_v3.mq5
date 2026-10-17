@@ -6,10 +6,10 @@ Terminal de Ejecución y Telemetría para Cerebro Autónomo (FastAPI + PPO v3).
 - Rol del Servidor: Decisión direccional, dimensionamiento de lotes, SL, TP y gestión de riesgo.
 */
 #property copyright "AI Quant Terminal v3"
-#property version   "13.6"
+#property version   "13.7"
 #property strict
 
-#define EA_VERSION "13.6"
+#define EA_VERSION "13.7"
 
 #include <Trade\Trade.mqh>
 
@@ -25,6 +25,12 @@ input string FastAPI_URL    = "http://127.0.0.1:8090"; // URL del servidor FastA
 input string InternalToken  = "YOUR_INTERNAL_TOKEN";  // Token de autenticación
 input bool   EnableAI       = true;                    // Habilitar operativa por IA
 input ulong  MagicNumber    = 90001;                   // Identificador de órdenes
+// G2-2 (2026-10-17): escalonado de sondeo por INSTANCIA (mundos separados
+// por par): EURUSD 0 → poll en el 1er tick tras apertura M5 (:00/:05);
+// GBPUSD 120 → :02/:07 ⇒ ≥2 s entre ciclos de los dos EA. La barra NO se
+// consume hasta cumplirse el desfase. Con 0, la condición nunca cumple
+// (TimeCurrent()-barra ≥ 0) ⇒ byte-idéntico al comportamiento previo.
+input int    PollOffsetSeconds = 0;                    // Retardo del sondeo tras apertura M5 (s; 0 = 1er tick)
 
 input group "=== Trailing Stop ==="
 input bool   EnableTrailing  = true;                    // Activar trailing stop
@@ -290,6 +296,10 @@ void OnTick()
    // Ejecutar exclusivamente en la apertura de una nueva barra M5
    datetime currentBar = iTime(Symbol(), PERIOD_M5, 0);
    if(currentBar == lastCheckedBar) return;
+   // G2-2: desfase de sondeo por instancia — la barra NO se consume hasta
+   // cumplirse el offset (con 0 la condición es siempre falsa ⇒ idéntico
+   // al gate clásico de 1er tick tras la apertura).
+   if(TimeCurrent() - currentBar < PollOffsetSeconds) return;
    lastCheckedBar = currentBar;
 
    if(!EnableAI || MQLInfoInteger(MQL_TESTER)) return;

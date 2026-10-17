@@ -48,14 +48,16 @@ class TestCloseOutbox:
         src = _ea_source()
         assert "OUTBOX_MAX_PER_FLUSH" in src, "Falta límite de reintentos por ciclo"
 
-    def test_ea_version_bumped_to_13_6(self):
+    def test_ea_version_bumped_to_13_7(self):
         src = _ea_source()
         # v13.5: Safe-4 (Félix 2026-10-15) — lock +SL_LockSafetyNetEur
         # (4€) antes de 1R; breakeven deja de moverse a la entrada tal cual.
         # v13.6: se elimina un ``` suelto (artefacto markdown) que rompía la
         # compilación MQL5 — A2 (cierre de ficheros pendientes, 2026-10-17).
-        assert re.search(r'#property\s+version\s+"13\.6"', src), "Falta bump a 13.6"
-        assert re.search(r'#define\s+EA_VERSION\s+"13\.6"', src)
+        # v13.7: G2-2 — input PollOffsetSeconds (escalonado de sondeo por
+        # instancia; EURUSD :00/:05 vs GBPUSD :02/:07).
+        assert re.search(r'#property\s+version\s+"13\.7"', src), "Falta bump a 13.7"
+        assert re.search(r'#define\s+EA_VERSION\s+"13\.7"', src)
 
     def test_ea_filters_opening_deals_v13_2(self):
         # v13.2: OnTradeTransaction descarta DEAL_ENTRY_IN — el deal de
