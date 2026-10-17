@@ -237,20 +237,20 @@ class TestAggregateExposure:
         g = fresh.get_risk_guardian("EURUSD")
         g.set_daily_start(1000.0)
 
-        ok, reason = g.can_open_position(1000.0, open_positions=0, total_open_positions=5)
+        ok, reason = g.can_open_position(1000.0, open_positions=0, total_open_positions=5, total_risk_eur=0.0, same_dir_open=0)
         assert ok is False
         assert reason == "MAX_TOTAL_POSITIONS 5 reached"  # settings.max_total_positions=5
 
     def test_below_caps_allows(self, fresh):
         g = fresh.get_risk_guardian("EURUSD")
         g.set_daily_start(1000.0)
-        ok, _ = g.can_open_position(1000.0, open_positions=4, total_open_positions=4)
+        ok, _ = g.can_open_position(1000.0, open_positions=4, total_open_positions=4, total_risk_eur=0.0, same_dir_open=0)
         assert ok is True
 
     def test_pair_cap_still_applies_first(self, fresh):
         g = fresh.get_risk_guardian("EURUSD")
         g.set_daily_start(1000.0)
-        ok, reason = g.can_open_position(1000.0, open_positions=5, total_open_positions=5)
+        ok, reason = g.can_open_position(1000.0, open_positions=5, total_open_positions=5, total_risk_eur=0.0, same_dir_open=0)
         assert ok is False and "MAX_POSITIONS" in reason  # cupo del par antes que el agregado
 
     def test_check_risk_requires_total_explicitly(self, fresh):

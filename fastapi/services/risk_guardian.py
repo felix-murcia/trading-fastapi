@@ -153,7 +153,8 @@ class RiskGuardian:
         return None
 
     def can_open_position(
-        self, current_equity: float, open_positions: int, *, total_open_positions: int
+        self, current_equity: float, open_positions: int, *, total_open_positions: int,
+        total_risk_eur: float, same_dir_open: int
     ) -> tuple[bool, str]:
         """
         Retorna (True, "") si puede abrir posición, o (False, razón) si no.
@@ -161,6 +162,9 @@ class RiskGuardian:
         `open_positions` = posiciones de ESTE par; `total_open_positions` = de
         TODA la cuenta (todas las estrategias y pares) — exigido, sin default:
         un call sin exposición agregada no puede pasar en silencio.
+        `total_risk_eur` = riesgo-1R agregado de la cuenta en EUR (G2-5/D2).
+        `same_dir_open` = posiciones abiertas en la MISMA dirección que la
+        propuesta (G2-5/D3). Ambos exigidos sin default (misma razón).
         """
         # Check equity limits
         reason = self.check_equity(current_equity)
@@ -179,6 +183,33 @@ class RiskGuardian:
             reason = f"MAX_TOTAL_POSITIONS {total_limit} reached"
             logger.warning("[RISK-GUARDIAN] %s (abiertas en cuenta)", reason)
             return False, reason
+
+        # G2-5/D3 (orden Félix 2026-10-17, canario 4): tope de posiciones MISMA
+        # DIRECCIÓN en la cuenta — EURUSD y GBPUSD comparten factor USD
+        # (ρ≈0.7-0.9); sin esta capa, N mismos largos = exposición USD doble
+        # sin freno. 0 = desactivado (config-driven, sin branching por símbolo).
+        same_dir_limit = settings.max_total_same_dir_positions
+        if same_dir_limit > 0 and same_dir_open >= same_dir_limit:
+            reason = f"SAME_DIR_LIMIT {same_dir_limit} reached"
+            logger.warning(
+                "[RISK-GUARDIAN] %s (%d abiertas en la misma dirección)",
+                reason, same_dir_open,
+            )
+            return False, reason
+
+        # G2-5/D2 (orden Félix 2026-10-17, canario 0.09): tope de RIESGO-1R
+        # AGREGADO en EUR — el conteo de posiciones no distingue 0.01 de
+        # 0.50 lot; esta capa mide el dinero realmente en riesgo. None = off.
+        risk_cap_pct = settings.max_total_risk_pct
+        if risk_cap_pct is not None and current_equity > 0:
+            budget = current_equity * risk_cap_pct
+            if total_risk_eur >= budget:
+                reason = (
+                    f"MAX_TOTAL_RISK {total_risk_eur:.2f} >= "
+                    f"{budget:.2f} EUR ({risk_cap_pct:.1%} del equity)"
+                )
+                logger.warning("[RISK-GUARDIAN] %s", reason)
+                return False, reason
 
         return True, ""
 
@@ -267,10 +298,15 @@ def set_daily_start(equity: float):
 
 def check_risk(
     equity: float, open_positions: int, *, total_open_positions: int,
+    total_risk_eur: float, same_dir_open: int,
     symbol: str = LEGACY_SYMBOL
 ) -> tuple[bool, str]:
+    """G2-5 (D2/D3, orden Félix 2026-10-17): `total_risk_eur` y `same_dir_open`
+    exigidos SIN default, como `total_open_positions` desde P2-4 — un call sin
+    la exposición completa no puede pasar en silencio."""
     return get_risk_guardian(symbol).can_open_position(
-        equity, open_positions, total_open_positions=total_open_positions
+        equity, open_positions, total_open_positions=total_open_positions,
+        total_risk_eur=total_risk_eur, same_dir_open=same_dir_open,
     )
 
 

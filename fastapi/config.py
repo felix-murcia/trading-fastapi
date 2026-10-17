@@ -13,6 +13,14 @@ class Settings(BaseSettings):
     min_volume: float = 0.01
     max_volume: float = 0.50
     max_total_positions: int = 5   # P2-4: exposición agregada de TODA la cuenta (todas las estrategias y pares)
+    # G2-5 (orden Félix 2026-10-17, canario 0.09 vía .env): tope de RIESGO-1R
+    # AGREGADO en EUR — el conteo no distingue 0.01 de 0.50 lot, esta capa sí.
+    # None = desactivado (comportamiento previo byte-idéntico).
+    max_total_risk_pct: float | None = None
+    # G2-5/D3 (canario 4 vía .env): tope de posiciones MISMA DIRECCIÓN en la
+    # cuenta — corta el apalancamiento del factor USD compartido entre pares
+    # correlacionados (EURUSD/GBPUSD ρ≈0.7-0.9). 0 = desactivado.
+    max_total_same_dir_positions: int = 0
     ppo_risk_pct: float = 0.03        # P2-2: tope de riesgo por trade del PPO (fracción del equity)
     order_max_age_hours: int = 48
     simple_pipeline_enabled: bool = True

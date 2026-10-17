@@ -27,7 +27,7 @@ class TestDailyLossLimit:
         g = RiskGuardian(max_positions=5, daily_loss_pct=5.0)
         g.set_daily_start(1000.0)
 
-        allowed, reason = g.can_open_position(950.0, open_positions=0, total_open_positions=0)
+        allowed, reason = g.can_open_position(950.0, open_positions=0, total_open_positions=0, total_risk_eur=0.0, same_dir_open=0)
 
         assert allowed is False
         assert "DAILY LOSS LIMIT 5.0%" in reason
@@ -58,8 +58,8 @@ class TestMaxPositions:
         g = RiskGuardian(max_positions=3, daily_loss_pct=5.0)
         g.set_daily_start(1000.0)
 
-        assert g.can_open_position(1000.0, open_positions=2, total_open_positions=2) == (True, "")
-        allowed, reason = g.can_open_position(1000.0, open_positions=3, total_open_positions=3)
+        assert g.can_open_position(1000.0, open_positions=2, total_open_positions=2, total_risk_eur=0.0, same_dir_open=0) == (True, "")
+        allowed, reason = g.can_open_position(1000.0, open_positions=3, total_open_positions=3, total_risk_eur=0.0, same_dir_open=0)
         assert allowed is False
         assert reason == "MAX_POSITIONS 3 reached"
 
@@ -67,7 +67,7 @@ class TestMaxPositions:
         g = RiskGuardian(max_positions=3, daily_loss_pct=5.0)
         g.set_daily_start(1000.0)
 
-        allowed, reason = g.can_open_position(900.0, open_positions=9, total_open_positions=9)
+        allowed, reason = g.can_open_position(900.0, open_positions=9, total_open_positions=9, total_risk_eur=0.0, same_dir_open=0)
         assert allowed is False
         assert "DAILY LOSS" in reason  # chequeo de equity primero
 
@@ -144,8 +144,8 @@ class TestGlobalWrapper:
         g.account.daily_start_equity = 0.0
         g.account.peak_equity = 0.0
 
-        assert check_risk(1000.0, open_positions=0, total_open_positions=0) == (True, "")
-        allowed, reason = check_risk(1000.0, open_positions=g.state.max_positions + 1, total_open_positions=1)
+        assert check_risk(1000.0, open_positions=0, total_open_positions=0, total_risk_eur=0.0, same_dir_open=0) == (True, "")
+        allowed, reason = check_risk(1000.0, open_positions=g.state.max_positions + 1, total_open_positions=1, total_risk_eur=0.0, same_dir_open=0)
         assert allowed is False
         assert "MAX_POSITIONS" in reason
 

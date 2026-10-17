@@ -56,10 +56,10 @@ class TestGuardiansPerPair:
 
     def test_check_risk_routes_to_pair_guardian(self, fresh_risk):
         fresh_risk.get_risk_guardian("GBPUSD").state.max_positions = 0
-        ok, reason = fresh_risk.check_risk(1000.0, 1, total_open_positions=1, symbol="GBPUSD")
+        ok, reason = fresh_risk.check_risk(1000.0, 1, total_open_positions=1, total_risk_eur=0.0, same_dir_open=0, symbol="GBPUSD")
         assert ok is False and "MAX_POSITIONS" in reason
         # EURUSD NO hereda la decisión de GBPUSD
-        ok_eu, _ = fresh_risk.check_risk(1000.0, 1, total_open_positions=1, symbol="EURUSD")
+        ok_eu, _ = fresh_risk.check_risk(1000.0, 1, total_open_positions=1, total_risk_eur=0.0, same_dir_open=0, symbol="EURUSD")
         assert ok_eu is True
 
     def test_baseline_seeds_late_guardian(self, fresh_risk):

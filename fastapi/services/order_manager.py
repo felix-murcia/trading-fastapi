@@ -92,6 +92,61 @@ async def mark_order_filled(symbol: str, order_type: str) -> int | None:
     return row["id"]
 
 
+async def _total_risk_eur(open_all: list[dict], equity: float) -> tuple[float, str]:
+    """G2-5/D2 (orden Félix 2026-10-17): riesgo-1R agregado de las posiciones
+    abiertas de la cuenta, en EUR (moneda de la cuenta).
+
+    Convenio B1: USD→EUR dividiendo por el precio EURUSD — lo mismo que hace
+    el bróker con el P/L flotante (posición_sizing.py comentario §61-69).
+
+    Fail-closed en dos niveles:
+    - Posición sin SL o símbolo sin convención de pip → se cuenta a su
+      MÁXIMO teórico (equity × ppo_risk_pct) + WARNING — jamás se infraestima
+      la exposición.
+    - Sin precio EURUSD (feed caído) → no se puede medir en EUR ⇒ caller
+      bloquea la entrada con reason `RISK_RATE_UNAVAILABLE` (explícito, no
+      silencioso).
+    """
+    if not open_all:
+        return 0.0, ""
+    from services.mt5_client import get_candles
+    from services.position_sizing import (
+        PIP_SIZE, is_supported, pip_value_per_lot,
+    )
+    rate = 0.0
+    try:
+        # H1×1 probado en el endpoint (M1 no verificado): para conversión de
+        # riesgo, el cierre H1 más reciente tiene precisión de sobra.
+        rows = await get_candles("EURUSD", "H1", 1)
+        if rows:
+            rate = float(rows[-1]["close"])
+    except Exception as exc:   # logueado + bloqueo explícito (no silencioso)
+        logger.warning(
+            "[RISK] G2-5: EURUSD inaccesible para conversión USD→EUR: %r", exc
+        )
+        rate = 0.0
+    if rate <= 0:
+        return 0.0, "RISK_RATE_UNAVAILABLE"
+
+    risk_eur = 0.0
+    worst_case = equity * settings.ppo_risk_pct
+    for p in open_all:
+        sym = str(p.get("symbol", ""))
+        vol = float(p.get("volume", 0) or 0)
+        entry = float(p.get("price", 0) or 0)
+        sl = float(p.get("sl", 0) or 0)
+        if not is_supported(sym) or sl <= 0 or entry <= 0 or vol <= 0:
+            logger.warning(
+                "[RISK] G2-5: %s sin SL o sin convención de pip — riesgo "
+                "contado al máximo teórico %.2f EUR", sym, worst_case,
+            )
+            risk_eur += worst_case
+            continue
+        pips = abs(entry - sl) / PIP_SIZE[sym]
+        risk_eur += pips * pip_value_per_lot(sym, entry) * vol / rate
+    return risk_eur, ""
+
+
 async def prepare(req: OrderPrepareRequest) -> OrderPrepareResponse:
     pool = get_pool()
 
@@ -133,9 +188,28 @@ async def prepare(req: OrderPrepareRequest) -> OrderPrepareResponse:
         # P2-4: exposición AGREGADA de la cuenta (todas las estrategias y
         # pares) — un límite que ninguna estrategia puede rebasar sola.
         total_open = len(open_all)
+        # G2-5 (orden Félix 2026-10-17, D2/D3): el guardian recibe SIEMPRE la
+        # exposición completa (sin defaults). D3: el `type` de las posiciones
+        # del MCP llega en lowercase ("buy"/"sell"); el request, uppercase.
+        same_dir_open = sum(
+            1 for p in open_all
+            if str(p.get("type", "")).upper() == str(req.type).upper()
+        )
+        if settings.max_total_risk_pct is not None:
+            # D2 activo (canario 0.09): medir el riesgo-1R agregado en EUR.
+            total_risk_eur, risk_err = await _total_risk_eur(
+                open_all, acct["equity"]
+            )
+            if risk_err:
+                # No se pudo medir la exposición ⇒ no se añade (fail-closed).
+                await _audit(req.cycle_id, "order_rejected", {"reason": f"risk_guardian_blocked:{risk_err}", "symbol": req.symbol})
+                return _reject(risk_err)
+        else:
+            total_risk_eur = 0.0
         can_open, reason = check_risk(
             acct["equity"], open_count,
-            total_open_positions=total_open, symbol=req.symbol,
+            total_open_positions=total_open, total_risk_eur=total_risk_eur,
+            same_dir_open=same_dir_open, symbol=req.symbol,
         )
         # P2-4: persiste baseline/racha si este ciclo los modificó (sin dirty
         # no hay I/O). Flush también cuando el guardián bloquea: la alerta

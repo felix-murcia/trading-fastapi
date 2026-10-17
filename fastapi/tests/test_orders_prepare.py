@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi.testclient import TestClient
 
 import config
+import services.order_manager as order_manager
 from main import app
 
 TOKEN = {"x-internal-token": "test-token", "x-cycle-id": "gate-test"}
@@ -103,8 +104,8 @@ def _prepare(payload, *, fetchrow=None, risk=(True, ""), fetchval=42, headers=No
 
 def _ea_source() -> str:
     candidates = (
-        "/mql5/AI_Quant_Terminal_v3.mq5",  # Docker: volumen de solo lectura
-        os.path.join(os.path.dirname(__file__), "..", "..", "mql5", "AI_Quant_Terminal_v3.mq5"),
+        "/mql5/AI_Quant_Terminal_EURUSD.mq5",  # Docker: volumen de solo lectura
+        os.path.join(os.path.dirname(__file__), "..", "..", "mql5", "AI_Quant_Terminal_EURUSD.mq5"),
     )
     for path in candidates:
         if os.path.exists(path):
@@ -262,3 +263,62 @@ class TestPairAllocationCeiling:
         # 100% (default) → techo idéntico al global de siempre: sin cambio
         response, _ = _prepare(_order(volume=0.50))
         assert response.json()["approved"] is True
+
+
+class TestG25RiskWiring:
+    """G2-5 (orden Félix 2026-10-17): exposición D2/D3 cableada en prepare.
+
+    - D2 on: el riesgo-1R agregado (EUR, convenio B1 vía EURUSD) viaja
+      explícito en check_risk; sin precio EURUSD → RISK_RATE_UNAVAILABLE.
+    - D3: same_dir_open cuenta posiciones de la MISMA dirección (type del
+      MCP en lowercase; el request, uppercase).
+
+    Nota de aislamiento: el parche va ANclado al objeto `settings` que
+    order_manager importó a nivel de módulo — test_config.py hace
+    importlib.reload(config), y sólo parchear config.settings dejaría el
+    objeto viejo intacto (fallo detectado en suite completa).
+    """
+
+    def test_same_dir_and_risk_reach_guardian(self, monkeypatch):
+        monkeypatch.setattr(order_manager.settings, "max_total_risk_pct", 0.09)
+        positions = {"open": [
+            {"symbol": "EURUSD", "type": "buy",  "volume": 0.10,
+             "price": 1.3300, "sl": 1.3250},
+            {"symbol": "GBPUSD", "type": "sell", "volume": 0.10,
+             "price": 1.3400, "sl": 1.3450},
+        ]}
+        with patch("services.mt5_client.get_candles",
+                   AsyncMock(return_value=[{"close": 1.33}])):
+            response, pool = _prepare(_order(type="BUY"), positions=positions)
+        assert response.json()["approved"] is True
+        args = pool.risk_check.call_args
+        # D3: sólo la EURUSD buy comparte dirección con la petición
+        assert args.kwargs["same_dir_open"] == 1
+        # D2: 50 pips × 10 USD/pip/lote × 0.10 lot / 1.33 por posición
+        assert abs(args.kwargs["total_risk_eur"] - 2 * 50.0 / 1.33) < 1e-6
+
+    def test_rate_unavailable_rejects_order(self, monkeypatch):
+        monkeypatch.setattr(order_manager.settings, "max_total_risk_pct", 0.09)
+        positions = {"open": [
+            {"symbol": "EURUSD", "type": "buy", "volume": 0.10,
+             "price": 1.3300, "sl": 1.3250},
+        ]}
+        with patch("services.mt5_client.get_candles",
+                   AsyncMock(side_effect=RuntimeError("feed caído"))):
+            response, pool = _prepare(_order(), positions=positions)
+        assert response.json()["approved"] is False
+        assert "RISK_RATE_UNAVAILABLE" in response.json()["rejection_reason"]
+        pool.risk_check.assert_not_called()  # no se mide ⇒ no se decide
+
+    def test_d2_off_skips_rate_fetch(self, monkeypatch):
+        # default None → sin llamada a get_candles (cero cambio de comportamiento)
+        monkeypatch.setattr(order_manager.settings, "max_total_risk_pct", None)
+        positions = {"open": [
+            {"symbol": "EURUSD", "type": "buy", "volume": 0.10,
+             "price": 1.3300, "sl": 1.3250},
+        ]}
+        with patch("services.mt5_client.get_candles",
+                   AsyncMock(side_effect=AssertionError("no debe llamarse"))):
+            response, pool = _prepare(_order(), positions=positions)
+        assert response.json()["approved"] is True
+        assert pool.risk_check.call_args.kwargs["total_risk_eur"] == 0.0
