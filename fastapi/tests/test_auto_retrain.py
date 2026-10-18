@@ -757,12 +757,18 @@ class TestT27Activation:
 
     def test_revisable_lines_at_reverted_defaults(self):
         # Estado post-revert (orden «revert T-27» 2026-10-17): gate cayó →
-        # ambas líneas revisables de vuelta en su default inerte.
+        # ambas líneas revisables en su default inerte. T-30 (orden
+        # 2026-10-17) re-línea trend_features a la bandera de config: el
+        # contrato vivo (20,25) depende de que su default siga OFF — se
+        # afianza en las DOS fuentes (wiring + default de config).
         from pathlib import Path
-        src = (Path(__file__).resolve().parent.parent
-               / "services" / "auto_retrain.py").read_text(encoding="utf-8")
-        assert "trend_features=False" in src
+        root = Path(__file__).resolve().parent.parent
+        src = (root / "services" / "auto_retrain.py").read_text(encoding="utf-8")
         assert 'reward_version: str = "v1"' in src
+        assert "trend_features=settings.higher_tf_features" in src
+        assert "higher_tf_features=settings.higher_tf_features" in src
+        cfg_src = (root / "config.py").read_text(encoding="utf-8")
+        assert "higher_tf_features: bool = False" in cfg_src
 
 
 class TestExperimentLifecycle:

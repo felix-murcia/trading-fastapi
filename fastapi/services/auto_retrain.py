@@ -616,6 +616,7 @@ def _evaluate_model(model, df: pd.DataFrame, env_cfg: dict, obs_rms=None) -> dic
     from ml.trading_env_v2 import (
         EXTRA_STATE_FEATURES,
         FOREX_MARKET_FEATURE_COUNT as _MARKET_FEATURE_COUNT,
+        HIGHER_TF_MARKET_FEATURES,
         TREND_MARKET_FEATURES,
         ForexTradingEnvV2,
         derive_obs_contract,
@@ -628,21 +629,27 @@ def _evaluate_model(model, df: pd.DataFrame, env_cfg: dict, obs_rms=None) -> dic
 
     # T-22: contrato por ancho vía derive_obs_contract — MISMA fuente que el
     # serve (routers.ai.load_inference_artifacts): trend_features (obs 27/28)
-    # y memory_channel (obs 25/28) deciden igual en ambos lados. Contrato
-    # desconocido = RuntimeError (sin degradación silenciosa).
+    # y memory_channel (obs 25/28) deciden igual en ambos lados. T-30: el
+    # 3er elemento (higher_tf_features, obs 31/32) se deriva del MISMO ancho
+    # y el df de evaluación ya trae las columnas H4/D1 unidas (mismo join que
+    # train). Contrato desconocido = RuntimeError (sin degradación silenciosa).
     obs_shape = tuple(getattr(getattr(model, "observation_space", None), "shape", ()))
     obs_width = obs_shape[-1] if len(obs_shape) == 2 else None
     contract = derive_obs_contract(obs_width)
     if contract is None:
         base_width = _MARKET_FEATURE_COUNT + EXTRA_STATE_FEATURES
         trend_width = base_width + len(TREND_MARKET_FEATURES)
+        hf_width = trend_width + len(HIGHER_TF_MARKET_FEATURES)
         raise RuntimeError(
             f"[RETRAIN] Contrato de observación desconocido: {obs_shape} "
             f"(esperado {base_width} pre-memoria, {base_width + 1} con "
-            f"memoria, {trend_width} trend o {trend_width + 1} trend+memoria)"
+            f"memoria, {trend_width} trend, {trend_width + 1} trend+memoria, "
+            f"{hf_width} T-30 o {hf_width + 1} T-30+memoria)"
             " — no se evalúa"
         )
-    eval_cfg["trend_features"], eval_cfg["memory_channel"] = contract
+    (eval_cfg["trend_features"],
+     eval_cfg["higher_tf_features"],
+     eval_cfg["memory_channel"]) = contract
 
     dummy = DummyVecEnv([lambda: ForexTradingEnvV2(**eval_cfg)])
     if obs_rms is not None:
@@ -771,6 +778,37 @@ async def _do_retrain(trigger: str = "manual", symbol: str = TRAINING_SYMBOL) ->
     if len(candles) < 100:
         raise RuntimeError(f"[RETRAIN] No hay suficientes velas de {symbol}: {len(candles)}")
     df = _build_training_dataframe(candles)
+    # T-30 (orden Félix 2026-10-17, pre-registrado §3): con el flag on se
+    # fetchean las velas H4/D1 con lookback suficiente (≥250 barras de
+    # formación del SMA200 ANTES del primer H1 de la ventana: sin ellas la
+    # primera fila ya tendría canal) y se unen los 4 canales por asof de
+    # vela CERRADA. Sin pérdida de filas (el trim sigue en 204+19) y cero
+    # NaN tolerados: un feed que no cubre la ventana es error explícito —
+    # nunca columnas de relleno en el snapshot del candidato.
+    if settings.higher_tf_features:
+        lookback_h1 = cfg.lookback_for(symbol)
+        # H4: ≈lookback/4 barras dentro de la ventana (horas de trading) +
+        # 250 de formación + margen; D1: la proporción diaria es ≈23 barras
+        # H1/día — el +500 absorbe fines de semana y festivos.
+        h4 = await _fetch_historical_candles(
+            symbol=symbol, timeframe="H4", count=lookback_h1 // 4 + 300)
+        d1 = await _fetch_historical_candles(
+            symbol=symbol, timeframe="D1", count=lookback_h1 // 24 + 500)
+        from ml.trading_env_v2 import HIGHER_TF_MARKET_FEATURES, join_higher_tf_channels
+        df = join_higher_tf_channels(df, h4, d1)
+        hf_nan = {c: int(df[c].isna().sum()) for c in HIGHER_TF_MARKET_FEATURES}
+        if any(hf_nan.values()):
+            raise RuntimeError(
+                f"[RETRAIN] T-30: canales H4/D1 con NaN en {symbol} "
+                f"(velas H4={len(h4)}, D1={len(d1)}, filas H1={len(df)}): "
+                f"{hf_nan} — feed sin cobertura de la ventana, no se entrena "
+                f"a ciegas"
+            )
+        logger.warning(
+            "[RETRAIN] T-30: canales H4/D1 unidos al snapshot (H4=%d, D1=%d, "
+            "%d filas H1, 0 NaN) — contrato del candidato (20,32)",
+            len(h4), len(d1), len(df),
+        )
     # T-27 (D1 pre-registrado): trim del warm-up de canales de tendencia ANTES
     # del snapshot → sha256 = df exacto que consumen train y gate.
     df = _trim_trend_warmup(df)
@@ -879,9 +917,15 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int, symbol: str = TRAINING
         memory_channel=True,
         # T-22/T-27: el bloque de tendencia NO entra en el obs — el retrain
         # pre-registrado T-27 (2026-10-17) lo activó y su GATE CAYÓ (3/6) →
-        # revert por orden de Félix («revert T-27»). Línea revisable: para
-        # re-activar (20,28) hace falta un nuevo experimento pre-registrado.
-        trend_features=False,
+        # revert por orden de Félix («revert T-27»). T-30 (orden 2026-10-17):
+        # el ÚNICO canario que lo reactiva es `higher_tf_features` — el
+        # candidato H4/D1 exige el bloque de tendencia (contrato 31/32 =
+        # 20+3+4 market, validado en el env con ValueError). Default off =
+        # contrato vivo (20,25) byte-idéntico.
+        trend_features=settings.higher_tf_features,
+        # T-30: bloque de horizonte lento — sólo para el run pre-registrado
+        # report-only (flag en .env; serve lo ignora, decide por el ancho).
+        higher_tf_features=settings.higher_tf_features,
         # T-24 (2026-10-17): versión de recompensa explícita igual que
         # trend_features — default "v1" inerte; T-27 lo cambia a "v2_align"
         # en LA MISMA línea revisable (eval y train heredan este env_cfg).
@@ -1184,15 +1228,16 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int, symbol: str = TRAINING
     )
 
 
-async def _fetch_historical_candles(symbol: str, count: int) -> list:
-    """Obtiene velas históricas de MT5 MCP."""
+async def _fetch_historical_candles(symbol: str, count: int,
+                                    timeframe: str = "H1") -> list:
+    """Obtiene velas históricas de MT5 MCP (`timeframe` por defecto H1)."""
     import httpx
     # 60s (P3-3): el lookback del canario (30000 H1) tarda ~18s desde el host
     # y el contenedor puede ser más lento — con 30s quedaba al filo.
     async with httpx.AsyncClient(timeout=60.0) as client:
         res = await client.get(
             f"{settings.mt5_http_url}/api/v1/market/candles/latest",
-            params={"symbol_name": symbol, "timeframe": "H1", "count": count},
+            params={"symbol_name": symbol, "timeframe": timeframe, "count": count},
         )
         res.raise_for_status()
         data = res.json()

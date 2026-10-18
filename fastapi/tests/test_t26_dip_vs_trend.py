@@ -98,7 +98,7 @@ def bundle():
 
 def _decide(model, vn, cols, contract, scenario):
     """Decisión determinista del bundle en estado plano sobre la ventana."""
-    trend, _memory = contract
+    trend, _hf, _memory = contract
     feats = list(MARKET_FEATURES) + (list(TREND_MARKET_FEATURES) if trend else [])
     window = scenario["window"]
     market = np.array(

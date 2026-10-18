@@ -47,6 +47,15 @@ class Settings(BaseSettings):
     retrain_auto_approve: bool = False    # P0-1: promoción automática nunca implícita; aprobar vía POST /api/v1/ai/retrain/approve
     retrain_interval_hours: int = 168     # P3-2d: retrain programado (7 días desde el último intento)
 
+    # T-30 (orden Félix 2026-10-17, «ejecución del candidato H4/D1»): único
+    # canario del contrato del CANDIDATO — con true, el retrain une los 4
+    # canales H4/D1 (join asof de vela cerrada) y entrena con obs (20,32)
+    # (trend + HF + memoria); con false (default) el pipeline es byte-idéntico
+    # al vivo (20,25). Serve NUNCA lee este flag: allí el contrato lo decide
+    # el ancho del bundle (derive_obs_contract). Sólo para el run
+    # pre-registrado report-only (audits/t30-pre-registration §4).
+    higher_tf_features: bool = False
+
     # ─── P3-2b: Backup del bundle ─────────────────────────────────────────────
     model_backup_enabled: bool = True         # GCS además del backup local verificado
     model_backup_interval_hours: int = 24     # Cadencia del backup programado

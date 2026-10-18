@@ -27,6 +27,7 @@ from ml.trading_env_v2 import (
     CHURN_BARS,
     EXTRA_STATE_FEATURES,
     FOREX_MARKET_FEATURE_COUNT,
+    HIGHER_TF_MARKET_FEATURES,
     MARKET_FEATURES,
     TIME_STOP_BARS,
     TREND_FEATURE_WINDOW_MIN,
@@ -36,6 +37,7 @@ from ml.trading_env_v2 import (
     derive_obs_contract,
     engineer_market_features,
     get_market_features,
+    join_higher_tf_channels,
     production_stops,
 )
 from services.auto_retrain import (
@@ -226,6 +228,11 @@ class Brain:
     # de features ≥ TREND_FEATURE_WINDOW_MIN (SMA200 honesto); False = 17 base
     # y ventana tail(120) byte-idéntica al contrato vivo (20,25).
     trend_features: bool = False
+    # T-30: bloque de horizonte lento H4/D1 (31/32: +dist/slope SMA200 de H4
+    # y D1) — los canales se UNEN al df desde el fetch P3-4 existente (join
+    # asof de vela cerrada); con el fetch degradado (breaker/Unavailable/<205
+    # velas) /predict emite HOLD fail-closed, nunca obs de relleno.
+    higher_tf_features: bool = False
 
 
 _BRAINS: dict[str, Brain] = {}
@@ -280,12 +287,14 @@ def load_inference_artifacts(symbol: str) -> None:
     if contract is None:
         base_width = FOREX_MARKET_FEATURE_COUNT + EXTRA_STATE_FEATURES
         trend_width = base_width + len(TREND_MARKET_FEATURES)
+        hf_width = trend_width + len(HIGHER_TF_MARKET_FEATURES)
         raise RuntimeError(
             f"[AI-STARTUP] Contrato de observación desconocido para {symbol}: "
             f"{obs_shape} (esperado {base_width} pre-memoria, {base_width + 1} "
-            f"con memoria, {trend_width} trend o {trend_width + 1} trend+memoria)"
+            f"con memoria, {trend_width} trend, {trend_width + 1} trend+memoria, "
+            f"{hf_width} T-30 o {hf_width + 1} T-30+memoria)"
         )
-    trend_features, memory_channel = contract
+    trend_features, higher_tf_features, memory_channel = contract
 
     vec_norm_file = manifest.get("vec_norm_file")
     if vec_norm_file:
@@ -307,6 +316,7 @@ def load_inference_artifacts(symbol: str) -> None:
         vec_norm=vec_norm,
         memory_channel=memory_channel,
         trend_features=trend_features,
+        higher_tf_features=higher_tf_features,
         bundle={
             "model_sha256": manifest["model_sha256"],
             "vec_norm_sha256": manifest.get("vec_norm_sha256"),
@@ -362,6 +372,46 @@ def _sma200_context(raw_sorted: pd.DataFrame) -> tuple[Optional[float], Optional
         return None, None
     # dist: precio actual lejos de la media larga; slope: pendiente de 5 barras
     return float(close.iloc[-1] - sma.iloc[-1]), float(sma.iloc[-1] - sma.iloc[-6])
+
+
+def _hf_candles_for_obs(res, symbol: str, tf: str) -> Optional[list]:
+    """Velas H4/D1 UTILIZABLES para los canales del obs T-30 (o None).
+
+    Paridad REQ-1 de CALIDAD (no sólo de fórmula): el obs sólo ve una serie
+    que la línea del prompt también consideraría válida — mismo parche de
+    agujero (`_fill_feed_hole`), misma continuidad (gap ≤168 h) y ≥205 velas
+    (SMA200 + 5 de margen para la pendiente, barras cerradas incluidas).
+
+    None = no servible (breaker abierto → res None, Exception de fetch,
+    HTTP ≠ 200, JSON inválido, serie corta o rota). El caller de T-30 decide
+    HOLD — jamás canales de relleno; la línea del prompt degrada sola a
+    «Unavailable» (esquema constante intacto).
+    """
+    if res is None or isinstance(res, Exception):
+        return None
+    if getattr(res, "status_code", None) != 200:
+        return None
+    try:
+        data = res.json()
+    except ValueError:
+        return None
+    if isinstance(data, list):
+        raw = data
+    elif isinstance(data, dict):
+        raw = data.get("candles") or []
+    else:
+        return None
+    raw = _fill_feed_hole(raw, symbol, tf)
+    if len(raw) < 205 or not raw or "time" not in raw[0]:
+        return None
+    times = pd.to_datetime([c.get("time") for c in raw], errors="coerce", utc=True)
+    if times.isna().any():
+        return None
+    gap_h = float(pd.Series(times).sort_values().diff()
+                  .dt.total_seconds().div(3600).max())
+    if gap_h > 168.0:
+        return None
+    return raw
 
 
 def _higher_tf_context_line(tf: str, res, symbol: str) -> str:
@@ -801,7 +851,44 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         features_input = raw_df
 
     df = engineer_market_features(features_input)
-    features_list = get_market_features(df, include_trend=brain.trend_features)
+    # T-30 (orden Félix 2026-10-17): los 4 canales del horizonte lento se
+    # unen desde el MISMO fetch P3-4 que alimenta el prompt del LLM (cero
+    # HTTP nuevo). Serie no servible (breaker, <205 velas, gap >168 h) o
+    # ventana del obs sin canales formados → HOLD fail-closed: un obs de
+    # horizonte lento en cero/relleno sería «sin tendencia» = mentira de
+    # estado (pre-registrado §7.4). Para el contrato vivo (20,25) este bloque
+    # no se ejecuta: byte-idéntico.
+    if brain.higher_tf_features:
+        h4_obs = _hf_candles_for_obs(h4_res, req.symbol, "H4")
+        d1_obs = _hf_candles_for_obs(d1_res, req.symbol, "D1")
+        if h4_obs is None or d1_obs is None:
+            logger.error(
+                "[%s] T-30: H4/D1 no servibles para los canales del obs "
+                "(breaker=%s h4=%s d1=%s) → HOLD",
+                cycle_id, h4d_skipped,
+                "ok" if h4_obs else "no_servible",
+                "ok" if d1_obs else "no_servible",
+            )
+            return PredictResponse(cycle_id=cycle_id, ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
+        try:
+            df = join_higher_tf_channels(df, h4_obs, d1_obs)
+        except (ValueError, KeyError, TypeError) as exc:
+            logger.error("[%s] T-30: join H4/D1 imposible (%s: %s) → HOLD",
+                         cycle_id, type(exc).__name__, exc)
+            return PredictResponse(cycle_id=cycle_id, ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
+        hf_window = df[list(HIGHER_TF_MARKET_FEATURES)].iloc[-20:]
+        hf_bad = int(hf_window.isna().any(axis=1).sum())
+        if hf_bad:
+            logger.error(
+                "[%s] T-30: %d/20 filas del obs sin canales H4/D1 formados "
+                "(cobertura de vela cerrada corta) → HOLD",
+                cycle_id, hf_bad,
+            )
+            return PredictResponse(cycle_id=cycle_id, ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
+    features_list = get_market_features(
+        df, include_trend=brain.trend_features,
+        include_higher_tf=brain.higher_tf_features,
+    )
     # P0: leer de `df` (ordenada por engineer) — con raw_df (descendente del
     # MCP) el "reciente" eran las velas más ANTIGUAS y la hora de sesión la de
     # una semana atrás.

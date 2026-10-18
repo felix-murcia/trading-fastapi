@@ -77,6 +77,21 @@ MARKET_FEATURES = (
 # bundle vivo (20,25) sigue servible intacto hasta que T-27 promueva (20,28).
 TREND_MARKET_FEATURES = ("dist_sma200", "sma200_slope", "adx")
 
+# T-30 (2026-10-17, orden Félix «ejecución del candidato H4/D1»): bloque de
+# horizonte LENTO — las 4 coordenadas del estado de la tendencia ~41d (H4) y
+# ~250d (D1) que el LLM ya ve en su prompt (`_higher_tf_context_line`), ahora
+# también en el obs del PPO (REQ-1 a nivel de representación: mismos datos,
+# misma fórmula, mismo signo). Pre-registrado en
+# audits/t30-pre-registration-hf-obs-2026-10-17.md §2 — UN candidato, sin
+# ADX/RSI H4/D1 (8 canales descartados: superficie de tuning injustificada).
+# NO entra en MARKET_FEATURES: el contrato lo decide el ancho del obs
+# (derive_obs_contract 31/32), flag `higher_tf_features` default off.
+# Las columnas se UNEN al df desde las velas H4/D1 (join asof estricto de
+# vela CERRADA, ver `join_higher_tf_channels`) — no se calculan del H1.
+HIGHER_TF_MARKET_FEATURES = (
+    "dist_sma200_h4", "slope_sma200_h4", "dist_sma200_d1", "slope_sma200_d1",
+)
+
 # Ancho base del tensor: canales de mercado + 7 de estado. El contrato Fase 3
 # añade +1 (bars_since_close) → obs (20, 25); 24 canales = bundle pre-memoria.
 # T-22: +3 tendencia → (20,27)/(20,28); derive_obs_contract resuelve los 4.
@@ -309,25 +324,42 @@ def engineer_market_features(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def get_market_features(df: pd.DataFrame, include_trend: bool = False) -> list[str]:
+def get_market_features(df: pd.DataFrame, include_trend: bool = False,
+                        include_higher_tf: bool = False) -> list[str]:
     """Valida la presencia ordenada del vector de features de mercado.
 
     T-22 (REQ-1): `include_trend=True` añade `TREND_MARKET_FEATURES` al FINAL
     del vector — misma función, mismo orden en train (`ForexTradingEnvV2`) y
     serve (`/predict`): paridad por construcción. El default False conserva
     byte-idéntico el vector de los 17 base (bundle vivo (20,25)).
+
+    T-30: `include_higher_tf=True` añade `HIGHER_TF_MARKET_FEATURES` después
+    del bloque de tendencia — y EXIGE sus columnas en el df (ValueError si
+    faltan): los canales H4/D1 llegan por join desde las velas superiores
+    (`join_higher_tf_channels`), su ausencia no puede rellenarse con ceros
+    (un obs de horizonte lento inventado sería exactamente el atajo que este
+    candidato existe para destruir). Sólo válido con `include_trend=True`
+    (el contrato 31/32 implica tendencia — validate en el caller).
     """
     features = list(MARKET_FEATURES)
     if include_trend:
         features += list(TREND_MARKET_FEATURES)
+    if include_higher_tf:
+        missing = [f for f in HIGHER_TF_MARKET_FEATURES if f not in df.columns]
+        if missing:
+            raise ValueError(
+                f"include_higher_tf exige las columnas H4/D1 en el df (faltan: "
+                f"{missing}) — únelas con join_higher_tf_channels antes"
+            )
+        features += list(HIGHER_TF_MARKET_FEATURES)
     for feature in features:
         if feature not in df.columns:
             df[feature] = 0.0
     return features
 
 
-def derive_obs_contract(obs_width: Optional[int]) -> Optional[Tuple[bool, bool]]:
-    """Deriva (trend_features, memory_channel) del ancho del observation_space.
+def derive_obs_contract(obs_width: Optional[int]) -> Optional[Tuple[bool, bool, bool]]:
+    """Deriva (trend_features, higher_tf_features, memory_channel) del ancho.
 
     T-22: única fuente de verdad del contrato por ancho — la usan ambos lados
     (`routers/ai.load_inference_artifacts` en serve y
@@ -337,22 +369,102 @@ def derive_obs_contract(obs_width: Optional[int]) -> Optional[Tuple[bool, bool]]
     - 24 = 17 market + 7 state            → pre-memoria legado (Fase 3)
     - 25 = 24 + memoria                   → CONTRATO VIVO (20,25)
     - 27 = 20 market + 7 state            → trend pre-memoria (T-22)
-    - 28 = 27 + memoria                   → OBJETIVO T-27 (20,28)
+    - 28 = 27 + memoria                   → objetivo T-27 (20,28)
+    - 31 = 24 market + 7 state            → T-30 pre-memoria (trend + HF)
+    - 32 = 31 + memoria                   → CANDIDATO T-30 (20,32)
 
     Devuelve None si el ancho no corresponde a ningún contrato construible:
     el llamador decide el RuntimeError contextual (sin degradación silenciosa).
     """
     base_width = FOREX_MARKET_FEATURE_COUNT + EXTRA_STATE_FEATURES
     trend_width = base_width + len(TREND_MARKET_FEATURES)
+    hf_width = trend_width + len(HIGHER_TF_MARKET_FEATURES)
     if obs_width == base_width:
-        return (False, False)
+        return (False, False, False)
     if obs_width == base_width + 1:
-        return (False, True)
+        return (False, False, True)
     if obs_width == trend_width:
-        return (True, False)
+        return (True, False, False)
     if obs_width == trend_width + 1:
-        return (True, True)
+        return (True, False, True)
+    if obs_width == hf_width:
+        return (True, True, False)
+    if obs_width == hf_width + 1:
+        return (True, True, True)
     return None
+
+
+def join_higher_tf_channels(
+    df: pd.DataFrame, h4_candles: list, d1_candles: list,
+) -> pd.DataFrame:
+    """T-30: une los 4 canales del horizonte lento (H4/D1) al df H1.
+
+    Pre-registrado (audits/t30-pre-registration §3): para cada barra H1 en t,
+    la feature usa SÓLO información con timestamp ≤ t — la barra H4/D1 se
+    considera usable cuando ya está CERRADA (`bar.time + timeframe ≤ t`,
+    búsqueda con `searchsorted(side='right')`: la vela D1 de las 00:00 de hoy
+    no entra hasta las 00:00 de mañana; cero lookahead, incluido el bloque
+    asof de 24 h documentado en R3).
+
+    Fórmulas = MISMAS que el bloque de tendencia T-22 y que `_sma200_context`
+    del prompt del LLM (paridad REQ-1): rolling(200) sobre la serie superior,
+    dist = (close_hf − sma_hf)/(close_hf + 1e-10) y slope = (sma_hf −
+    sma_hf.shift(5))/(close_hf + 1e-10), clip ±0,1 — el denominador es el
+    close de la barra SUPERIOR (la misma referencia en crudo que el LLM
+    renderiza: `obs × (close_hf + ε)` reconstruye sus {dist:+.4f}/{slope:+.4f}).
+
+    Devuelve el df con las 4 columnas; NaN donde la barra cerrada aún no
+    existe o el SMA200 no está formado — EL CALLER decide (train: RuntimeError
+    explícito; serve: HOLD fail-closed). Relleno jamás: un canal de horizonte
+    lento en cero es «sin tendencia» = mentira de estado.
+    """
+    if "time" not in df.columns:
+        raise ValueError("join_higher_tf_channels exige df H1 con columna `time`")
+
+    def _epoch(v) -> int:
+        """Cualquier formato de `time` del sistema → epoch segundos UTC.
+
+        El MCP devuelve ISO-strings (\"2026-10-16T23:00:00Z\"), mt5_client
+        convierte a epoch numérico y los CSV del parche de agujero traen
+        datetime — por elemento, sin adivinar unidades (los numéricos son
+        segundos, convención _to_ts; jamás milisegundos en este sistema).
+        """
+        if isinstance(v, str):
+            return int(pd.to_datetime(v, utc=True).timestamp())
+        if isinstance(v, bool) or v is None:
+            raise ValueError(f"time no convertible: {v!r}")
+        if isinstance(v, (int, float)):
+            return int(v)
+        ts = getattr(v, "timestamp", None)  # datetime / pd.Timestamp
+        if ts is not None:
+            return int(ts())
+        raise ValueError(f"time no convertible: {v!r}")
+
+    out = df.copy()
+    h1_times = np.array([_epoch(v) for v in out["time"]], dtype=np.int64)
+    for tf_key, candles in (("h4", h4_candles), ("d1", d1_candles)):
+        if not candles:
+            raise ValueError(f"join_higher_tf_channels: sin velas {tf_key.upper()}")
+        times = np.array([_epoch(c["time"]) for c in candles], dtype=np.int64)
+        closes = np.array([float(c["close"]) for c in candles], dtype=np.float64)
+        order = np.argsort(times, kind="stable")
+        times, closes = times[order], closes[order]
+        sma = pd.Series(closes).rolling(200).mean().to_numpy()
+        slope_raw = sma - np.concatenate((np.full(5, np.nan), sma[:-5]))
+        # Cierre efectivo de cada barra superior: usable en t si ≤ t.
+        tf_seconds = 4 * 3600 if tf_key == "h4" else 24 * 3600
+        closed_at = times + tf_seconds
+        idx = np.searchsorted(closed_at, h1_times, side="right") - 1
+        valid = idx >= 0
+        sel_close = np.where(valid, closes[np.clip(idx, 0, None)], np.nan)
+        sel_sma = np.where(valid, sma[np.clip(idx, 0, None)], np.nan)
+        sel_slope = np.where(valid, slope_raw[np.clip(idx, 0, None)], np.nan)
+        denom = sel_close + 1e-10
+        out[f"dist_sma200_{tf_key}"] = np.clip(
+            (sel_close - sel_sma) / denom, -0.1, 0.1
+        )
+        out[f"slope_sma200_{tf_key}"] = np.clip(sel_slope / denom, -0.1, 0.1)
+    return out
 
 
 def build_v3_observation(
@@ -552,6 +664,7 @@ class ForexTradingEnvV2(gym.Env):
         min_stop_dist_pips: float = 1.0,
         memory_channel: bool = True,
         trend_features: bool = False,
+        higher_tf_features: bool = False,   # T-30: canales H4/D1 (obs 31/32)
     ):
         super(ForexTradingEnvV2, self).__init__()
         self.df = df.reset_index(drop=True)
@@ -606,13 +719,25 @@ class ForexTradingEnvV2(gym.Env):
         # (default) = contrato vivo de 17 base, byte-idéntico. Quien decide es
         # derive_obs_contract(obs_width) — ver auto_retrain/routers.ai.
         self.trend_features = bool(trend_features)
+        # T-30: bloque de horizonte lento H4/D1 (obs 31/32) — REQUIERE el
+        # bloque de tendencia (el contrato 31/32 = 20+3+4 market); sin él,
+        # ValueError explícito (cero degradación silenciosa a otro ancho).
+        self.higher_tf_features = bool(higher_tf_features)
+        if self.higher_tf_features and not self.trend_features:
+            raise ValueError(
+                "higher_tf_features=True exige trend_features=True "
+                "(contrato T-30: 24 market = 20 T-22 + 4 H4/D1)"
+            )
         # Memoria desde el último cierre (0 = cerró en esta vela; el arranque
         # usa max_holding_steps → normalizado a 1.0 = "sin cierre reciente").
         self.bars_since_close = int(max_holding_steps)
         self.ever_closed = False
         self.trade_pnls: list = []
 
-        self.features = get_market_features(self.df, include_trend=self.trend_features)
+        self.features = get_market_features(
+            self.df, include_trend=self.trend_features,
+            include_higher_tf=self.higher_tf_features,
+        )
         # P2-1 / D3: el modelo decide [direction, volume]; SL/TP los pone
         # production_stops() igual que en /predict (cabezas muertas fuera).
         self.action_space = spaces.Box(

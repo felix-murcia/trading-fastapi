@@ -73,14 +73,16 @@ def _df_candles(n: int = 300, base: float = 1.10, step: float = 0.0002) -> pd.Da
 # ─── 1. Contrato por ancho ────────────────────────────────────────────────────
 
 class TestObsContract:
-    def test_derive_obs_contract_maps_the_four_known_widths(self):
-        assert derive_obs_contract(24) == (False, False)   # pre-memoria legado
-        assert derive_obs_contract(25) == (False, True)    # contrato VIVO (20,25)
-        assert derive_obs_contract(27) == (True, False)    # trend pre-memoria
-        assert derive_obs_contract(28) == (True, True)     # objetivo T-27 (20,28)
+    def test_derive_obs_contract_maps_the_known_widths(self):
+        assert derive_obs_contract(24) == (False, False, False)   # pre-memoria legado
+        assert derive_obs_contract(25) == (False, False, True)    # contrato VIVO (20,25)
+        assert derive_obs_contract(27) == (True, False, False)    # trend pre-memoria
+        assert derive_obs_contract(28) == (True, False, True)     # objetivo T-27 (20,28)
+        assert derive_obs_contract(31) == (True, True, False)     # T-30 pre-memoria
+        assert derive_obs_contract(32) == (True, True, True)      # CANDIDATO T-30 (20,32)
 
     def test_derive_obs_contract_rejects_everything_else(self):
-        for width in (None, 0, 23, 26, 29, 30, 99):
+        for width in (None, 0, 23, 26, 29, 30, 33, 99):
             assert derive_obs_contract(width) is None, width
 
     def test_trend_features_appended_after_the_17_base(self):
