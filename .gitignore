@@ -44,4 +44,4 @@ fastapi/ml/promotion-commit.log
 TRADING_AGENT.md
 # P3-2: artefactos MLOps locales (backup de bundles + snapshots de train)
 fastapi/ml/backups/
-fastapi/ml/snapshots/
+fastapi/ml/snapshots/retrain_artifacts/
