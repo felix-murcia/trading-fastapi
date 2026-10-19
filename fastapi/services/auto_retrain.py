@@ -1232,16 +1232,24 @@ async def _fetch_historical_candles(symbol: str, count: int,
                                     timeframe: str = "H1") -> list:
     """Obtiene velas históricas de MT5 MCP (`timeframe` por defecto H1).
 
-    T-31 (2026-10-19): los sellos llegan en el reloj del BROKER (+3 h
-    medidos). Se normalizan a UTC REAL aquí, en la frontera de fetch, para
-    que el emparejamiento con los outcomes reales
-    (`ml/trading_env_v2._index_real_outcomes`, que usa marcas del EA en UTC)
-    caiga en la vela correcta. Sin esta corrección el feedback real se
-    atribuía a la vela ~3 h (2-3 barras) antes de la entrada ⇒ reward del
-    PPO contaminado en cada retrain.
+    T-31 (2026-10-19) — RELOJ DEL BROKER, Y POR QUÉ NO SE CORRIGE AQUÍ:
+    el feed sella las velas con el reloj del BROKER (+3 h medidos). Los
+    OUTCOMES REALES (`trade_outcomes.entry_time/exit_time`, que reporta el
+    EA desde el historial de deals) viven en ese MISMO reloj del broker, y
+    ambos se desplazan a la vez con el DST del broker ⇒ velas y outcomes son
+    mutuamente consistentes SIN corregir (es lo que hace correcto el
+    emparejamiento de `ml/trading_env_v2._index_real_outcomes`).
+
+    Corregir SÓLO un lado los desalinearía (3 h) — y una corrección con
+    offset constante tampoco valdría para el histórico largo (el DST del
+    broker cambia: +3 h verano, +2 h invierno). Por eso el retrain
+    conserva el reloj del broker y la normalización a UTC real se aplica
+    donde sí hace falta: al mezclar con datos en UTC verdadero (el CSV
+    histórico de `resultadosBT/`, el `mt5_time` del EA en la auditoría y
+    las mediciones) — ver `services/mt5_client.normalize_candles` y
+    `routers.ai._shift_to_utc`.
     """
     import httpx
-    from services.mt5_client import normalize_candles
     # 60s (P3-3): el lookback del canario (30000 H1) tarda ~18s desde el host
     # y el contenedor puede ser más lento — con 30s quedaba al filo.
     async with httpx.AsyncClient(timeout=60.0) as client:
@@ -1252,7 +1260,21 @@ async def _fetch_historical_candles(symbol: str, count: int,
         res.raise_for_status()
         data = res.json()
         candles = data if isinstance(data, list) else data.get("candles", [])
-    return normalize_candles(candles)
+    # Orden ascendente (convención del sistema) y sello del broker INTACTO.
+    return sorted(
+        (
+            {
+                "time":   c.get("time", 0),
+                "open":   float(c.get("open",  0)),
+                "high":   float(c.get("high",  0)),
+                "low":    float(c.get("low",   0)),
+                "close":  float(c.get("close", 0)),
+                "volume": float(c.get("tick_volume", c.get("volume", 0))),
+            }
+            for c in candles
+        ),
+        key=lambda c: c["time"],
+    )
 
 
 def _build_training_dataframe(candles: list) -> pd.DataFrame:

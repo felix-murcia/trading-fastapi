@@ -20,6 +20,7 @@ hardcode, sigue solo si el broker cambia de huso.
 import datetime as dt
 
 import pytest
+from unittest.mock import patch
 
 from services.market_time import (
     broker_offset_hours_from_candles,
@@ -124,3 +125,57 @@ def test_shift_is_reversible_in_offset_math(offset):
     vuelve al sello original (sin acumular error ni redondeo)."""
     epoch = 1792443600.0
     assert correct_candle_epoch(correct_candle_epoch(epoch, offset), -offset) == epoch
+
+
+class TestRetrainKeepsBrokerClock:
+    """REGLA (T-31, 2026-10-19): el retrain NO normaliza el reloj.
+
+    Los outcomes reales (`trade_outcomes.entry_time/exit_time`, que reporta el
+    EA desde el historial de deals) viven en el MISMO reloj del broker que
+    las velas, y ambos se desplazan a la vez con el DST del broker ⇒ velas y
+    outcomes son consistentes SIN corregir. Normalizar SÓLO un lado los
+    desalinearía 3 h, y un offset constante tampoco valdría para el
+    histórico largo (el DST del broker cambia: +3 h verano, +2 h invierno).
+
+    Este test blinda la regla: si alguien "normaliza" el retrain, el
+    emparejamiento de los outcomes con las velas (y con ello el reward del
+    PPO) se rompe.
+    """
+    @pytest.mark.asyncio
+    async def test_retrain_fetch_keeps_raw_broker_timestamps(self):
+        from services import auto_retrain
+
+        raw = [
+            {"time": "2026-10-19T21:00:00Z", "open": 1.1, "high": 1.2,
+             "low": 1.0, "close": 1.11, "tick_volume": 10},
+            {"time": "2026-10-19T20:00:00Z", "open": 1.1, "high": 1.2,
+             "low": 1.0, "close": 1.12, "tick_volume": 10},
+        ]
+
+        class _Resp:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return raw
+
+        class _Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def get(self, *a, **k):
+                return _Resp()
+
+        with patch("httpx.AsyncClient", lambda *a, **k: _Client()):
+            out = await auto_retrain._fetch_historical_candles("EURUSD", 2)
+        stamps = [c["time"] for c in out]
+        assert stamps == sorted(stamps), "orden ascendente (convención del sistema)"
+        assert "2026-10-19T21:00:00Z" in stamps, (
+            "el retrain debe conservar el sello del broker (alinea con los "
+            "outcomes, que viven en el mismo reloj)"
+        )
