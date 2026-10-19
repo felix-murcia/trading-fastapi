@@ -192,4 +192,32 @@ async def _promote_bundle_files(
     )
     from core.adapters import AiModelStoreAdapter
     AiModelStoreAdapter().reload(symbol)
+
+    # Coherencia del experimento: una promoción de un experimento YA cerrado
+    # deja su fila como 'rejected' (el tracker sólo cierra un 'running' y su
+    # UPDATE condicional protege contra el doble cierre). Aquí se corrige de
+    # forma explícita y trazada: el desenlace real de exp39 es 'promoted'.
+    await _mark_experiment_promoted(exp_id, promoted.get("model_sha256"), promo["reason"])
     return manifest
+
+
+async def _mark_experiment_promoted(exp_id: int, model_sha256: str | None, reason: str) -> None:
+    """Cierra el experimento como 'promoted' (corrección explícita y trazada)."""
+    from db.connection import get_pool
+
+    pool = get_pool()
+    await pool.execute(
+        """
+        UPDATE training_experiments
+           SET status = 'promoted',
+               gate_reason = $2,
+               model_sha256 = COALESCE($3, model_sha256)
+         WHERE id = $1 AND status <> 'promoted'
+        """,
+        exp_id, f"drastic_improvement:{reason}"[:200], model_sha256,
+    )
+    logger.warning(
+        "[PROMO-CAND] exp%d: estado del experimento corregido a 'promoted' "
+        "(la promoción de un experimento cerrado no la puede hacer el tracker).",
+        exp_id,
+    )
