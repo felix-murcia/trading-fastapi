@@ -146,6 +146,17 @@ class Settings(BaseSettings):
     # permitir promoción real es una Orden explícita.
     retrain_report_only: bool = False
 
+    # Orden Félix 2026-10-19: «quiero que cuando el candidato sea
+    # drásticamente mejor que el modelo vivo, se promocione el drásticamente
+    # mejor». Vía de promoción ADICIONAL (services/promotion_rule.py): exige
+    # que el candidato domine al modelo vivo en 8 criterios congelados
+    # (4/4 folds, sharpe de holdout > 0, drawdown ≤ 10 % y ≤ la mitad del
+    # vivo, ≤ la mitad de operaciones, reward y expectativa melhores) — con
+    # suelo absoluto de riesgo ⇒ no es una puerta trasera.
+    # El switch es explícito y separado: el congelamiento report-only sigue
+    # gobernando la vía NORMAL (suelo absoluto) sin cambios.
+    retrain_promote_drastic: bool = False
+
     class Config:
         env_file = "/app/.env"
 

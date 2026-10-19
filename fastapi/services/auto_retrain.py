@@ -28,6 +28,7 @@ from services.alerting import AlertLevel, send_alert
 # T-28 (REQ-1, c): condición de alineación PPO↔LLM del gate de retrain —
 # pre-registrada en audits/t28-alignment-metric-2026-10-17.md (D6).
 from services.alignment_metric import alignment_gate
+from services.promotion_rule import promotion_path
 from services.walk_forward import (
     build_walk_forward_split,
     evaluate_walk_forward,
@@ -1055,14 +1056,28 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int, symbol: str = TRAINING
         }, fh, indent=2, default=_jsonable)
     logger.warning("[RETRAIN] Candidato + informe en %s", artifact_dir)
 
-    if not decision.ok:
+    # ─── Orden Félix 2026-10-19: VÍA DE "MEJORA DRÁSTICA" ───────────────────
+    # «quiero que cuando el candidato sea drásticamente mejor que el modelo
+    # vivo, se promocione el drásticamente mejor». El suelo absoluto
+    # (walk_forward) manda cuando pasa; si NO pasa, se evalúa la regla de
+    # mejora drástica (services/promotion_rule.py), que exige dominar al
+    # modelo vivo en 8 criterios congelados + suelo absoluto de riesgo.
+    promo = promotion_path(decision.ok, decision.reason, report.to_dict())
+    if promo["path"] == "drastic_improvement":
+        logger.warning(
+            "[RETRAIN] VÍA DE MEJORA DRÁSTICA activada (orden Félix 2026-10-19): "
+            "el suelo absoluto NO se superó (%s) pero el candidato domina al "
+            "modelo vivo en los 8 criterios: %s",
+            decision.reason, promo["drastic"]["reason"],
+        )
+    if not promo["promote"]:
         logger.warning(
             "[RETRAIN] Candidato rechazado (%s): modelo activo conservado",
-            decision.reason,
+            promo["reason"],
         )
         await experiment_tracker.finish_experiment(
             exp_id, "rejected",
-            gate_reason=decision.reason,
+            gate_reason=promo["reason"],
             gate_metrics=report.to_dict(),
         )
         # P3-2d: cada intento (aunque rechazado) ancla el calendario — sin esto
@@ -1071,8 +1086,9 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int, symbol: str = TRAINING
         state.last_retrain_time = time.time()
         await _save_retrain_state(state, symbol)
         await _log_retrain_event("retrain_rejected", {
-            "reason": decision.reason,
+            "reason": promo["reason"],
             "gate": decision.details,
+            "promotion_path": promo,
             "t28_alignment": t28_alignment,
             "report": report.to_dict(),
         }, symbol=symbol)
@@ -1081,7 +1097,14 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int, symbol: str = TRAINING
     # T-28 (REQ-1, c — pre-registrado D6): gate wf OK pero el par PPO↔LLM no
     # demuestra alineación (o sin muestra suficiente — fail-closed) → rechazo
     # declarado con SU causa, misma mecánica anti-tormenta que el rechazo wf.
-    if not t28_alignment.get("ok"):
+    #
+    # Orden Félix 2026-10-19: en la VÍA DE MEJORA DRÁSTICA, T-28 NO bloquea
+    # (el conflicto que mide está medido como causado por el LLM — su sesgo
+    # acierta el 43,9 %, por debajo del azar, T-31 Fase A — y su veto ya está
+    # condicionado a autoridad demostrada; mantenerlo haría la promoción
+    # imposible por un motivo que no dice nada de la calidad del PPO). El
+    # estado de T-28 se REGISTRA siempre: manifiesto, auditoría y log.
+    if not t28_alignment.get("ok") and promo["path"] != "drastic_improvement":
         reasons_t28 = t28_alignment.get("reasons") or ["unknown"]
         reason_t28 = f"t28_alignment:{','.join(reasons_t28)}"
         logger.warning(
@@ -1110,14 +1133,23 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int, symbol: str = TRAINING
     # ─── T-09 (Félix 2026-10-16): holdout report-only — no escrituras si el
     # gateway se está validando. Promoción requiere Orden explícita (env
     # REHamilton report-only False + env REPORT_ONLY_ENABLED False).
-    if settings.retrain_report_only:
+    #
+    # Orden Félix 2026-10-19: el congelamiento report-only SIGUE gobernando
+    # la vía NORMAL, pero NO la vía de mejora drástica cuando el switch
+    # `RETRAIN_PROMOTE_DRAGSTIC` está activo — esa vía ES la orden de
+    # promoción. Si el switch está apagado, el congelamiento aplica a TODO
+    # (comportamiento previo intacto).
+    _drastic_bypasses_freeze = (
+        promo["path"] == "drastic_improvement" and settings.retrain_promote_drastic
+    )
+    if settings.retrain_report_only and not _drastic_bypasses_freeze:
         logger.warning(
             "[RETRACE][REPORT-ONLY] gate=%s (%s) -> NO se promociona (solo traza OOS)",
-            decision.ok, decision.reason,
+            decision.ok, promo["reason"],
         )
         await experiment_tracker.finish_experiment(
             exp_id, "rejected",
-            gate_reason=f"report_only:{decision.reason}",
+            gate_reason=f"report_only:{promo['reason']}",
             gate_metrics=report.to_dict(),
         )
         state = await _ensure_retrain_state(symbol)
@@ -1125,11 +1157,18 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int, symbol: str = TRAINING
         await _save_retrain_state(state, symbol)
         await _log_retrain_event("retrain_report_only", {
             "gate_ok": decision.ok,
-            "gate_reason": decision.reason,
+            "gate_reason": promo["reason"],
+            "promotion_path": promo,
             "t28_alignment": t28_alignment,
             "report": report.to_dict(),
         }, symbol=symbol)
         return
+
+    if _drastic_bypasses_freeze:
+        logger.warning(
+            "[RETRAIN] REPORT-ONLY SALTADO en la vía de mejora drástica "
+            "(RETRAIN_PROMOTE_DRAGSTIC=true, orden Félix 2026-10-19) — se promueve.",
+        )
 
     # Promoción del BUNDLE completo: stats + zip + manifest certifican el conjunto.
     # Si el proceso muere entre archivos, validate_bundle falla en el próximo arranque.
@@ -1159,6 +1198,10 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int, symbol: str = TRAINING
         extra={
             "walk_forward": report.to_dict(),
             "gate": {"ok": decision.ok, "reason": decision.reason},
+            # Orden Félix 2026-10-19: la VÍA de promoción queda en el
+            # manifiesto (suelo absoluto vs mejora drástica) con el detalle
+            # de los 8 criterios ⇒ la promoción es auditable sin el log.
+            "promotion_path": promo,
             # T-28: la promoción certifica TAMBIÉN la alineación PPO↔LLM
             # medida (la condición pasó — el dict completo queda en el bundle).
             "t28_alignment": t28_alignment,
@@ -1172,8 +1215,9 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int, symbol: str = TRAINING
     # (disco ≠ memoria). El swap en ai.py es atómico y valida antes de tocar la caché.
     await record_promotion(
         manifest,
-        {"ok": decision.ok, "reason": decision.reason,
-         "checks": decision.details.get("checks")},
+        {"ok": decision.ok, "reason": promo["reason"],
+         "checks": decision.details.get("checks"),
+         "promotion_path": promo},
         symbol=symbol,
     )
     # P3-1b: hot-reload vía ModelStorePort — el servicio ya no importa del
@@ -1187,7 +1231,7 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int, symbol: str = TRAINING
     # el wrapper intenta 'failed' pero el UPDATE condicional no lo pisa.
     await experiment_tracker.finish_experiment(
         exp_id, "promoted",
-        gate_reason=decision.reason,
+        gate_reason=promo["reason"],
         gate_metrics=report.to_dict(),
         model_sha256=manifest["model_sha256"],
     )
@@ -1201,15 +1245,18 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int, symbol: str = TRAINING
     # 6. Backup a GCS
     backup_url = await upload_model(symbol=symbol)
     logger.warning(
-        "[RETRAIN] ===== RETRAIN COMPLETADO ===== model=%s backup=%s sum_reward=%.3f gate=%s",
+        "[RETRAIN] ===== RETRAIN COMPLETADO ===== model=%s backup=%s sum_reward=%.3f "
+        "vía=%s motivo=%s",
         model_path,
         backup_url,
         report.candidate["sum_reward"],
-        decision.reason,
+        promo["path"],
+        promo["reason"],
     )
 
     await _log_retrain_event("retrain_promoted", {
-        "reason": decision.reason,
+        "reason": promo["reason"],
+        "promotion_path": promo,
         "gate": decision.details,
         "t28_alignment": t28_alignment,
         "report": report.to_dict(),

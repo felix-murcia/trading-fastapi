@@ -1809,6 +1809,47 @@ async def force_retrain_endpoint(
     return {"status": result["status"], "filled_count": state.filled_count, "in_progress": state.retrain_in_progress}
 
 
+@router.post("/retrain/promote-candidate")
+async def promote_candidate_endpoint(
+    exp_id: int = Query(...),
+    symbol: Optional[str] = Query(default=None),
+    _: None = Depends(verify_token),
+):
+    """Promueve un CANDIDATO YA MEDIDO (artefactos de un experimento cerrado).
+
+    Orden Félix 2026-10-19: *«quiero que cuando el candidato sea
+    drásticamente mejor que el modelo vivo, se promocione el drásticamente
+    mejor»*.
+
+    NO se salta la regla: el informe del experimento se vuelve a evaluar con
+    `services/promotion_rule.py` (mismos 8 criterios congelados) y sólo se
+    promueve si la regla lo concede. Devuelve el detalle de cada criterio
+    para que la decisión sea auditable.
+    """
+    from services.candidate_promotion import CandidatePromotionError, promote_measured_candidate
+
+    sym = (symbol or _TRAINING_SYMBOL).upper()
+    try:
+        result = await promote_measured_candidate(sym, exp_id)
+    except CandidatePromotionError as exc:
+        logger.error("[PROMO-CAND] exp%d NO promoted: %s", exp_id, exc)
+        await log_to_audit("candidate_promotion_failed", {"symbol": sym, "exp_id": exp_id, "error": str(exc)})
+        return {"promoted": False, "exp_id": exp_id, "error": str(exc)}
+    await log_to_audit(
+        "candidate_promoted" if result.get("promoted") else "candidate_promotion_rejected",
+        {
+            "symbol": sym,
+            "exp_id": exp_id,
+            "promoted": result.get("promoted"),
+            "reason": (result.get("promotion_path") or {}).get("reason"),
+            "path": (result.get("promotion_path") or {}).get("path"),
+            "checks": ((result.get("promotion_path") or {}).get("drastic") or {}).get("checks"),
+            "model_sha256": result.get("model_sha256"),
+        },
+    )
+    return result
+
+
 @router.post("/retrain/approve")
 async def approve_retrain_endpoint(
     symbol: Optional[str] = Query(default=None),

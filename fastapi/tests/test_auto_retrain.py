@@ -686,7 +686,11 @@ class TestDoRetrainPromotion:
         assert ar._log_retrain_event.await_args.args[0] == "retrain_rejected"
         reason = ar._log_retrain_event.await_args.args[1]["reason"]
         # Con el nuevo gate, holdout se verifica primero: empate en holdout → rechazo
-        assert reason == "holdout_vs_baseline_sum_reward"
+        # T-31/Promo (2026-10-19): el motivo de rechazo se Enriquece con el
+        # detalle de la regla de mejora drástica ("<motivo> | <detalle>") —
+        # se conserva el motivo original como prefijo.
+        assert reason.startswith("holdout_vs_baseline_sum_reward")
+        assert "mejora drástica NO demostrada" in reason
 
     @pytest.mark.asyncio
     async def test_candidate_artifacts_saved_for_t27_gate(self, tmp_path, monkeypatch):
@@ -818,7 +822,9 @@ class TestExperimentLifecycle:
         finish.assert_awaited_once()
         assert finish.await_args.args == (42, "rejected")
         # Con el nuevo gate, holdout se verifica primero
-        assert finish.await_args.kwargs["gate_reason"] == "holdout_vs_baseline_sum_reward"
+        assert finish.await_args.kwargs["gate_reason"].startswith(
+            "holdout_vs_baseline_sum_reward"
+        )
         assert finish.await_args.kwargs.get("model_sha256") is None
 
     @pytest.mark.asyncio
