@@ -54,8 +54,9 @@ QWEN_AUTHORITY_MIN_SAMPLES = int(os.getenv("QWEN_AUTHORITY_MIN_SAMPLES", "30"))
 # Ventana de medición (días) y cadencia de refresco (s).
 QWEN_AUTHORITY_WINDOW_DAYS = int(os.getenv("QWEN_AUTHORITY_WINDOW_DAYS", "14"))
 QWEN_AUTHORITY_TTL_S = int(os.getenv("QWEN_AUTHORITY_TTL_S", "1800"))
-# Horizonte de verificación: +24 h (mismo horizonte del diseño T-31).
-QWEN_AUTHORITY_HORIZON_BARS = 24
+# Horizonte de verificación: +24 h REALES (mismo horizonte del diseño T-31).
+# En BARRAS sería ~35 h por los huecos de la serie H1 (fin de semana/pausa).
+QWEN_AUTHORITY_HORIZON_H = 24
 # Alta convicción = |bias_prob - 0.5| >= 0.2 (equivale a los umbrales 0.7/0.3).
 QWEN_AUTHORITY_MIN_CONVICTION = 0.2
 
@@ -117,13 +118,21 @@ async def _measure(symbol: str) -> dict:
     bar_close = [p[1] for p in pairs]
 
     def realized(t0: float) -> str | None:
-        vhora = (int(t0) // 3600) * 3600
-        i = bisect.bisect_left(bar_ep, float(vhora))
-        if i >= len(bar_ep) or bar_ep[i] != float(vhora):
-            i = bisect.bisect_right(bar_ep, float(vhora)) - 1
-        if i < 0 or i + QWEN_AUTHORITY_HORIZON_BARS >= len(bar_ep):
+        """Dirección realizada a +24 h REALES (no +24 barras).
+
+        T-31 (2026-10-19): dos correcciones frente a la primera versión —
+        (a) las velas llegan ya en UTC real (services/mt5_client normaliza
+            el desfase broker→UTC de +3 h; antes la base quedaba 3 h
+            desplazada);
+        (b) el horizonte es por TIEMPO: la serie H1 tiene huecos (fin de
+            semana, pausa diaria) ⇒ 24 barras ≈ 35 h, no 24 h.
+        Se toma el último cierre en o antes de t0 y el último cierre en o
+        antes de t0+24 h."""
+        c0_i = bisect.bisect_right(bar_ep, t0) - 1
+        c1_i = bisect.bisect_right(bar_ep, t0 + QWEN_AUTHORITY_HORIZON_H * 3600) - 1
+        if c0_i < 0 or c1_i <= c0_i:
             return None
-        d = bar_close[i + QWEN_AUTHORITY_HORIZON_BARS] - bar_close[i]
+        d = bar_close[c1_i] - bar_close[c0_i]
         if d > 0.00005:
             return "UP"
         if d < -0.00005:
@@ -132,6 +141,7 @@ async def _measure(symbol: str) -> dict:
 
     n = 0
     hits = 0
+    buckets: dict = {}
     for r in rows:
         bias = r["llm_bias"]
         prob = r["bias_prob"]
@@ -142,13 +152,23 @@ async def _measure(symbol: str) -> dict:
         if rd is None:
             continue
         n += 1
-        if (bias == "BULLISH" and rd == "UP") or (bias == "BEARISH" and rd == "DOWN"):
-            hits += 1
+        hit = (bias == "BULLISH" and rd == "UP") or (bias == "BEARISH" and rd == "DOWN")
+        hits += hit
+        # Curva de calibración: acierto por bucket de probabilidad declarada.
+        # Responde a la pregunta de T-31: ¿conf 0,75 acierta más que 0,60?
+        b = buckets.setdefault(round(prob, 2), {"n": 0, "hits": 0})
+        b["n"] += 1
+        b["hits"] += hit
 
     acc = (hits / n) if n else None
     result["n"] = n
     result["hits"] = hits
     result["acc"] = acc
+    result["calibration"] = {
+        f"{p:.2f}": {"n": b["n"], "hits": b["hits"],
+                     "acc": (b["hits"] / b["n"]) if b["n"] else None}
+        for p, b in sorted(buckets.items())
+    }
     if n < QWEN_AUTHORITY_MIN_SAMPLES:
         result["reason"] = f"muestra insuficiente ({n} < {QWEN_AUTHORITY_MIN_SAMPLES})"
     elif acc is not None and acc >= QWEN_AUTHORITY_MIN_ACC:
@@ -188,6 +208,16 @@ async def get_authority(symbol: str) -> dict:
         "[QWEN-AUTH] %s → autoridad=%s (%s)",
         symbol, "CONCEDIDA" if data["granted"] else "REVOCADA", data["reason"],
     )
+    cal = data.get("calibration") or {}
+    if cal:
+        parts = []
+        for p, v in cal.items():
+            acc_pct = (v["acc"] * 100) if v.get("acc") is not None else 0.0
+            parts.append(f"{p}→{v['hits']}/{v['n']}={acc_pct:.0f}%")
+        logger.info(
+            "[QWEN-AUTH] %s calibración por bucket de bias_prob: %s",
+            symbol, " · ".join(parts),
+        )
     return data
 
 

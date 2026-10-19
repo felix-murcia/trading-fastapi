@@ -1230,8 +1230,18 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int, symbol: str = TRAINING
 
 async def _fetch_historical_candles(symbol: str, count: int,
                                     timeframe: str = "H1") -> list:
-    """Obtiene velas históricas de MT5 MCP (`timeframe` por defecto H1)."""
+    """Obtiene velas históricas de MT5 MCP (`timeframe` por defecto H1).
+
+    T-31 (2026-10-19): los sellos llegan en el reloj del BROKER (+3 h
+    medidos). Se normalizan a UTC REAL aquí, en la frontera de fetch, para
+    que el emparejamiento con los outcomes reales
+    (`ml/trading_env_v2._index_real_outcomes`, que usa marcas del EA en UTC)
+    caiga en la vela correcta. Sin esta corrección el feedback real se
+    atribuía a la vela ~3 h (2-3 barras) antes de la entrada ⇒ reward del
+    PPO contaminado en cada retrain.
+    """
     import httpx
+    from services.mt5_client import normalize_candles
     # 60s (P3-3): el lookback del canario (30000 H1) tarda ~18s desde el host
     # y el contenedor puede ser más lento — con 30s quedaba al filo.
     async with httpx.AsyncClient(timeout=60.0) as client:
@@ -1241,7 +1251,8 @@ async def _fetch_historical_candles(symbol: str, count: int,
         )
         res.raise_for_status()
         data = res.json()
-        return data if isinstance(data, list) else data.get("candles", [])
+        candles = data if isinstance(data, list) else data.get("candles", [])
+    return normalize_candles(candles)
 
 
 def _build_training_dataframe(candles: list) -> pd.DataFrame:

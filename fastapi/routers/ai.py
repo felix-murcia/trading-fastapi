@@ -173,6 +173,126 @@ async def _qwen_veto_authorized(symbol: str, cycle_id: str) -> bool:
     return False
 
 
+def _parse_times_utc(series) -> pd.Series:
+    """Sellos de vela → datetime UTC, tolerando epoch (s) e ISO-8601.
+
+    El feed entrega ISO ("...Z"); `services.mt5_client` entrega epoch en
+    segundos. `pd.to_datetime` sobre epoch SIN `unit` interpreta nanosegundos
+    → serie corrupta ⇒ el desplazamiento salía None.
+    """
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_datetime(series, unit="s", errors="coerce", utc=True)
+    return pd.to_datetime(series, errors="coerce", utc=True)
+
+
+def _displacement_24h_atr(df: pd.DataFrame) -> Optional[float]:
+    """Desplazamiento del precio en 24 h REALES, normalizado por ATR14.
+
+    T-31 (2026-10-19): el ADX mide el ratio de movimiento direccional sobre
+    volatilidad, NO cuánto se ha movido el precio — por eso un rango con
+    micro-estructura direccional marcaba ADX 33 ("tendencia") con el precio
+    inmóvil. Este es el criterio con poder predictivo medido (separación
+    +1,8 ATR en el movimiento futuro a +24 h).
+
+    Se mide por TIEMPO (no por nº de barras): la serie H1 tiene huecos de
+    fin de semana y pausa diaria ⇒ "24 barras" ≠ 24 h. Sin columna `time`,
+    sin cobertura o sin ATR → None (el detector decide sin este dato).
+    """
+    if "time" not in df.columns or "atr" not in df.columns:
+        return None
+    try:
+        times = _parse_times_utc(df["time"])
+        close = df["close"].astype(float)
+        atr = float(df["atr"].iloc[-1])
+        if times.isna().any() or not (atr > 0):
+            return None
+        last_t = times.iloc[-1]
+        target = last_t - pd.Timedelta(hours=24)
+        # último cierre en o antes de (ahora − 24 h)
+        mask = times <= target
+        if not mask.any():
+            return None
+        past = float(close[mask].iloc[-1])
+        return abs(float(close.iloc[-1]) - past) / atr
+    except (ValueError, TypeError, IndexError, KeyError):
+        return None
+
+
+def _adx_higher_tf(res, tf: str, offset_h: Optional[int] = None) -> Optional[float]:
+    """ADX normalizado [0,1] del marco superior (H4), o None.
+
+    Se calcula con el MISMO motor de features que el resto del sistema
+    (`engineer_market_features`) sobre la serie ya normalizada a UTC. Es la
+    confirmación de "no hay tendencia" en el marco que ve el LLM.
+    """
+    if res is None or isinstance(res, Exception):
+        return None
+    if getattr(res, "status_code", None) != 200:
+        return None
+    try:
+        data = res.json()
+    except ValueError:
+        return None
+    raw = data if isinstance(data, list) else (data.get("candles") or [])
+    if len(raw) < 30:
+        return None
+    try:
+        from ml.trading_env_v2 import engineer_market_features
+        raw = _shift_to_utc(raw, f"{tf}", offset_h=offset_h)
+        frame = pd.DataFrame(raw)
+        if "time" not in frame.columns:
+            return None
+        feats = engineer_market_features(frame)
+        if "adx" not in feats.columns or len(feats) == 0:
+            return None
+        return float(feats["adx"].iloc[-1])
+    except (ValueError, TypeError, KeyError, IndexError):
+        return None
+
+
+def _broker_offset_hours(candles: list) -> int:
+    """Desfase broker→UTC deducido de la serie H1 (la única fiable).
+
+    T-31: la detección por «vela formándose» sólo es exacta en H1 — la
+    rejilla de 4 h de H4 no es múltiplo del desfase medido (3 h) y la
+    vela formándose de H4 puede estar a 2 h de «now» ⇒ la detección sobre
+    H4 devolvía +1 h (falso). El desfase es del SERVIDOR, no del marco:
+    se deduce de H1 y se aplica a todos.
+    """
+    from services.market_time import broker_offset_hours_from_candles
+    try:
+        return broker_offset_hours_from_candles(candles)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _shift_to_utc(candles: list, cycle_id: str = "", offset_h: Optional[int] = None) -> list:
+    """Normaliza los sellos de vela al UTC real (desfase broker→UTC).
+
+    T-31 (2026-10-19): el servidor MT5 sella las velas con su propio reloj
+    (+3 h medidos) marcándolas "Z". Se normalizan a UTC real antes de tocar
+    nada más:
+      (a) la costura con los CSV de `resultadosBT/` (que son UTC puro)
+          deja de tener un salto fantasma de 3 h;
+      (b) las marcas de vela quedan comparables con las del EA/DB.
+    Corrector auto (services/market_time, P2-3): cero hardcode, sigue solo
+    si el broker cambia de huso.
+
+    `offset_h` permite REUTILIZAR el desfase ya deducido de H1 (obligatorio
+    para H4/D1, donde la autodetección no es fiable).
+    """
+    from services.market_time import shift_candle_times
+    if offset_h is None:
+        offset_h = _broker_offset_hours(candles)
+    if not offset_h:
+        return candles
+    logger.warning(
+        "[%s] Sello de velas con desfase broker→UTC %+d h → normalizado a UTC real",
+        cycle_id, offset_h,
+    )
+    return shift_candle_times(candles, offset_h)
+
+
 def _veto_reason(
     original: str,
     final: str,
@@ -404,7 +524,7 @@ def _sma200_context(raw_sorted: pd.DataFrame) -> tuple[Optional[float], Optional
     return float(close.iloc[-1] - sma.iloc[-1]), float(sma.iloc[-1] - sma.iloc[-6])
 
 
-def _hf_candles_for_obs(res, symbol: str, tf: str) -> Optional[list]:
+def _hf_candles_for_obs(res, symbol: str, tf: str, offset_h: Optional[int] = None) -> Optional[list]:
     """Velas H4/D1 UTILIZABLES para los canales del obs T-30 (o None).
 
     Paridad REQ-1 de CALIDAD (no sólo de fórmula): el obs sólo ve una serie
@@ -431,6 +551,7 @@ def _hf_candles_for_obs(res, symbol: str, tf: str) -> Optional[list]:
         raw = data.get("candles") or []
     else:
         return None
+    raw = _shift_to_utc(raw, f"{symbol}:{tf}", offset_h=offset_h)
     raw = _fill_feed_hole(raw, symbol, tf)
     if len(raw) < 205 or not raw or "time" not in raw[0]:
         return None
@@ -444,7 +565,7 @@ def _hf_candles_for_obs(res, symbol: str, tf: str) -> Optional[list]:
     return raw
 
 
-def _higher_tf_context_line(tf: str, res, symbol: str) -> str:
+def _higher_tf_context_line(tf: str, res, symbol: str, offset_h: Optional[int] = None) -> str:
     """Línea de contexto del marco superior H4/D para el prompt de Qwen.
 
     Foco ampliado H4/D (Félix 2026-10-12, backlog P2 «Contexto H4/D»): SMA200
@@ -495,6 +616,11 @@ def _higher_tf_context_line(tf: str, res, symbol: str) -> str:
         raw = data.get("candles") or []
     else:
         raw = []
+    # T-31: sellos de vela al UTC real (desfase broker→UTC) antes del parche
+    # con los CSV (UTC puro) — si no, la costura arrastra un salto de 3 h.
+    # El desfase lo aporta H1 (`offset_h`): la autodetección sobre H4/D1 no
+    # es fiable (rejilla de 4 h ≠ múltiplo del desfase de 3 h).
+    raw = _shift_to_utc(raw, f"{symbol}:{tf}", offset_h=offset_h)
     # Parche de agujero con CSV (mismo parche del obs H1): si el feed volvió
     # a romperse, la serie se repara ANTES de las guardas de calidad — sin
     # CSV o sin continuidad posterior, "Unavailable" sigue mandando.
@@ -821,6 +947,15 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         return PredictResponse(cycle_id=cycle_id, ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
     data = candles_res.json()
     candles = data if isinstance(data, list) else data.get("candles", [])
+    # T-31 (2026-10-19): el feed sella las velas con el reloj del BROKER
+    # (+3 h medidos). Se normalizan a UTC REAL antes de tocar nada más:
+    #  (a) la costura con los CSV de `resultadosBT/` (que son UTC puro)
+    #      deja de tener un salto fantasma de 3 h;
+    #  (b) las marcas de vela quedan comparables con las del EA/DB.
+    # El desfase se deduce de H1 (única serie fiable) y se REUTILIZA para
+    # H4/D1 (su autodetección no es fiable: rejilla de 4 h vs desfase 3 h).
+    _offset_h = _broker_offset_hours(candles)
+    candles = _shift_to_utc(candles, cycle_id, offset_h=_offset_h)
     # Parche del agujero del feed (Félix 2026-10-12): si el MCP corta la
     # historia (salto >168 h), el bloque viejo se sustituye por los CSV de
     # `resultadosBT/` (2026 contiguo) + el día vivo del MCP. El obs deja de
@@ -889,8 +1024,8 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     # estado (pre-registrado §7.4). Para el contrato vivo (20,25) este bloque
     # no se ejecuta: byte-idéntico.
     if brain.higher_tf_features:
-        h4_obs = _hf_candles_for_obs(h4_res, req.symbol, "H4")
-        d1_obs = _hf_candles_for_obs(d1_res, req.symbol, "D1")
+        h4_obs = _hf_candles_for_obs(h4_res, req.symbol, "H4", offset_h=_offset_h)
+        d1_obs = _hf_candles_for_obs(d1_res, req.symbol, "D1", offset_h=_offset_h)
         if h4_obs is None or d1_obs is None:
             logger.error(
                 "[%s] T-30: H4/D1 no servibles para los canales del obs "
@@ -930,8 +1065,8 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     higher_tf_context = (
         "- Higher-timeframe context (H4/D1) — contrast the H1 signal with the "
         "larger trend:\n"
-        f"{_higher_tf_context_line('H4', h4_res, req.symbol)}\n"
-        f"{_higher_tf_context_line('D1', d1_res, req.symbol)}"
+        f"{_higher_tf_context_line('H4', h4_res, req.symbol, offset_h=_offset_h)}\n"
+        f"{_higher_tf_context_line('D1', d1_res, req.symbol, offset_h=_offset_h)}"
     )
 
     current_price = float(df['close'].iloc[-1])
@@ -1342,11 +1477,27 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     quorum_audit: Optional[dict] = None
     if decision in ("BUY", "SELL"):
         _adx_val = float(df['adx'].iloc[-1]) if 'adx' in df.columns else None
+        # T-31: desplazamiento por TIEMPO (24 h reales, no 24 barras: la
+        # serie tiene huecos de fin de semana) normalizado por ATR14.
+        _disp24_atr = _displacement_24h_atr(df)
+        # Confirmación del marco superior: el ADX de H4 (el marco que ve el
+        # LLM). Se calcula sobre la serie H4 ya normalizada a UTC.
+        _adx_h4 = _adx_higher_tf(h4_res, "H4", offset_h=_offset_h)
+        # Pendiente de la estructura H1 en RATIO (ΔSMA200/close) — la misma
+        # escala que REWARD_V2_S0_SLOPE (0,0002) del env. `sma200_slope` viene
+        # como diferencia ABSOLUTA de precio (routers._sma200_context).
+        _slope_ratio = (sma200_slope / current_price) if (
+            sma200_slope is not None and current_price) else None
+        _dist_ratio = (sma200_dist / current_price) if (
+            sma200_dist is not None and current_price) else None
         _lateral = detect_lateral(
             bb_pos=float(df['bb_pos'].iloc[-1]) if 'bb_pos' in df.columns else None,
             atr_pct=(current_atr / current_price) if current_price else None,
             macd_hist=float(df['macd_hist'].iloc[-1]) if 'macd_hist' in df.columns else None,
             adx=_adx_val,
+            disp24_atr=_disp24_atr,
+            adx_h4=_adx_h4,
+            slope_h1_ratio=_slope_ratio,
         )
         if _lateral:
             _collected = collect_votes(
@@ -1354,8 +1505,8 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
                 llm_bias=qwen.get("bias"),
                 llm_bias_prob=qwen.get("bias_prob"),
                 llm_abstained=bool(qwen.get("abstained", False)),
-                sma200_dist=sma200_dist,
-                sma200_slope=sma200_slope,
+                sma200_dist=_dist_ratio,
+                sma200_slope=_slope_ratio,
             )
             _verdict = evaluate(_collected, direction=decision)
             quorum_audit = {
@@ -1366,7 +1517,10 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
                 "tally": _verdict["tally"],
                 "required": _verdict["required"],
                 "reason": _verdict["reason"],
-                "adx": _adx_val,
+                "adx_h1": _adx_val,
+                "adx_h4": _adx_h4,
+                "disp24_atr": _disp24_atr,
+                "slope_h1_ratio": _slope_ratio,
             }
             # Sólo bloquea si la decisión final sigue siendo direccional (si
             # un veto previo ya la dejó en HOLD, el quórum se declara pero no
@@ -1378,7 +1532,18 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
                 )
                 final_decision = "HOLD"
         else:
-            quorum_audit = {"lateral": False, "granted": None, "reason": "régimen no lateral: quorum no aplica"}
+            # T-31: la trazabilidad del veredicto — aunque NO sea lateral se
+            # declaran las ENTRADAS del detector (si no, un "no lateral" sin
+            # números es indescifrable: fue la duda que Surge el 19-10).
+            quorum_audit = {
+                "lateral": False,
+                "granted": None,
+                "reason": "régimen no lateral: quorum no aplica",
+                "adx_h1": _adx_val,
+                "adx_h4": _adx_h4,
+                "disp24_atr": _disp24_atr,
+                "slope_h1_ratio": _slope_ratio,
+            }
 
     # P2-2/S-1: sizing no operable (ni el lote mínimo cabe en el tope de riesgo)
     # → no existe orden válida que enviar: degrada a HOLD y SE DECLARA en la
@@ -1470,9 +1635,13 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
                 "n": _auth.get("n"),
                 "acc": _auth.get("acc"),
                 "reason": _auth.get("reason"),
+                # Curva de calibración por bucket de bias_prob (T-31): es la
+                # medida que responde «¿conf 0,75 acierta más que 0,60?».
+                "calibration": _auth.get("calibration") or {},
             }
             if _auth
-            else {"granted": False, "n": 0, "acc": None, "reason": "sin medir"}
+            else {"granted": False, "n": 0, "acc": None, "reason": "sin medir",
+                  "calibration": {}}
         )
     except Exception as exc:  # noqa: BLE001 — telemetría NUNCA tumba el ciclo
         logger.warning(

@@ -32,29 +32,32 @@ ACTION_BUY = [0.80, 0.18, 0.15, 0.15]
 
 # ───────────────────────── helpers de mercado ─────────────────────────
 
-def _lateral_candles(n: int = 260) -> list[dict]:
-    """Velas LATERALES: precio oscilando en banda estrecha, sin tendencia.
+def _lateral_candles(n: int = 300) -> list[dict]:
+    """Velas LATERALES H1: precio oscilando en banda estrecha, sin tendencia.
 
     Se construyen con el MISMO formato que devuelve el MCP real (time ISO
     UTC) y se pasan por el pipeline real de features
-    (`engineer_market_features`), de modo que el detector de lateral
-    (ADX normalizado + bb_pos/atr_pct/macd_hist) juzga sobre NÚMEROS
-    REALES y no sobre un mock.
+    (`engineer_market_features`), de modo que el detector de lateral juzga
+    sobre NÚMEROS REALES y no sobre un mock.
 
-    Periodo de oscilación 6 barras: en cualquier ventana de 14 (la que usa
-    el ADX) caben 2+ reversiones completas → +DM y −DM se cancelan → ADX
-    bajo (medido: 0,128 con este generador) ⇒ lateral auténtico. Con
-    periodos largos (p. ej. 19) el ADX sube a 0,33+ porque el suavizado
-    ve la mitad del ciclo como tendencia.
+    Reproduce la patología medida en vivo el 2026-10-19: oscilación
+    diaria (periodo 24 h, amplitud 50 pips) ⇒ el precio NO se mueve
+    (desplazamiento 24 h = 0,29 ATR) pero el ADX de H1 sale **0,48**
+    ("tendencia"), porque el ADX mide el ratio de movimiento direccional
+    sobre volatilidad, no cuánto se ha movido el precio. Con el criterio
+    antiguo (ADX) este mercado pasaba como tendencial y el quórum no
+    entraba; con el de desplazamiento (≤1,5 ATR) se declara LATERAL.
     """
     import datetime as dt
+    rng = np.random.default_rng(5)
     base_ts = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
     candles = []
     for i in range(n):
-        px = 1.1000 + 0.0009 * np.sin(2 * np.pi * i / 6.0) + 0.00013 * np.cos(i / 2.7)
-        prev = 1.1000 + 0.0009 * np.sin(2 * np.pi * (i - 1) / 6.0) + 0.00013 * np.cos((i - 1) / 2.7)
+        px = 1.1000 + 0.0005 * np.sin(2 * np.pi * i / 24.0) + float(rng.normal(0, 0.00005))
+        prev = (1.1000 + 0.0005 * np.sin(2 * np.pi * (i - 1) / 24.0)
+                + float(rng.normal(0, 0.00005)))
         candles.append({
-            "time": (base_ts + dt.timedelta(minutes=5 * (n - 1 - i))).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "time": (base_ts + dt.timedelta(hours=n - 1 - i)).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "open": round(float(prev), 5),
             "high": round(float(max(px, prev)) + 0.00004, 5),
             "low": round(float(min(px, prev)) - 0.00004, 5),
@@ -82,6 +85,20 @@ def _trending_candles(n: int = 260) -> list[dict]:
     return candles
 
 
+def _disp24_atr(df) -> float:
+    """Desplazamiento 24 h por ATR14 sobre el df engineers (mismo cálculo
+    que routers/ai._displacement_24h_atr)."""
+    import pandas as pd
+    times = pd.to_datetime(df["time"], errors="coerce", utc=True)
+    close = df["close"].astype(float)
+    atr = float(df["atr"].iloc[-1])
+    target = times.iloc[-1] - pd.Timedelta(hours=24)
+    mask = times <= target
+    if not mask.any() or not atr > 0:
+        return 99.0
+    return abs(float(close.iloc[-1]) - float(close[mask].iloc[-1])) / atr
+
+
 def _qwen_json(bias="BULLISH", bias_prob=0.85, reason="SMA200 -1.7% and ADX 22 rising"):
     content = (
         '{"quality": 8.0, "reason": "%s", "bias": "%s", "bias_prob": %s, '
@@ -92,6 +109,10 @@ def _qwen_json(bias="BULLISH", bias_prob=0.85, reason="SMA200 -1.7% and ADX 22 r
 
 
 class _FakeClient:
+    """Mock del MCP: sirve la serie pedida y AGREGA a H4/D1 como el broker
+    (4 velas H1 → 1 H4, 24 → 1 D1). Sin esa agregación, el ADX del marco
+    superior sería el de H1 y el test no mediría lo que dice medir."""
+
     def __init__(self, payload, candles, *a, **k):
         self._payload = payload
         self._candles = candles
@@ -110,11 +131,32 @@ class _FakeClient:
         r.text = str(payload)[:200]
         return r
 
+    @staticmethod
+    def _aggregate(candles, k):
+        out = []
+        for i in range(0, len(candles) - k + 1, k):
+            g = candles[i:i + k]
+            out.append({
+                "time": g[-1]["time"],
+                "open": g[0]["open"],
+                "high": max(x["high"] for x in g),
+                "low": min(x["low"] for x in g),
+                "close": g[-1]["close"],
+                "tick_volume": 1000,
+            })
+        return out
+
     async def get(self, url, **kwargs):
         if "/api/v1/account/info" in url:
             return self._resp({"equity": 1000.0, "balance": 1000.0})
         if "/api/v1/market/candles/latest" in url:
-            return self._resp(self._candles)
+            tf = "H1"
+            if "timeframe=H4" in url:
+                tf = "H4"
+            elif "timeframe=D1" in url:
+                tf = "D1"
+            k = {"H1": 1, "H4": 4, "D1": 24}[tf]
+            return self._resp(self._aggregate(self._candles, k))
         return self._resp({})
 
     async def post(self, url, **kwargs):
@@ -156,56 +198,143 @@ class TestLateralDetection:
     def test_fixture_market_is_really_lateral(self):
         """AUTO-VERIFICACIÓN DEL FIXTURE: las velas del test deben ser
         laterales de verdad según el MISMO detector que usa producción
-        (ADX normalizado + bb_pos/atr_pct/macd_hist sobre el pipeline real
-        de features). Si el fixture dejara de ser lateral, los tests de
-        integración probarían otra cosa (o nada)."""
+        (desplazamiento 24 h + ADX H4 + bb_pos/atr_pct/macd_hist sobre el
+        pipeline real de features). Si el fixture dejara de ser lateral, los
+        tests de integración probarían otra cosa (o nada).
+
+        Además verifica que el fixture reproduce LA PATOLOGÍA: ADX de H1
+        alto ("tendencia") con el precio inmóvil — el caso exacto que dejó
+        pasar el SELL en rango del 19-10."""
         import pandas as pd
         from ml.trading_env_v2 import engineer_market_features
         df = engineer_market_features(pd.DataFrame(_lateral_candles()))
         last = df.iloc[-1]
         atr = float(last["atr"])
         close = float(last["close"])
+        disp = _disp24_atr(df)
+        adx1 = float(last["adx"])
+        assert adx1 > 0.30, (
+            f"el fixture debe reproducir el ADX engañoso (medido {adx1:.3f})"
+        )
+        assert disp < quorum.DISP_MAX_ATR, (
+            f"el fixture debe tener el precio inmóvil (disp24/ATR={disp:.2f})"
+        )
         assert quorum.detect_lateral(
             bb_pos=float(last["bb_pos"]),
             atr_pct=atr / close,
             macd_hist=float(last["macd_hist"]),
-            adx=float(last["adx"]),
+            adx=adx1,
+            disp24_atr=disp,
+            adx_h4=0.20,
         ) is True, (
             f"el fixture de mercado lateral dejó de ser lateral: "
             f"bb_pos={float(last['bb_pos']):.3f} atr_pct={atr/close:.5f} "
-            f"macd={float(last['macd_hist']):.6f} adx={float(last['adx']):.3f}"
+            f"macd={float(last['macd_hist']):.6f} adx={adx1:.3f} disp24_atr={disp:.2f}"
         )
+
+    def test_displacement_criterion(self):
+        """T-31 (2026-10-19) — el criterio que sustituye al ADX de H1.
+
+        El ADX mide el RATIO de movimiento direccional sobre volatilidad, no
+        cuánto se ha movido el precio: con ADX H1 = 33 (¡"tendencia"!) y un
+        desplazamiento de 24 h de 1,16 ATR, el mercado estaba en un RANGO
+        (54 pips) y el detector lo dejó pasar → SELL con el SL dentro del
+        rango y el TP fuera. Con el criterio de desplazamiento (≤1,5 ATR) el
+        mismo mercado se declara LATERAL."""
+        # Rango: el precio no se ha movido (1,2 ATR en 24 h) → lateral
+        assert quorum.detect_lateral(
+            bb_pos=-0.315, atr_pct=0.00122, macd_hist=-0.000043,
+            adx=0.331, disp24_atr=1.16, adx_h4=0.219,
+        ) is True, "un mercado de 1,16 ATR de desplazamiento es lateral (ADX H1 engañoso)"
+        # Tendencia real: el precio se ha movido (3 ATR) y la estructura tiene
+        # dirección → NO lateral
+        assert quorum.detect_lateral(
+            bb_pos=-0.315, atr_pct=0.00122, macd_hist=-0.000043,
+            adx=0.331, disp24_atr=3.0, adx_h4=0.219, slope_h1_ratio=0.0005,
+        ) is False
+        # Rango por desplazamiento pero con TENDENCIA en H4 → no lateral
+        assert quorum.detect_lateral(
+            bb_pos=-0.315, atr_pct=0.00122, macd_hist=-0.000043,
+            adx=0.331, disp24_atr=1.16, adx_h4=0.30,
+        ) is False, "el marco superior con tendencia manda"
+
+    def test_flat_structure_is_a_chop_signal(self):
+        """Segunda señal de chop: la estructura H1 PLANA (pendiente < 0,02 %)
+        aunque el precio se haya movido algo en 24 h. Caso real del 19-10:
+        desplazamiento 2,1 ATR pero SMA200 H1 con pendiente +0,003 % y H4
+        sin tendencia (ADX 0,219) ⇒ chop ⇒ el quórum aplica."""
+        assert quorum.detect_lateral(
+            bb_pos=-0.381, atr_pct=0.00119, macd_hist=-0.000054,
+            adx=0.355, disp24_atr=2.137, adx_h4=0.219, slope_h1_ratio=0.00003,
+        ) is True, "H4 sin tendencia + estructura H1 plana = chop"
+        # Con estructura H1 con dirección (pendiente > 0,02 %) → no lateral
+        assert quorum.detect_lateral(
+            bb_pos=-0.381, atr_pct=0.00119, macd_hist=-0.000054,
+            adx=0.355, disp24_atr=2.137, adx_h4=0.219, slope_h1_ratio=0.0005,
+        ) is False
+
+    def test_adx_h1_alone_no_longer_decides(self):
+        """T-31: el ADX de H1 deja de ser el juez del régimen (medía el
+        ratio de movimiento direccional, no el desplazamiento: decía
+        "tendencia" con el precio en un rango). Sin señal de chop
+        (desplazamiento <=1,5 ATR o estructura plana) NO se declara lateral."""
+        assert quorum.detect_lateral(
+            bb_pos=0.1, atr_pct=0.004, macd_hist=0.00005, adx=0.14,
+        ) is False, "sin señal de chop no se declara lateral"
+        # con señal de chop (precio inmóvil) → lateral, aunque el ADX sea alto
+        assert quorum.detect_lateral(
+            bb_pos=0.1, atr_pct=0.004, macd_hist=0.00005, adx=0.48,
+            disp24_atr=0.3, adx_h4=0.20,
+        ) is True
 
     def test_adx_scale_is_normalized(self):
         """REGRESIÓN (bug real, detectado en vivo 2026-10-19): la columna
         `adx` del df viene NORMALIZADA a [0,1] (`DX medio / 100` en
         engineer_market_features). Con el umbral 20.0 (escala clásica) TODO
         el mercado se declaraba lateral y el quorum bloqueaba el 100 % de
-        las entradas. El umbral debe ir en la escala del df (0.25), igual
+        las entradas. El umbral debe ir en la escala del df (0,25), igual
         que el reward del env (`is_ranging = adx < 0.25`).
 
-        Este test blinda la ESCALA: un ADX de 0.33 (tendencia real) NO debe
-        declararse lateral, y uno de 0.10 (rango) SÍ."""
+        Este test blinda la ESCALA del umbral de marco superior."""
         assert quorum.ADX_TREND_MIN == 0.25, (
             "el umbral de ADX debe estar en la escala normalizada [0,1] del df"
         )
-        # Tendencia (ADX normalizado 0.33 ≈ 33 clásico) → NO lateral
-        assert quorum.detect_lateral(bb_pos=0.1, atr_pct=0.004, macd_hist=0.00005, adx=0.33) is False
-        # Rango (ADX normalizado 0.10 ≈ 10 clásico) → lateral
-        assert quorum.detect_lateral(bb_pos=0.1, atr_pct=0.004, macd_hist=0.00005, adx=0.10) is True
+        assert quorum.ADX_H4_TREND_MIN == 0.25
+        # Tendencia (ADX normalizado 0.33 ~ 33 clasico) -> NO lateral
+        assert quorum.detect_lateral(
+            bb_pos=0.1, atr_pct=0.004, macd_hist=0.00005,
+            disp24_atr=0.3, adx_h4=0.33,
+        ) is False
+        # Rango (ADX normalizado 0.10 ~ 10 clasico) -> lateral
+        assert quorum.detect_lateral(
+            bb_pos=0.1, atr_pct=0.004, macd_hist=0.00005,
+            disp24_atr=0.3, adx_h4=0.10,
+        ) is True
 
     def test_flat_market_is_lateral(self):
-        assert quorum.detect_lateral(bb_pos=0.1, atr_pct=0.004, macd_hist=0.00005, adx=0.14) is True
+        assert quorum.detect_lateral(
+            bb_pos=0.1, atr_pct=0.004, macd_hist=0.00005,
+            disp24_atr=0.4, adx_h4=0.14,
+        ) is True
 
     def test_trend_adx_blocks_lateral(self):
-        """Con ADX de tendencia, NO es lateral aunque los otros digan rango."""
-        assert quorum.detect_lateral(bb_pos=0.1, atr_pct=0.004, macd_hist=0.00005, adx=0.28) is False
+        """Con ADX de tendencia en H4, NO es lateral aunque el resto diga rango."""
+        assert quorum.detect_lateral(
+            bb_pos=0.1, atr_pct=0.004, macd_hist=0.00005,
+            disp24_atr=0.4, adx_h4=0.28,
+        ) is False
 
     def test_bb_pos_extreme_is_not_lateral(self):
-        assert quorum.detect_lateral(bb_pos=0.95, atr_pct=0.004, macd_hist=0.00005, adx=0.12) is False
+        assert quorum.detect_lateral(
+            bb_pos=0.95, atr_pct=0.004, macd_hist=0.00005,
+            disp24_atr=0.4, adx_h4=0.12,
+        ) is False
 
     def test_high_volatility_is_not_lateral(self):
-        assert quorum.detect_lateral(bb_pos=0.1, atr_pct=0.02, macd_hist=0.00005, adx=0.12) is False
+        assert quorum.detect_lateral(
+            bb_pos=0.1, atr_pct=0.02, macd_hist=0.00005,
+            disp24_atr=0.4, adx_h4=0.12,
+        ) is False
 
     def test_missing_data_is_not_lateral(self):
         """Sin datos NO se declara lateral (fail-safe: no se bloquea por
@@ -220,6 +349,18 @@ class TestVoteCollection:
         # distancia y pendiente contradictorias → no vota
         assert quorum.structure_vote(0.012, -0.003) is None
         assert quorum.structure_vote(None, 0.003) is None
+
+    def test_structure_vote_ignores_flat_slope(self):
+        """T-31: una pendiente de +0,003 % (ruido en un rango) NO cuenta como
+        confirmación de tendencia. La pendiente se normaliza por el precio
+        (ratio), el mismo criterio y constante que el reward del env
+        (REWARD_V2_S0_SLOPE = 0,0002 = 0,02 %)."""
+        # ratio 0,00003 (ruido) → no vota
+        assert quorum.structure_vote(0.0012, 0.00003, price=1.12) is None
+        # ratio 0,0003 (dirección clara) → vota BUY
+        assert quorum.structure_vote(0.0012, 0.0003, price=1.12) == "BUY"
+        # SELL con pendiente negativa clara
+        assert quorum.structure_vote(-0.0012, -0.0003, price=1.12) == "SELL"
 
     def test_llm_vote_requires_evidence_and_conviction(self):
         assert quorum.llm_vote("BULLISH", 0.85, abstained=False) == "BUY"

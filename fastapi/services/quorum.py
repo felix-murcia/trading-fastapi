@@ -50,6 +50,30 @@ ADX_TREND_MIN = 0.25
 BB_POS_TREND_MIN = 0.8
 ATR_PCT_VOLATILE_MIN = 0.015
 MACD_HIST_FLAT_MAX = 0.0002
+# ── T-31 (2026-10-19): el criterio de DESPLAZAMIENTO ──────────────────────
+# El ADX de H1 es ciego al problema real: mide el RATIO de movimiento
+# direccional sobre volatilidad, NO cuánto se ha movido el precio. Medido en
+# vivo el 19-10: ADX H1 = 33,1 ("tendencia") con el precio en un rango de
+# 54 pips y un desplazamiento de 24 h de 15,9 pips (1,16 ATR) ⇒ el detector
+# decía "no lateral" y dejó entrar un SELL en rango (SL dentro del rango,
+# TP fuera). El ADX de H4 (21,9) y el LLM ("Ranging EURUSD regime") sí veían
+# el rango.
+#
+# Criterio nuevo (calibrado sobre 400 velas H1 con el movimiento FUTURO a
+# +24 h como verdad): "lateral" = el precio NO ha ido a ninguna parte, medido
+# por desplazamiento en ATR, con confirmación del marco superior.
+# Separación medida (movimiento futuro medio):
+#   desplazamiento ≤1,0 ATR → 1,36 ATR   | resto → 3,36 ATR  (+2,00)
+#   desplazamiento ≤1,5 ATR → 1,59 ATR   | resto → 3,39 ATR  (+1,80)
+#   sólo ADX H1 <0,25       → 2,37 ATR   | resto → 3,50 ATR  (+1,13)
+DISP_MAX_ATR = 1.5
+# ADX del marco superior (H4): por encima de esto hay tendencia y NO es lateral.
+ADX_H4_TREND_MIN = 0.25
+# Pendiente mínima del SMA200 (H1) para que la ESTRUCTURA vote: por debajo de
+# esto la pendiente es ruido. Se mide en RATIO (ΔSMA200/close), el mismo
+# criterio y la misma constante que el reward del env
+# (REWARD_V2_S0_SLOPE = 0,0002 = 0,02 %).
+SMA200_SLOPE_MIN = 0.0002
 # Quórum: fuentes que deben coincidir (de 3 disponibles).
 QUORUM_REQUIRED_VOTES = 2
 # Umbral de `bias_prob` para que el voto del LLM cuente (además de la
@@ -63,17 +87,41 @@ def detect_lateral(
     atr_pct: Optional[float],
     macd_hist: Optional[float],
     adx: Optional[float] = None,
+    disp24_atr: Optional[float] = None,
+    adx_h4: Optional[float] = None,
+    slope_h1_ratio: Optional[float] = None,
 ) -> bool:
-    """¿Mercado LATERAL? Determinista (nunca el LLM).
+    """¿Mercado LATERAL (chop)? Determinista (nunca el LLM).
 
-    Requiere las tres condiciones de rango + (si hay ADX) que no haya
-    tendencia. Ante datos insuficientes NO se declara lateral (fail-safe:
-    no se aplica el quorum por falta de evidencia).
+    Regla de tres partes:
+      1. Si el marco SUPERIOR tiene tendencia (ADX H4 ≥ 0,25) → NO es
+         lateral: el PPO (seguidor de tendencia) tiene con qué trabajar.
+      2. Alguna señal de "el precio no tiene estructura" debe cumplirse:
+         (a) desplazamiento ≤ DISP_MAX_ATR (1,5 ATR) en 24 h REALES — el
+             criterio con poder predictivo medido (separación +1,8 ATR en el
+             movimiento futuro);
+         (b) la estructura H1 está PLANA (|pendiente SMA200| < 0,02 % del
+             precio): el precio está pegado a su media sin dirección.
+         El ADX de H1 NO decide: mide el ratio de movimiento direccional
+         sobre volatilidad, no cuánto se ha movido el precio (medido en vivo
+         el 19-10: ADX H1 = 35 "tendencia" con el precio en un rango de 54
+         pips ⇒ fue el criterio que dejó pasar un SELL en rango).
+      3. Ni extremo de banda, ni volatilidad alta, ni MACD en expansión.
+
+    Ante datos insuficientes NO se declara lateral (fail-safe: no se aplica
+    el quorum por falta de evidencia).
     """
     if bb_pos is None or atr_pct is None or macd_hist is None:
         return False
-    if adx is not None and adx >= ADX_TREND_MIN:
-        return False  # hay tendencia → no es lateral
+    if adx_h4 is not None and adx_h4 >= ADX_H4_TREND_MIN:
+        return False  # el marco superior tiene tendencia
+    hay_senal_de_chop = False
+    if disp24_atr is not None and disp24_atr <= DISP_MAX_ATR:
+        hay_senal_de_chop = True
+    if slope_h1_ratio is not None and abs(slope_h1_ratio) < SMA200_SLOPE_MIN:
+        hay_senal_de_chop = True
+    if not hay_senal_de_chop:
+        return False
     if abs(bb_pos) > BB_POS_TREND_MIN:
         return False
     if atr_pct > ATR_PCT_VOLATILE_MIN:
@@ -86,18 +134,26 @@ def detect_lateral(
 def structure_vote(
     sma200_dist: Optional[float],
     sma200_slope: Optional[float],
+    price: Optional[float] = None,
 ) -> Optional[str]:
     """Voto de ESTRUCTURA (determinista): precio vs SMA200.
 
-    - distancia > 0 y pendiente > 0 → "BUY" (precio encima y subiendo)
-    - distancia < 0 y pendiente < 0 → "SELL" (precio debajo y bajando)
-    - si se contradicen o faltan datos → None (no vota; no inventa)
+    - distancia > 0 y pendiente (RATIO) > SMA200_SLOPE_MIN → "BUY"
+    - distancia < 0 y pendiente (RATIO) < −SMA200_SLOPE_MIN → "SELL"
+    - si se contradicen, la pendiente es ruido o faltan datos → None (no
+      vota; no inventa)
+
+    T-31: la pendiente se normaliza por el precio (ΔSMA200/close) para
+    comparar con la misma constante que usa el reward del env
+    (REWARD_V2_S0_SLOPE = 0,0002). Sin `price` se asume que la pendiente
+    ya viene en ratio.
     """
     if sma200_dist is None or sma200_slope is None:
         return None
-    if sma200_dist > 0 and sma200_slope > 0:
+    slope_ratio = sma200_slope / price if (price and price > 0) else sma200_slope
+    if sma200_dist > 0 and slope_ratio > SMA200_SLOPE_MIN:
         return "BUY"
-    if sma200_dist < 0 and sma200_slope < 0:
+    if sma200_dist < 0 and slope_ratio < -SMA200_SLOPE_MIN:
         return "SELL"
     return None
 

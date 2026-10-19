@@ -63,3 +63,96 @@ def utc_hour_from_candle(candle_time: datetime, now: datetime | None = None) -> 
     ts = candle_time.astimezone(timezone.utc)
     offset = detect_utc_offset_hours(ts, now)
     return (ts.hour - offset) % 24
+
+
+# ───────────────────────── T-31 (2026-10-19) ─────────────────────────
+# El desfase no sólo afectaba a las ETIQUETAS DE SESIÓN: afectaba a los
+# SELLOS de todas las velas. Medido en vivo: el servidor MT5 va +3 h
+# adelantado (precio 21:56Z vs backend 18:56Z) → las velas estaban selladas
+# 3 h en el futuro. Consecuencias medidas:
+#   (1) el emparejamiento de los outcomes reales con las velas
+#       (ml/trading_env_v2._index_real_outcomes) atribuía el feedback real a
+#       la vela ~3 h ANTES de la entrada (2-3 barras desviadas) ⇒ reward del
+#       PPO contaminado en el retrain;
+#   (2) cualquier medición que mezclara sellos de vela (reloj broker) con
+#       marcas del EA/DB (UTC real) quedaba desplazada 3 h (y con huecos de
+#       fin de semana, "24 barras" ≠ 24 h).
+# El corrector ya existía (P2-3) para las etiquetas de sesión; aquí se
+# generaliza a los sellos de vela, con el MISMO mecanismo auto-corrector
+# (cero hardcode: si el broker cambia de huso, se sigue solo).
+
+
+def broker_offset_hours_from_candles(
+    candles: list, now: datetime | None = None
+) -> int:
+    """Desfase del reloj del broker (h) deducido de la vela MÁS NUEVA.
+
+    La vela más reciente es la formándose ⇒ su sello está en el reloj del
+    broker ⇒ el desfase se deduce igual que en `detect_utc_offset_hours`.
+    Si no hay velas (o ninguna es contemporánea) → 0 (sin corrección).
+    """
+    if not candles:
+        return 0
+    if now is None:
+        now = datetime.now(timezone.utc)
+    newest = None
+    for c in candles:
+        t = c.get("time") if isinstance(c, dict) else None
+        if t is None:
+            continue
+        if isinstance(t, (int, float)):
+            ts = datetime.fromtimestamp(float(t), tz=timezone.utc)
+        else:
+            try:
+                ts = datetime.fromisoformat(str(t).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+        if ts.tzinfo is None:
+            continue
+        if newest is None or ts > newest:
+            newest = ts
+    if newest is None:
+        return 0
+    return detect_utc_offset_hours(newest, now)
+
+
+def correct_candle_epoch(candle_epoch: float, offset_hours: int) -> float:
+    """Pasa un sello de vela (reloj del broker) a UTC verdadero."""
+    if not offset_hours:
+        return float(candle_epoch)
+    return float(candle_epoch) - offset_hours * 3600.0
+
+
+def shift_candle_times(candles: list, offset_hours: int) -> list:
+    """Desplaza los sellos de vela al UTC real CONSERVANDO su formato.
+
+    Las velas del MCP llegan con `time` en ISO-8601 ("...Z") o epoch; el
+    consumidor (pandas, el parche del feed, el join H4/D1) depende de ese
+    formato, así que la corrección se aplica sobre la marca, no
+    re-serializando la vela entera. Sin offset → devuelve la lista intacta.
+    """
+    if not offset_hours or not candles:
+        return candles
+    from datetime import timedelta
+    shifted = []
+    for c in candles:
+        if not isinstance(c, dict):
+            shifted.append(c)
+            continue
+        t = c.get("time")
+        if isinstance(t, (int, float)):
+            out = {**c, "time": correct_candle_epoch(float(t), offset_hours)}
+        elif isinstance(t, str):
+            try:
+                ts = datetime.fromisoformat(t.replace("Z", "+00:00"))
+            except ValueError:
+                shifted.append(c)
+                continue
+            if ts.tzinfo is None:
+                shifted.append(c)
+                continue
+            out = {**c, "time": (ts - timedelta(hours=offset_hours)).strftime("%Y-%m-%dT%H:%M:%SZ")}
+        else:
+            out = c
+        shifted.append(out)
+    return shifted

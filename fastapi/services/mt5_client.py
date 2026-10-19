@@ -66,17 +66,40 @@ async def get_candles(symbol: str, timeframe: str, count: int) -> list[dict]:
         "symbol_name": symbol, "timeframe": timeframe, "count": count,
     })
     candles = data if isinstance(data, list) else data.get("candles", [])
+    return normalize_candles(candles)
+
+
+def normalize_candles(candles: list) -> list[dict]:
+    """Velas → dicts con el sello en UTC REAL y orden ascendente.
+
+    T-31 (2026-10-19): el feed sella las velas con el reloj del BROKER
+    (+3 h medidos) marking them "Z" ⇒ cualquier emparejamiento con marcas
+    del EA/DB (UTC real) quedaba desplazado 3 h. Se corrige con el
+    auto-corrector ya probado (services/market_time, P2-3): el desfase se
+    deduce de la vela más reciente (la formándose) y se aplica a todas.
+    """
+    from services.market_time import (
+        broker_offset_hours_from_candles,
+        correct_candle_epoch,
+    )
+
     def _to_ts(t) -> int:
         if isinstance(t, (int, float)):
             return int(t)
         from datetime import datetime, timezone
         return int(datetime.fromisoformat(str(t).replace("Z", "+00:00")).timestamp())
 
+    offset_h = broker_offset_hours_from_candles(candles)
+    if offset_h:
+        logger.warning(
+            "[MT5] Sello de velas con desfase broker→UTC de %+d h → normalizado a UTC real",
+            offset_h,
+        )
     # P0: el MCP devuelve las velas DESCENDENTES (más nueva primero) — la
     # convención de todo el sistema es ascendente (iloc[-1]=actual, tail=recientes).
     return sorted((
         {
-            "time":   _to_ts(c.get("time", 0)),
+            "time":   int(correct_candle_epoch(_to_ts(c.get("time", 0)), offset_h)),
             "open":   float(c.get("open",  0)),
             "high":   float(c.get("high",  0)),
             "low":    float(c.get("low",   0)),

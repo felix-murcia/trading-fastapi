@@ -171,6 +171,31 @@ class TestAuthorityMeasurement:
         assert "skill demostrada" in data["reason"]
 
     @pytest.mark.asyncio
+    async def test_calibration_buckets_are_reported(self, monkeypatch):
+        """T-31: la calibración por bucket de `bias_prob` se mide y se publica
+        (es la medida que responde «¿conf 0,75 acierta más que 0,60?»)."""
+        monkeypatch.setattr(qwen_authority, "_STATE", {})
+        candles = [
+            {"time": 1792428800 + i * 3600, "close": 1.1000 + i * 0.0001}
+            for i in range(200)
+        ]
+        rows = [
+            {"mt5_time": 1792428800 + 1800 + k * 3600,
+             "llm_bias": "BULLISH", "bias_prob": 0.75}
+            for k in range(35)
+        ]
+        fake_pool = MagicMock()
+        fake_pool.fetch = AsyncMock(return_value=rows)
+        with patch("db.connection.get_pool", return_value=fake_pool), \
+             patch("services.mt5_client.get_candles", AsyncMock(return_value=candles)):
+            data = await qwen_authority._measure("EURUSD")
+        cal = data["calibration"]
+        assert cal, "debe publicarse la calibración por bucket"
+        assert "0.75" in cal
+        assert cal["0.75"]["n"] == 35
+        assert cal["0.75"]["acc"] == 1.0, "las 35 llamadas BULLISH acertaron (serie en alza)"
+
+    @pytest.mark.asyncio
     async def test_measurement_failure_never_raises(self, monkeypatch):
         """Una excepción al medir → veto inerte, ciclo vivo (fail-safe)."""
         monkeypatch.setattr(qwen_authority, "_STATE", {})
