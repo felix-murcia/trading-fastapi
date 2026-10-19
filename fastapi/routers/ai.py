@@ -52,6 +52,7 @@ from services.alignment_metric import pair_state, rolling_alignment
 from services.feed_breaker import h4d_breaker_is_open, h4d_breaker_trip
 from services.feed_patcher import fill_feed_hole as _fill_feed_hole
 from services.market_time import utc_hour_from_candle
+from services.quorum import collect_votes, detect_lateral, evaluate
 from services.memory_client import build_memory_query, fetch_relevant_memories
 from services.news_filter import get_upcoming_news, is_news_blackout
 from services.performance_metrics import record_cycle_metrics
@@ -141,6 +142,35 @@ def _dead_zone_close(symbol: str, decision: str, env_position: int = 1) -> bool:
     _DEAD_ZONE_COUNTER[symbol] = count
     return count >= 2
 _SIZING_WARN_INTERVAL_S = 600.0
+
+
+async def _qwen_veto_authorized(symbol: str, cycle_id: str) -> bool:
+    """¿Tiene el LLM autoridad para revertir una señal con su veto direccional?
+
+    T-31 (orden Félix 2026-10-19): la autoridad se gana con SKILL DEMOSTRADA
+    en datos reales (services/qwen_authority.py), no por lo que el modelo
+    afirme de sí mismo. Sin muestra suficiente o sin skill, el veto queda
+    INERTE y la señal pasa — los vetoes mecánicos siguen mandando.
+
+    El motivo se deja SIEMPRE en el log (nunca una supresión silenciosa).
+    """
+    from services import qwen_authority
+    try:
+        auth = await qwen_authority.get_authority(symbol)
+    except Exception as exc:  # noqa: BLE001 — el veto NUNCA tumba el ciclo
+        logger.warning(
+            "[%s] VETO BIAS ║ autoridad del LLM no verificable (%s: %s) → SIN veto",
+            cycle_id, type(exc).__name__, exc,
+        )
+        return False
+    if auth.get("granted"):
+        return True
+    logger.warning(
+        "[%s] VETO BIAS ║ autoridad del LLM REVOCADA (%s) → SIN veto direccional; "
+        "la señal sigue a riesgo (SL/TP/sizing/quality/riesgo intactos)",
+        cycle_id, auth.get("reason", "sin veredicto"),
+    )
+    return False
 
 
 def _veto_reason(
@@ -1053,9 +1083,11 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         )
         qwen = {
             "ok": True,
+            "abstained": False,
             "quality": 0.0,
             "reason": "position_open: qwen skipped",
             "bias": "NEUTRAL",
+            "bias_prob": 0.5,
             "confidence": 0.0,
             "confidence_modifier": 1.0,
             "regime": "SKIPPED_POSITION_OPEN",
@@ -1281,12 +1313,72 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     elif qwen["quality"] < QUALITY_THRESHOLD and final_decision in ("BUY", "SELL"):
         logger.warning("[%s] VETO CALIDAD ║ Score %.1f < %.1f → HOLD", cycle_id, qwen["quality"], QUALITY_THRESHOLD)
         final_decision = "HOLD"
-    elif final_decision == "BUY" and qwen["bias"] == "BEARISH" and qwen.get("confidence", 1.0) >= 0.7:
-        logger.warning("[%s] VETO BIAS ║ BUY revertido por LLM BEARISH (conf=%.2f)", cycle_id, qwen.get("confidence", 1.0))
-        final_decision = "HOLD"
-    elif final_decision == "SELL" and qwen["bias"] == "BULLISH" and qwen.get("confidence", 1.0) >= 0.7:
-        logger.warning("[%s] VETO BIAS ║ SELL revertido por LLM BULLISH (conf=%.2f)", cycle_id, qwen.get("confidence", 1.0))
-        final_decision = "HOLD"
+    elif final_decision == "BUY" and qwen["bias"] == "BEARISH" and qwen.get("bias_prob", 0.5) <= 0.3:
+        # T-31: el veto direccional sólo tiene autoridad si el juez la ha
+        # demostrado con datos reales (services/qwen_authority.py). Un juez
+        # que dice «0.85» y acierta el 22 % NO puede revertir señales.
+        if not await _qwen_veto_authorized(sym, cycle_id):
+            pass  # sin autoridad → la señal pasa (log explícito en el helper)
+        else:
+            logger.warning("[%s] VETO BIAS ║ BUY revertido por LLM BEARISH (conf=%.2f)", cycle_id, qwen.get("bias_prob", 0.5))
+            final_decision = "HOLD"
+    elif final_decision == "SELL" and qwen["bias"] == "BULLISH" and qwen.get("bias_prob", 0.5) >= 0.7:
+        if not await _qwen_veto_authorized(sym, cycle_id):
+            pass  # sin autoridad → la señal pasa (log explícito en el helper)
+        else:
+            logger.warning("[%s] VETO BIAS ║ SELL revertido por LLM BULLISH (conf=%.2f)", cycle_id, qwen.get("bias_prob", 0.5))
+            final_decision = "HOLD"
+
+    # T-31 (orden Félix 2026-10-19) — QUÓRUM ENTRE MODELOS EN MERCADO
+    # LATERAL. En rango, una entrada direccional sostenida por un solo
+    # modelo es una moneda al aire (el PPO se entrenó en un contexto
+    # tendencial y su edge en lateral NO está demostrado). El régimen se
+    # detecta de forma DETERMINISTA (ADX + bb_pos/atr_pct/macd_hist) — nunca
+    # con la opinión del LLM (su campo `regime` es una salida copiada por
+    # plantilla, RCA T-31). Fuentes de voto independientes: PPO, LLM (sólo
+    # con evidencia) y estructura SMA200. Se exigen 2 de 3 coincidentes.
+    # En régimen NO lateral el quorum NO se aplica (cero cambios de
+    # comportamiento fuera del lateral).
+    quorum_audit: Optional[dict] = None
+    if decision in ("BUY", "SELL"):
+        _adx_val = float(df['adx'].iloc[-1]) if 'adx' in df.columns else None
+        _lateral = detect_lateral(
+            bb_pos=float(df['bb_pos'].iloc[-1]) if 'bb_pos' in df.columns else None,
+            atr_pct=(current_atr / current_price) if current_price else None,
+            macd_hist=float(df['macd_hist'].iloc[-1]) if 'macd_hist' in df.columns else None,
+            adx=_adx_val,
+        )
+        if _lateral:
+            _collected = collect_votes(
+                ppo_direction=decision,
+                llm_bias=qwen.get("bias"),
+                llm_bias_prob=qwen.get("bias_prob"),
+                llm_abstained=bool(qwen.get("abstained", False)),
+                sma200_dist=sma200_dist,
+                sma200_slope=sma200_slope,
+            )
+            _verdict = evaluate(_collected, direction=decision)
+            quorum_audit = {
+                "lateral": True,
+                "granted": _verdict["granted"],
+                "direction": _verdict["direction"],
+                "votes": _verdict["votes"],
+                "tally": _verdict["tally"],
+                "required": _verdict["required"],
+                "reason": _verdict["reason"],
+                "adx": _adx_val,
+            }
+            # Sólo bloquea si la decisión final sigue siendo direccional (si
+            # un veto previo ya la dejó en HOLD, el quórum se declara pero no
+            # añade nada).
+            if final_decision in ("BUY", "SELL") and not _verdict["granted"]:
+                logger.warning(
+                    "[%s] QUÓRUM ║ mercado lateral sin consenso (%s) → HOLD",
+                    cycle_id, _verdict["reason"],
+                )
+                final_decision = "HOLD"
+        else:
+            quorum_audit = {"lateral": False, "granted": None, "reason": "régimen no lateral: quorum no aplica"}
 
     # P2-2/S-1: sizing no operable (ni el lote mínimo cabe en el tope de riesgo)
     # → no existe orden válida que enviar: degrada a HOLD y SE DECLARA en la
@@ -1367,6 +1459,27 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     # Capa observacional → contención como en la deliberación: su fallo NO
     # tumba el ciclo; el error queda EXPLÍCITO en el payload (nada silencioso).
     t28_pair = pair_state(decision, qwen["bias"])
+    # T-31: snapshot de la autoridad del veto (medida en vivo, cacheada) — la
+    # auditoría deja constancia de si el LLM tenía o no poder de veto.
+    try:
+        from services import qwen_authority as _qa
+        _auth = _qa.peek(req.symbol)
+        qwen_authority_snapshot = (
+            {
+                "granted": bool(_auth.get("granted")),
+                "n": _auth.get("n"),
+                "acc": _auth.get("acc"),
+                "reason": _auth.get("reason"),
+            }
+            if _auth
+            else {"granted": False, "n": 0, "acc": None, "reason": "sin medir"}
+        )
+    except Exception as exc:  # noqa: BLE001 — telemetría NUNCA tumba el ciclo
+        logger.warning(
+            "[%s] T-31 snapshot de autoridad falló (%s: %s) → declarado en audit",
+            cycle_id, type(exc).__name__, exc,
+        )
+        qwen_authority_snapshot = {"granted": False, "n": 0, "acc": None, "reason": "error"}
     try:
         t28_rolling = await rolling_alignment(req.symbol)
     except Exception as exc:
@@ -1403,6 +1516,13 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
                 else None
             ),
             "llm_bias": qwen["bias"],
+            # T-31: probabilidad direccional real del LLM (0-1) — permite
+            # medir su calibración ex-post (Fase A: exactitud por bucket).
+            "llm_bias_prob": round(qwen.get("bias_prob", 0.5), 3),
+            # T-31: autoridad del veto direccional (medida en vivo): el veto
+            # solo revierte con skill demostrada. `granted=false` = el juez
+            # no ha acreditado skill → su sesgo NO revierte señales.
+            "qwen_veto_authority": qwen_authority_snapshot,
             # T-28 (REQ-1, 2026-10-17): acuerdo direccional PPO↔LLM por ciclo —
             # `decision` (arriba) es la FINAL del ciclo; `ppo_direction` es la
             # cruda del PPO. `pair_state` clasifica este par; `alignment_rolling`
@@ -1413,6 +1533,15 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             "quality_score": round(qwen["quality"], 2),
             "quality_reason": qwen["reason"],
             "qwen_degraded": not qwen.get("ok", True),
+            # T-31: abstención declarada — el LLM respondió sin evidencia
+            # (razón sin número del contexto) o repitió plantilla. NO vota:
+            # el PPO decide con los controles de riesgo intactos.
+            "qwen_abstained": bool(qwen.get("abstained", False)),
+            # T-31: quórum entre modelos en mercado lateral (PPO + LLM con
+            # evidencia + estructura SMA200). `null` = régimen no lateral
+            # (el quorum no aplica); `granted=false` = HOLD por falta de
+            # consenso entre fuentes independientes.
+            "quorum": quorum_audit,
             # LR-1 (2026-10-14): true = el juicio LLM se omitió a propósito
             # (posición abierta, decisiónalmente neutro) — distingue el
             # skip deliberado de cualquier degradación real (`qwen_degraded`

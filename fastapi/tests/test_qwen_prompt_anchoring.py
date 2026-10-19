@@ -77,7 +77,7 @@ def _capturing_client(canned_content: str):
 
 
 _UNIFIED_CANNED = (
-    '{"quality": 6.5, "reason": "mixed signals", "bias": "NEUTRAL", '
+    '{"quality": 6.5, "reason": "mixed signals, ADX 18 flat", "bias": "NEUTRAL", '
     '"confidence_modifier": 1.0, "sl_adjusted": 0.20, "tp_adjusted": 0.40, '
     '"regime": "RANGING"}'
 )
@@ -105,19 +105,24 @@ class TestUnifiedPromptAnchoring:
 
     @pytest.mark.asyncio
     async def test_two_distinct_example_qualities(self):
-        """Debe haber >=2 ejemplos con quality DISTINTO (rompe el ancla 7.5)."""
+        """T-31 (2026-10-19): el ancla de calidad venía de los EJEMPLOS.
+        Ya no hay ejemplos con literales → este test fija que NO se
+        reintroduzcan (ver `test_no_copyable_literal_examples`)."""
         prompt = await _unified_prompt()
         qualities = re.findall(r'"quality":\s*([0-9]+(?:\.[0-9]+)?)', prompt)
-        assert len(set(qualities)) >= 2, (
-            f"examples de quality anclados en un solo valor: {qualities}"
+        assert not qualities, (
+            f"el prompt volvió a traer qualities literales: {qualities}"
         )
 
     @pytest.mark.asyncio
     async def test_two_distinct_example_biases(self):
-        """Los ejemplos deben cubrir sesgos opuestos (BULLISH vs BEARISH)."""
+        """T-31: igual que el anterior pero para el sesgo (el monocultivo
+        BULLISH venía del ejemplo #1 BULLISH)."""
         prompt = await _unified_prompt()
-        biases = re.findall(r'"bias":\s*"([A-Z]+)"', prompt)
-        assert len(set(biases)) >= 2, f"biases de ejemplo anclados: {biases}"
+        biases = re.findall(r'"bias":\s*"(BULLISH|BEARISH|NEUTRAL)"', prompt)
+        assert not biases, (
+            f"el prompt volvió a traer sesgos literales: {biases}"
+        )
 
     @pytest.mark.asyncio
     async def test_explicit_do_not_copy_instruction(self):
@@ -128,9 +133,14 @@ class TestUnifiedPromptAnchoring:
 
     @pytest.mark.asyncio
     async def test_quality_rubric_present(self):
-        """Rúbrica con tramos separados (7-10 / 4-7 / 1-4) y criterios."""
+        """T-31: la rúbrica se reescribió en prosa (bandas alta/media/baja)
+        para que no contenga eslóganes copiables. Se fija el contenido
+        nuevo, no el texto antiguo."""
         prompt = await _unified_prompt()
-        assert "7-10" in prompt and "1-4" in prompt, "falta la rúbrica de quality"
+        assert "quality 0-10" in prompt, "falta la escala de quality"
+        assert "high band" in prompt and "low band" in prompt, (
+            "faltan las bandas de la rúbrica"
+        )
 
     @pytest.mark.asyncio
     async def test_single_json_object_instruction(self):
@@ -138,6 +148,67 @@ class TestUnifiedPromptAnchoring:
         prompt = await _unified_prompt()
         assert re.search(r"(?i)one json object", prompt), (
             "falta 'ONE JSON object' (riesgo de salida doble → parse degrada)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_copyable_literal_examples(self):
+        """T-31 (2026-10-19) — RCA MEDIDA: el ejemplo #1 era BULLISH con
+        razón positiva («trend and ADX align») y el 8B lo copiaba literal en
+        289/319 ciclos (90,6 %) — de los cuales 274 BULLISH (94,8 %). El
+        monocultivo BULLISH era la PLANTILLA, no un juicio.
+
+        2ª medición: con ejemplos sin «premio», el modelo copió el ejemplo
+        #3 íntegro (quality 7.0, bias_prob 0.68, conf_mod 1.2). A este
+        modelo (8B Q2_K, temp 0.2) un ejemplo con LITERALES es una
+        plantilla, sea cual sea su contenido.
+
+        ⇒ REGRESIÓN QUE ESTE TEST BLINDA: el prompt NO puede contener
+        ejemplos con valores literales (ni sesgo, ni quality, ni reason
+        reutilizable). Sólo la FORMA con marcadores de posición."""
+        prompt = await _unified_prompt()
+        # Literales = valores REALES (número o sesgo cerrado). Los
+        # marcadores (<number 0-10>, "<BULLISH|BEARISH|NEUTRAL>") no son
+        # literales copiables: no hay nada que reproducir.
+        literal_quality = re.findall(r'"quality":\s*[0-9]', prompt)
+        literal_bias = re.findall(r'"bias":\s*"(?:BULLISH|BEARISH|NEUTRAL)"', prompt)
+        literal_prob = re.findall(r'"bias_prob":\s*[0-9]', prompt)
+        assert not (literal_quality or literal_bias or literal_prob), (
+            f"el prompt tiene ejemplos con valores copiables: "
+            f"q={literal_quality} bias={literal_bias} prob={literal_prob}"
+        )
+        for banned in ("trend and adx align", "trend, adx and session align",
+                       "clean continuation", "range chop against signal",
+                       "mixed trend and momentum signals", "no clear edge here",
+                       "chop against the signal"):
+            assert banned not in prompt.lower(), (
+                f"razón de ejemplo reutilizable presente: '{banned}'"
+            )
+
+    @pytest.mark.asyncio
+    async def test_schema_placeholders_present(self):
+        """Sin ejemplos, la FORMA debe quedar explícita: las 7 claves con sus
+        rangos. Sin esto el modelo puede devolver un JSON sin `bias_prob`."""
+        prompt = await _unified_prompt()
+        for key in ("quality", "reason", "bias", "bias_prob",
+                    "confidence_modifier", "reentry_ok", "regime"):
+            assert f'"{key}"' in prompt, f"falta la clave {key} en la forma del prompt"
+        assert "0.00-1.00" in prompt or "0-1" in prompt, "falta el rango de bias_prob"
+
+    @pytest.mark.asyncio
+    async def test_evidence_first_instruction_present(self):
+        """T-31: la razón debe citar un NÚMERO del contexto (evidencia primero).
+        Sin esto el modelo vuelve a la plantilla genérica."""
+        prompt = await _unified_prompt()
+        assert re.search(r"(?i)evidence first", prompt), "falta la instrucción EVIDENCE FIRST"
+        assert re.search(r"(?i)number", prompt), "la instrucción debe exigir citar un número"
+
+    @pytest.mark.asyncio
+    async def test_no_slogan_in_rubric(self):
+        """La rúbrica vieja («trend/ADX/session agree») era EL eslogan que el
+        modelo copiaba verbatim — no puede seguir en el prompt."""
+        prompt = (await _unified_prompt()).lower()
+        assert "trend/adx/session agree" not in prompt, (
+            "la rúbrica conserva el eslogan copiable"
         )
 
 
@@ -245,17 +316,28 @@ class TestPromptAntiAnchorDesign:
 
     @pytest.mark.asyncio
     async def test_three_format_examples_present(self):
-        """Tercer ejemplo con valores distintos (aplana el prior del ancla)."""
+        """T-31 (2026-10-19): ya NO hay ejemplos FORMAT con literales — el
+        prompt es la FORMA con marcadores de posición. La forma debe
+        aparecer UNA vez y traer las 7 claves (nada que copiar)."""
         _, prompt = await _unified_with(_UNIFIED_CANNED)
-        n_examples = prompt.count('"reentry_ok":')
-        assert n_examples >= 3, f"sólo {n_examples} ejemplos FORMAT en el prompt"
+        assert prompt.count('"reentry_ok":') == 1, (
+            "el prompt debe traer la forma UNA vez (sin ejemplos repetidos)"
+        )
+        for key in ("quality", "reason", "bias", "bias_prob",
+                    "confidence_modifier", "reentry_ok", "regime"):
+            assert f'"{key}"' in prompt, f"falta {key} en la forma"
 
     @pytest.mark.asyncio
     async def test_post_example_copy_warning(self):
-        """Advertencia de no-copiar POST-EJEMPLOS (antes sólo estaba antes)."""
+        """T-31: sin ejemplos, la advertencia pasa a "no hay ejemplos que
+        imitar" + "EVIDENCE FIRST" (la instrucción que SÍ manda)."""
         _, prompt = await _unified_with(_UNIFIED_CANNED)
-        assert re.search(r"(?i)copied from the examples", prompt), (
-            "falta la advertencia post-ejemplos (el ancla se copiaba tras leerlas)"
+        assert re.search(r"(?i)no examples to imitate", prompt), (
+            "falta la instrucción de que no hay ejemplos (el modelo debe "
+            "inventar sus valores, no copiar)"
+        )
+        assert re.search(r"(?i)evidence first", prompt), (
+            "falta EVIDENCE FIRST (la razón debe citar un número)"
         )
 
     @pytest.mark.asyncio
@@ -301,12 +383,12 @@ class TestTemperatureExperimentB:
 # distintos — plantilla parrota, no juicio.
 
 _PARROT_A = (
-    '{"quality": 7.0, "reason": "Parrot template Alpha", "bias": "BULLISH", '
+    '{"quality": 7.0, "reason": "trend and ADX align, SMA200 -1.7%", "bias": "BULLISH", '
     '"confidence_modifier": 1.1, "reentry_ok": true, "regime": "TRENDING"}'
 )
 
 _PARROT_B = (
-    '{"quality": 6.0, "reason": "Choppy range without momentum follow-through", '
+    '{"quality": 6.0, "reason": "choppy range, ATR 0.0012 flat", '
     '"bias": "BEARISH", "confidence_modifier": 0.9, "reentry_ok": true, '
     '"regime": "RANGING"}'
 )
@@ -321,17 +403,17 @@ class TestParrotGuardRCA:
     # fija). Sustituyen a las 3 citas reales del 4B (17:10-17:40), que
     # quedaban sobreajustadas a un modelo retirado.
     _ROT_V1 = (
-        '{"quality": 8.0, "reason": "Trend and ADX align with the ML signal", '
+        '{"quality": 8.0, "reason": "Trend and ADX align with the ML signal 1.16", '
         '"bias": "BULLISH", "confidence_modifier": 1.3, "reentry_ok": true, '
         '"regime": "TRENDING"}'
     )
     _ROT_V2 = (
-        '{"quality": 8.0, "reason": "Trend and ADX align with ML signal context", '
+        '{"quality": 8.0, "reason": "Trend and ADX align with ML signal context 1.16", '
         '"bias": "BULLISH", "confidence_modifier": 1.3, "reentry_ok": true, '
         '"regime": "TRENDING"}'
     )
     _ROT_V3 = (
-        '{"quality": 8.0, "reason": "Trend and ADX and session align with ML", '
+        '{"quality": 8.0, "reason": "Trend and ADX and session align with ML 1.16", '
         '"bias": "BULLISH", "confidence_modifier": 1.3, "reentry_ok": true, '
         '"regime": "TRENDING"}'
     )
@@ -345,36 +427,41 @@ class TestParrotGuardRCA:
 
     @pytest.mark.asyncio
     async def test_third_identical_reason_degrades(self):
-        """3ª razón idéntica consecutiva → degradada fail-closed."""
+        """3ª razón idéntica consecutiva → ABSTENCIÓN (T-31).
+
+        Antes: degradada fail-closed (quality 0 → veto de calidad → HOLD,
+        es decir parálisis total por una plantilla repetida). Ahora: el juez
+        se aparta y deja decidir al PPO. Declarado, nunca silencioso."""
         await _unified_with(_PARROT_A)
         await _unified_with(_PARROT_A)
         r3, _ = await _unified_with(_PARROT_A)
-        assert r3["ok"] is False, "parrota pasó por juicio real"
-        assert r3["quality"] == 0.0, "debe ser quality=0 (fail-closed)"
+        assert r3["ok"] is True, "la parrota no es un fallo técnico"
+        assert r3.get("abstained") is True, "la parrota debe declararse abstención"
+        assert r3["quality"] == 5.0, "abstención = calidad neutral (no bloquea)"
 
     @pytest.mark.asyncio
     async def test_parrot_degrade_persists(self):
-        """La racha no se resetea al degradar: la 4ª también degrada."""
+        """La racha no se resetea al abstener: la 4ª también se abstiene."""
         await _unified_with(_PARROT_A)
         await _unified_with(_PARROT_A)
         r3, _ = await _unified_with(_PARROT_A)
         r4, _ = await _unified_with(_PARROT_A)
-        assert r3["ok"] is False and r4["ok"] is False
+        assert r3.get("abstained") is True and r4.get("abstained") is True
 
     @pytest.mark.asyncio
     async def test_different_reason_resets_streak(self):
-        """Razón disímil resetea la racha (A,A,B,A,A,A → degrada en la 6ª)."""
+        """Razón disímil resetea la racha (A,A,B,A,A,A → abstiene en la 6ª)."""
         results = []
         for canned in (_PARROT_A, _PARROT_A, _PARROT_B,
                        _PARROT_A, _PARROT_A, _PARROT_A):
             r, _ = await _unified_with(canned)
-            results.append(r["ok"])
-        assert results == [True, True, True, True, True, False], results
+            results.append(r.get("abstained", False))
+        assert results == [False, False, False, False, False, True], results
 
     @pytest.mark.asyncio
     async def test_rotated_variants_constant_quality_degrade_at_third(self):
         """C+: variantes ROTADAS (Jaccard ≥ umbral entre todas las parejas,
-        calidad constante = firma parrota) degradan en el 3er ciclo — el
+        calidad constante = firma parrota) se abstienen en el 3er ciclo — el
         escape por rotación observado con el 4B queda cubierto sin depender
         de sus strings (S3: fixtures sintéticas auto-verificadas)."""
         variants = (self._ROT_V1, self._ROT_V2, self._ROT_V3)
@@ -390,8 +477,8 @@ class TestParrotGuardRCA:
         r2, _ = await _unified_with(self._ROT_V2)
         r3, _ = await _unified_with(self._ROT_V3)
         assert r1["ok"] is True and r2["ok"] is True
-        assert r3["ok"] is False, "la rotación de variantes escapó a la guarda C+"
-        assert r3["quality"] == 0.0
+        assert r3.get("abstained") is True, "la rotación de variantes escapó a la guarda C+"
+        assert r3["quality"] == 5.0
 
     @pytest.mark.asyncio
     async def test_streak_is_per_symbol(self):
@@ -399,9 +486,9 @@ class TestParrotGuardRCA:
         await _unified_with(_PARROT_A)                              # EURUSD ×1
         await _unified_with(_PARROT_A)                              # EURUSD ×2
         rg, _ = await _unified_with(_PARROT_A, symbol="GBPUSD")     # GBPUSD ×1
-        re_, _ = await _unified_with(_PARROT_A)                     # EURUSD ×3 → degrade
-        assert rg["ok"] is True, "la racha de EURUSD contaminó GBPUSD"
-        assert re_["ok"] is False
+        re_, _ = await _unified_with(_PARROT_A)                     # EURUSD ×3 → abstiene
+        assert rg.get("abstained") is False, "la racha de EURUSD contaminó GBPUSD"
+        assert re_.get("abstained") is True
 
     @pytest.mark.asyncio
     async def test_empty_reason_not_counted(self):
@@ -413,7 +500,9 @@ class TestParrotGuardRCA:
         r1, _ = await _unified_with(no_reason)
         r2, _ = await _unified_with(no_reason)
         r3, _ = await _unified_with(no_reason)
-        assert r1["ok"] is True and r2["ok"] is True and r3["ok"] is True
+        # T-31: la razón vacía no aporta evidencia → abstención declarada
+        # (antes: entraba como juicio con quality 6.0).
+        assert all(r.get("abstained") is True for r in (r1, r2, r3))
 
     # ── S1 (orden Félix 2026-10-14): el disparador exige quality CONSTANTE ──
     # Razones genuinas del 8B en vivo (21:15/21:20, quality variable 6-9)
@@ -457,13 +546,21 @@ class TestParrotGuardRCA:
 
     @pytest.mark.asyncio
     async def test_same_quality_and_similar_reason_still_degrades(self):
-        """S1: el disparador sigue activo para la firma parrota real —
-        razón similar Y quality constante ≥3 ciclos → degradada."""
+        """S1 + T-31: el disparador sigue activo para la firma parrota real —
+        razón similar Y quality constante ≥3 ciclos → ABSTENCIÓN.
+
+        T-31 (2026-10-19): la parrota ya no degrada a fail-closed (quality 0
+        → HOLD, o sea parálisis total); el juez se APARTA y deja decidir al
+        PPO. Declarado en la respuesta (`abstained=True`), nunca silencioso.
+        """
         # _PARROT_A = q 7.0 constante con la misma razón (firma parrota).
         await _unified_with(_PARROT_A)
         await _unified_with(_PARROT_A)
         r3, _ = await _unified_with(_PARROT_A)
-        assert r3["ok"] is False and r3["quality"] == 0.0
+        assert r3["ok"] is True, "la parrota ya no es un fallo técnico"
+        assert r3.get("abstained") is True, "la parrota debe declararse abstención"
+        assert r3["quality"] == 5.0, "abstención = calidad neutral (no bloquea)"
+        assert r3["bias"] == "NEUTRAL", "abstención = sin voto direccional"
 
 
 class TestLLM8BLatencyBudget:

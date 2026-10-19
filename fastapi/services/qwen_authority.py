@@ -1,0 +1,207 @@
+"""
+T-31 Fase B (orden Félix 2026-10-19): «conf válido, estable y razonado» —
+la autoridad del veto direccional del LLM se GANA con skill demostrada en
+datos reales, no por lo que el modelo afirme de sí mismo.
+
+Por qué existe
+--------------
+RCA (2026-10-19): el veto leía `qwen["confidence"]`, clave que el dict live
+NUNCA devolvía → default 1.0 fantasma → el veto se disparaba SIEMPRE que el
+sesgo oponía («conf=1.00» en el 100 % de los logs). Fase A (auditoría ex-post
+de 1 140 ciclos) midió la skill REAL del juez:
+
+    - pre-fenómeno (15-09→15-10): 49,0 % (moneda al aire)
+    - monocultivo BULLISH (16-10→hoy): 22,0 % (ANTI-PREDICTIVO)
+    - el veto acertó el 22 % de las veces en la ventana actual
+
+Es decir: un juez que dice «estoy seguro al 85 %» y acierta el 22 % NO puede
+tener autoridad para revertir señales. Pero el modelo tampoco se puede
+desconfiar a ciegas — puede mejorar. Por eso la autoridad es CONDICIONAL y
+se revisa sola:
+
+    - el veto direccional solo revierte si el juez ha demostrado, en el
+      histórico reciente y en vivo, exactitud direccional ≥ QWEN_AUTHORITY_MIN_ACC
+      sobre ≥ QWEN_AUTHORITY_MIN_SAMPLES llamadas de alta convicción;
+    - si no hay muestra suficiente o la skill no está, el veto queda INERTE
+      (log explícito: por qué) y la señal pasa — los vetoes mecánicos
+      (posición, calidad, ranging, sizing, riesgo, news, time-stop) siguen
+      mandando intactos;
+    - la autoridad se REVISA sola: si el juez mejora, recupera el veto sin
+      intervención; si empeora, lo pierde sola.
+
+Esto NO es «quitar el veto porque no funciona»: es condicionar su poder a
+evidencia medida. El veto sigue existiendo, con umbrales congelados (0.7 /
+0.3 sobre la probabilidad real `bias_prob`); lo que cambia es quién lo
+habilita.
+
+Criterio de dirección (congelado, T-24 §7 / T-30): coincidencia de
+dirección PPO↔LLM. Aquí se mide la skill del LLM aislado (su sesgo frente al
+mercado realizado a +24 h), que es la habilidad que el veto invoca.
+"""
+import asyncio
+import bisect
+import datetime as dt
+import logging
+import os
+
+logger = logging.getLogger(__name__)
+
+# Umbrales de autoridad (congelados en la decisión de Félix 2026-10-19).
+# MIN_SAMPLES: sin muestra suficiente NO hay veredicto — el veto queda inerte
+# por ignorancia (no por confianza en el juez).
+QWEN_AUTHORITY_MIN_ACC = float(os.getenv("QWEN_AUTHORITY_MIN_ACC", "0.55"))
+QWEN_AUTHORITY_MIN_SAMPLES = int(os.getenv("QWEN_AUTHORITY_MIN_SAMPLES", "30"))
+# Ventana de medición (días) y cadencia de refresco (s).
+QWEN_AUTHORITY_WINDOW_DAYS = int(os.getenv("QWEN_AUTHORITY_WINDOW_DAYS", "14"))
+QWEN_AUTHORITY_TTL_S = int(os.getenv("QWEN_AUTHORITY_TTL_S", "1800"))
+# Horizonte de verificación: +24 h (mismo horizonte del diseño T-31).
+QWEN_AUTHORITY_HORIZON_BARS = 24
+# Alta convicción = |bias_prob - 0.5| >= 0.2 (equivale a los umbrales 0.7/0.3).
+QWEN_AUTHORITY_MIN_CONVICTION = 0.2
+
+# Estado en memoria por símbolo (TTL) — el cálculo es el mismo para todos
+# los pares salvo los datos, pero se cachea por par para no recomputar.
+_STATE: dict[str, dict] = {}
+_LOCK = asyncio.Lock()
+
+
+def _to_epoch(bar: dict) -> float:
+    t = bar.get("time")
+    if isinstance(t, str):
+        return dt.datetime.fromisoformat(t.replace("Z", "+00:00")).timestamp()
+    return float(t)
+
+
+async def _measure(symbol: str) -> dict:
+    """Mide la skill direccional del LLM en la ventana reciente (live)."""
+    from db.connection import get_pool
+    from services.mt5_client import get_candles
+
+    pool = get_pool()
+    since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=QWEN_AUTHORITY_WINDOW_DAYS)
+    rows = await pool.fetch(
+        """
+        SELECT (data->'data'->>'mt5_time')::float AS mt5_time,
+               data->'data'->>'llm_bias'          AS llm_bias,
+               (data->'data'->>'llm_bias_prob')::float AS bias_prob
+        FROM audit_log
+        WHERE event='ai_predict_cycle'
+          AND data->'data'->>'symbol' = $1
+          AND data->'data'->>'llm_bias' IN ('BULLISH','BEARISH')
+          AND data->'data'->>'llm_bias_prob' IS NOT NULL
+          AND (data->'data'->>'mt5_time')::float >= $2
+        ORDER BY created_at
+        """,
+        symbol,
+        since.timestamp(),
+    )
+
+    result = {
+        "symbol": symbol,
+        "n": 0,
+        "hits": 0,
+        "acc": None,
+        "granted": False,
+        "reason": "sin datos",
+        "measured_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+    }
+    if not rows:
+        return result
+
+    raw = await get_candles(symbol, "H1", 600)
+    pairs = sorted((_to_epoch(b), float(b["close"])) for b in raw)
+    if not pairs:
+        result["reason"] = "sin velas H1"
+        return result
+    bar_ep = [p[0] for p in pairs]
+    bar_close = [p[1] for p in pairs]
+
+    def realized(t0: float) -> str | None:
+        vhora = (int(t0) // 3600) * 3600
+        i = bisect.bisect_left(bar_ep, float(vhora))
+        if i >= len(bar_ep) or bar_ep[i] != float(vhora):
+            i = bisect.bisect_right(bar_ep, float(vhora)) - 1
+        if i < 0 or i + QWEN_AUTHORITY_HORIZON_BARS >= len(bar_ep):
+            return None
+        d = bar_close[i + QWEN_AUTHORITY_HORIZON_BARS] - bar_close[i]
+        if d > 0.00005:
+            return "UP"
+        if d < -0.00005:
+            return "DOWN"
+        return None
+
+    n = 0
+    hits = 0
+    for r in rows:
+        bias = r["llm_bias"]
+        prob = r["bias_prob"]
+        if prob is None or abs(prob - 0.5) < QWEN_AUTHORITY_MIN_CONVICTION:
+            continue  # sólo llamadas de alta convicción: el veto nunca
+            #             habría actuado sobre las demás
+        rd = realized(float(r["mt5_time"]))
+        if rd is None:
+            continue
+        n += 1
+        if (bias == "BULLISH" and rd == "UP") or (bias == "BEARISH" and rd == "DOWN"):
+            hits += 1
+
+    acc = (hits / n) if n else None
+    result["n"] = n
+    result["hits"] = hits
+    result["acc"] = acc
+    if n < QWEN_AUTHORITY_MIN_SAMPLES:
+        result["reason"] = f"muestra insuficiente ({n} < {QWEN_AUTHORITY_MIN_SAMPLES})"
+    elif acc is not None and acc >= QWEN_AUTHORITY_MIN_ACC:
+        result["granted"] = True
+        result["reason"] = f"skill demostrada ({acc*100:.1f}% sobre {n} llamadas)"
+    else:
+        result["reason"] = f"skill no demostrada ({acc*100:.1f}% < {QWEN_AUTHORITY_MIN_ACC*100:.0f}% sobre {n})"
+    return result
+
+
+async def get_authority(symbol: str) -> dict:
+    """Autoridad del veto para `symbol` (cacheada con TTL). Nunca lanza."""
+    now = dt.datetime.now(dt.timezone.utc).timestamp()
+    async with _LOCK:
+        entry = _STATE.get(symbol)
+        if entry and now - entry["ts"] < QWEN_AUTHORITY_TTL_S:
+            return entry["data"]
+    try:
+        data = await _measure(symbol)
+    except Exception as exc:  # noqa: BLE001 — la autoridad NUNCA tumba el ciclo
+        logger.warning(
+            "[QWEN-AUTH] medición falló para %s (%s: %s) → veto inerte (fail-safe explícito)",
+            symbol, type(exc).__name__, exc,
+        )
+        data = {
+            "symbol": symbol,
+            "n": 0,
+            "hits": 0,
+            "acc": None,
+            "granted": False,
+            "reason": f"medición falló: {type(exc).__name__}",
+            "measured_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        }
+    async with _LOCK:
+        _STATE[symbol] = {"ts": now, "data": data}
+    logger.info(
+        "[QWEN-AUTH] %s → autoridad=%s (%s)",
+        symbol, "CONCEDIDA" if data["granted"] else "REVOCADA", data["reason"],
+    )
+    return data
+
+
+def peek(symbol: str) -> dict | None:
+    """Última medición cacheada (sin refrescar) — solo para diagnóstico."""
+    entry = _STATE.get(symbol)
+    return entry["data"] if entry else None
+
+
+async def refresh_loop(symbol: str, interval_s: int = 900) -> None:
+    """Refresco periódico de la autoridad en segundo plano — el TTL también la refresca."""
+    while True:
+        try:
+            await get_authority(symbol)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[QWEN-AUTH] refresh falló para %s: %s", symbol, exc)
+        await asyncio.sleep(interval_s)

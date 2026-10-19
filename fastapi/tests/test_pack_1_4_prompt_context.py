@@ -527,9 +527,16 @@ class TestUnifiedContractWithoutSlTp:
         out = qwen_client._degraded_unified("TRENDING", 0.33, "Qwen unavailable")
         assert out == {
             "ok": False,
+            # T-31: abstención (respuesta sin evidencia) ≠ fallo técnico.
+            # El fallo técnico sigue siendo fail-closed (quality 0.0).
+            "abstained": False,
             "quality": 0.0,
             "reason": "Qwen unavailable",
             "bias": "NEUTRAL",
+            # T-31 (2026-10-19): `bias_prob` 0.5 neutral — la degradación NO
+            # da poder de veto direccional (antes la clave faltaba y el veto
+            # leía un default 1.0 fantasma).
+            "bias_prob": 0.5,
             "confidence_modifier": 1.0,
             "effective_prob": 0.33,
             "regime": "TRENDING",

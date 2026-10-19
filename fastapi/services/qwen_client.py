@@ -75,6 +75,44 @@ def _record_failure(error: str) -> None:
     _QWEN_STATE.last_error = error[:200]
 
 
+def _has_evidence(reason: str) -> bool:
+    """T-31: la razón del LLM debe citar un NÚMERO del contexto.
+
+    Sin número no hay evidencia: es una frase reutilizable (plantilla). Se
+    acepta cualquier dígito (precio, %, ATR, ADX, hora, sesión) — el
+    objetivo NO es validar el número (no hay parser semántico), sino
+    detectar la respuesta de plantilla que medió el 90,6 % de los ciclos.
+    """
+    return any(ch.isdigit() for ch in reason)
+
+
+def _abstain_unified(regime: str, ml_prob: float, reason: str) -> dict:
+    """ABSTENCIÓN (T-31, 2026-10-19) — el LLM respondió pero SU RESPUESTA NO
+    APORTA EVIDENCIA (no cita ningún número del contexto).
+
+    No es lo mismo que estar ROTO (`_degraded_unified`, fail-closed: sin
+    LLM no se opera). Aquí el setup sigue siendo observable por el PPO y
+    por los controles de riesgo (SL/TP, sizing, límites de pérdida, news,
+    time-stop): el juez se APARTA y deja decidir al PPO. Antes, una
+    respuesta de plantilla (quality 7-10 inflada, sesgo copiado) bloqueaba
+    el 100 % de las operaciones; ahora el juez sin evidencia no vota, y su
+    veto además exige autoridad demostrada (services/qwen_authority.py).
+
+    Declarado en la auditoría como `abstained=True` — nunca silencioso.
+    """
+    return {
+        "ok": True,
+        "abstained": True,
+        "quality": 5.0,          # neutral: pasa el umbral de calidad (5.0)
+        "reason": reason[:120],
+        "bias": "NEUTRAL",
+        "bias_prob": 0.5,
+        "confidence_modifier": 1.0,
+        "effective_prob": float(ml_prob),
+        "regime": regime,
+    }
+
+
 def _degraded_unified(regime: str, ml_prob: float, reason: str) -> dict:
     """Safe defaults uniformes ante CUALQUIER fallo de Qwen.
 
@@ -83,9 +121,14 @@ def _degraded_unified(regime: str, ml_prob: float, reason: str) -> dict:
     """
     return {
         "ok": False,
+        "abstained": False,
         "quality": 0.0,
         "reason": reason[:120],
         "bias": "NEUTRAL",
+        # T-31: 0.5 neutral — sin poder de veto en degradación (antes la
+        # clave faltaba y el default 1.0 del veto convertía cualquier
+        # degradación en veto direccional fantasma).
+        "bias_prob": 0.5,
         "confidence_modifier": 1.0,
         "effective_prob": float(ml_prob),
         "regime": regime,
@@ -449,37 +492,51 @@ async def query_qwen_unified(
         "",
         *reentry_lines,
         "",
-        # P2-H2 (2026-10-09): el ejemplo único con quality=7.5/bias=NEUTRAL
-        # anclaba la respuesta en la plantilla (temperature=0.2 + modelo
-        # pequeño → quality_score constante 7.5 en 511+ ciclos = veto de
-        # calidad decorativo). Dos ejemplos con valores separados + rúbrica
-        # explícita: la propiedad ">=2 ejemplos distintos" la fija
-        # tests/test_qwen_prompt_anchoring.py.
-        # RCA (2026-10-13): con dos ejemplos la variante out-of-window caía
-        # en copia byte a byte del ejemplo #1 sin `reentry_ok` (100% de los
-        # ciclos desde 10:35). Tres ejemplos (prior más plano) + advertencia
-        # POST-ejemplos + guarda anti-ancla en el parse (fail-closed).
-        "Return EXACTLY JSON, no extra text — ONE JSON object. Three FORMAT",
-        "examples with different scores; do NOT copy their values — judge THIS",
-        "setup on its own context:",
-        '{"quality": 8.5, "reason": "trend and ADX align", "bias": "BULLISH", "confidence_modifier": 1.3,'
-        '  "reentry_ok": true, "regime": "TRENDING"}',
-        '{"quality": 3.0, "reason": "range chop against signal", "bias": "BEARISH", "confidence_modifier": 0.7,'
-        '  "reentry_ok": false, "regime": "RANGING"}',
-        '{"quality": 5.0, "reason": "Mixed trend and momentum signals", "bias": "NEUTRAL", "confidence_modifier": 0.9,'
-        '  "reentry_ok": true, "regime": "VOLATILE"}',
+        # T-31 (2026-10-19) — RCA DEL ANCLAJE (medida, no hipotética):
+        # el ejemplo #1 era BULLISH con razón positiva ("trend and ADX
+        # align"). El 8B determinista (temp 0.2) lo COPIABA casi literal en
+        # 289/319 ciclos (90,6 %) — de esas, 274 BULLISH (94,8 %). El
+        # "monocultivo BULLISH" NO era un juicio de mercado: era la
+        # PLANTILLA del ejemplo.
+        # MEDICIÓN 2 (tras el 1er intento: exemplos sin "premio"): el modelo
+        # copió el ejemplo #3 íntegro (quality 7.0, bias_prob 0.68, conf_mod
+        # 1.2 — valores idénticos). Conclusión: a este modelo (8B Q2_K,
+        # temp 0.2) un ejemplo con LITERALES es una plantilla, sea cual sea
+        # su contenido; las instrucciones textuales no lo detienen.
+        # ⇒ SOLUCIÓN ESTRUCTURAL: NO hay ejemplos con literales. Sólo la
+        # FORMA con marcadores de posición (nada que copiar) + rúbrica.
+        # La rúbrica se reescribe SIN eslóganes copiables (la rúbrica vieja
+        # —"trend/ADX/session agree"— era ella misma la frase copiada).
+        # Y la respuesta sin evidencia (razón sin ningún número del contexto)
+        # se marca como ABSTENCIÓN explícita: el LLM no vota, el PPO decide.
+        "Return EXACTLY JSON, no extra text — ONE JSON object with these keys",
+        "and ONLY these keys:",
+        '{"quality": <number 0-10>, "reason": "<max 12 words, MUST contain a',
+        'number taken from THIS Context>", "bias": "<BULLISH|BEARISH|NEUTRAL>",',
+        ' "bias_prob": <number 0.00-1.00>, "confidence_modifier": <number 0.5-1.5>,',
+        ' "reentry_ok": <true|false>, "regime": "<TRENDING|RANGING|VOLATILE|BREAKOUT>"}',
         "",
-        "Any value COPIED from the examples (score, reason, bias, modifier) is",
-        "wrong — reason must cite THIS setup from the Context above (trend,",
-        "ADX, session, ML signal).",
+        "There are NO examples to imitate: every value must come from THIS",
+        "Context. Fill the placeholders above with your own reading.",
         "",
-        "Fields: quality 0-10 — score on evidence: 7-10 only when trend/ADX/session",
-        "agree with the ML signal and structure is clean; 1-4 when ranging chop,",
-        "against-trend signal or unverified news; 4-7 when mixed. reason max 12 words;",
-        "bias BULLISH/BEARISH/NEUTRAL aligned with the setup; confidence_modifier",
-        "0.5-1.5 moving effective confidence the same direction; regime",
-        "TRENDING/RANGING/VOLATILE/BREAKOUT; reentry_ok boolean per the Reentry",
-        "check block above (true when there is no recent close).",
+        "EVIDENCE FIRST: the reason MUST contain a NUMBER that appears in the",
+        "Context (a price distance, a percentage, an indicator value, a time)",
+        "— a sentence that would fit any other setup is not a reason. If you",
+        "find no number worth citing, write \"no clear evidence\" and keep",
+        "quality near the middle.",
+        "",
+        "quality 0-10: use the high band only if the Context's own numbers",
+        "point the same way as the ML signal and nothing contradicts them; use",
+        "the low band if they conflict; use the middle band if they are mixed.",
+        "bias: the direction THIS Context supports, not the direction of the",
+        "ML signal by default. bias_prob 0.00-1.00 = your honest probability",
+        "that price is HIGHER in 24h: 0.50 when genuinely uncertain, 0.40-0.60",
+        "for a weak lean, 0.65-0.75 only when several independent numbers",
+        "agree, never above 0.85; its sign must match bias (>0.50 BULLISH,",
+        "<0.50 BEARISH, about 0.50 NEUTRAL). confidence_modifier 0.5-1.5 moves",
+        "the effective confidence the same direction as your bias. regime:",
+        "TRENDING/RANGING/VOLATILE/BREAKOUT. reentry_ok: true only when the",
+        "Reentry check block above says there is no recent close.",
     ])
 
     prompt = "\n".join(context_lines)
@@ -538,6 +595,35 @@ async def query_qwen_unified(
 
         conf_mod = _clamp(float(parsed.get("confidence_modifier", 1.0)), 0.5, 1.5)
 
+        # T-31 Fase B (orden Félix 2026-10-19 — «conf válido, estable y
+        # razonado», resolver de raíz): probabilidad direccional REAL del LLM.
+        # RCA: el veto leía `qwen["confidence"]` — clave que este dict nunca
+        # devolvía (solo `confidence_modifier`) → default 1.0 fantasma → el
+        # veto se disparaba SIEMPRE que el sesgo oponía, con «conf=1.00»
+        # inventada en el log (medido: 100% de los vetos, ventana T-28
+        # conflict 0.96; Fase A: exactitud del veto 22% = anti-predictivo).
+        # Ahora: probabilidad explícita 0-1 pedida con rúbrica de calibración
+        # en el prompt, clamp a [0,1] y default 0.5 (NEUTRAL = sin poder de
+        # veto) — la incoherencia bias↔prob falla seguro (no dispara).
+        bias_prob = _clamp(float(parsed.get("bias_prob", 0.5)), 0.0, 1.0)
+
+        # T-31 (2026-10-19): la respuesta del LLM debe APORTAR EVIDENCIA — la
+        # razón tiene que citar un número del contexto (precio, %, indicador,
+        # hora). Una razón sin ningún número es una plantilla: no es juicio.
+        # Medido: 289/319 ciclos (90,6 %) copiaban la frase del ejemplo y
+        # producían quality inflada + sesgo BULLISH constante.
+        # ⇒ el juez SIN EVIDENCIA se Abstiene (no vota, no bloquea): el PPO
+        # decide con los controles de riesgo intactos. Declarado, nunca
+        # silencioso (`abstained=True` en la respuesta y en la auditoría).
+        rsn = reason.strip()
+        if not _has_evidence(rsn):
+            logger.warning(
+                "[%s] QWEN-UNIFIED respuesta SIN EVIDENCIA (razón sin número del "
+                "contexto: %r) → abstención declarada; decide el PPO",
+                cycle_id, rsn[:60],
+            )
+            return _abstain_unified(regime, ml_prob, f"abstained: sin evidencia ({rsn[:60]})")
+
         # Guarda anti-parrota (orden Félix 2026-10-13, opción C → C+; S1
         # 2026-10-14): razón SIMILAR (Jaccard ≥ umbral) Y quality SIN
         # variar ≥ PARROT_STREAK_LIMIT ciclos consecutivos por símbolo =
@@ -546,7 +632,10 @@ async def query_qwen_unified(
         # La racha se resetea con cualquier razón disímil O quality
         # distinta (juicio genuino del 8B: razones trending similares pero
         # q variable 6-9 → NO degrada).
-        rsn = reason.strip()
+        # T-31: la parrota pasa de DEGRADAR (fail-closed → HOLD, es decir
+        # parálisis) a ABSTENCIÓN (el juez no vota, el PPO decide): una
+        # plantilla repetida no es información, pero el setup sigue siendo
+        # observable por el PPO y por los controles de riesgo.
         if rsn:
             tokens = _reason_tokens(rsn)
             prev_tokens = _QWEN_STATE.last_reason.get(symbol)
@@ -564,12 +653,12 @@ async def query_qwen_unified(
             if streak >= PARROT_STREAK_LIMIT:
                 logger.warning(
                     "[%s] QWEN-UNIFIED parrota detectada (%d ciclos con razón similar, "
-                    "símbolo %s) → respuesta degradada fail-closed",
+                    "símbolo %s) → abstención declarada (el juez no vota)",
                     cycle_id, streak, symbol,
                 )
                 _record_failure("parrot")
-                return _degraded_unified(
-                    regime, ml_prob, f"Qwen degraded: parrot ({streak}x razon similar)",
+                return _abstain_unified(
+                    regime, ml_prob, f"abstained: parrot ({streak}x razon similar)",
                 )
 
         # Paquete 1-4: sin parse de SL/TP — si el modelo ecoa sl_adjusted/
@@ -593,17 +682,19 @@ async def query_qwen_unified(
             )
 
         logger.info(
-            "[%s] QWEN-UNIFIED ║ q=%.1f bias=%s conf_mod=%.2f eff_prob=%.4f | "
+            "[%s] QWEN-UNIFIED ║ q=%.1f bias=%s bias_prob=%.2f conf_mod=%.2f eff_prob=%.4f | "
             "regime=%s reentry_ok=%s | %s",
-            cycle_id, q, bias, conf_mod, effective_prob,
+            cycle_id, q, bias, bias_prob, conf_mod, effective_prob,
             parsed.get("regime", regime), reentry_ok, reason[:60]
         )
         _record_success()
         return {
             "ok": True,
+            "abstained": False,
             "quality": q,
             "reason": reason,
             "bias": bias,
+            "bias_prob": bias_prob,
             "confidence_modifier": conf_mod,
             "effective_prob": effective_prob,
             "effective_prob_raw": effective_prob_raw,

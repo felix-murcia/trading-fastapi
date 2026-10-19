@@ -51,7 +51,7 @@ class FakeAsyncClient:
                     "message": {
                         "content": json.dumps({
                             "quality": 8.5,
-                            "reason": "Strong bullish setup",
+                            "reason": "Strong bullish setup ADX 26",
                             "bias": "BULLISH",
                             "confidence_modifier": 1.1,
                             "regime": "TRENDING",
@@ -89,7 +89,7 @@ class QwenReentryRejectClient(FakeAsyncClient):
                     "message": {
                         "content": json.dumps({
                             "quality": 8.5,
-                            "reason": "Strong bullish setup",
+                            "reason": "Strong bullish setup ADX 26",
                             "bias": "BULLISH",
                             "confidence_modifier": 1.1,
                             "regime": "TRENDING",

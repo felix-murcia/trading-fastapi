@@ -108,6 +108,14 @@ async def lifespan(app: FastAPI):
     # P2-H14: watchdog de silencio de ai_predict_cycle (cada 5 min).
     from services.predict_silence import _predict_silence_loop
     _bg_tasks.add(asyncio.create_task(_predict_silence_loop()))
+    # T-31 (2026-10-19): autoridad del veto direccional del LLM — se mide en
+    # vivo y se refresca por par (TTL 30 min en la propia función). El veto
+    # sólo revierte si el juez ha demostrado skill; si no, queda inerte y la
+    # señal pasa (los vetoes mecánicos siguen intactos).
+    from core.container import build_registry_from_settings as _build_registry
+    from services.qwen_authority import refresh_loop as _qwen_auth_refresh
+    for _ctx in _build_registry().enabled():
+        _bg_tasks.add(asyncio.create_task(_qwen_auth_refresh(_ctx.config.symbol)))
     yield
     for _task in _bg_tasks:
         _task.cancel()

@@ -76,7 +76,7 @@ class TestQueryQwenUnified:
         mock_response.json.return_value = {
             "choices": [{
                 "message": {
-                    "content": '{"quality": 7.5, "reason": "good setup", "bias": "BULLISH", "confidence_modifier": 1.2, "sl_adjusted": 0.20, "tp_adjusted": 0.28, "regime": "TRENDING"}'
+                    "content": '{"quality": 7.5, "reason": "good setup ADX 24", "bias": "BULLISH", "confidence_modifier": 1.2, "sl_adjusted": 0.20, "tp_adjusted": 0.28, "regime": "TRENDING"}'
                 }
             }]
         }
@@ -246,7 +246,7 @@ class TestQueryQwenUnified:
         mock_response.json.return_value = {
             "choices": [{
                 "message": {
-                    "content": '{"quality": 5.0, "reason": "test", "bias": "NEUTRAL", "confidence_modifier": 2.5, "sl_adjusted": 0.20, "tp_adjusted": 0.40, "regime": "RANGING"}'
+                    "content": '{"quality": 5.0, "reason": "test ADX 15", "bias": "NEUTRAL", "confidence_modifier": 2.5, "sl_adjusted": 0.20, "tp_adjusted": 0.40, "regime": "RANGING"}'
                 }
             }]
         }
@@ -290,7 +290,7 @@ class TestQueryQwenUnified:
         mock_response.json.return_value = {
             "choices": [{
                 "message": {
-                    "content": '{"quality": 5.0, "reason": "test", "bias": "NEUTRAL", "confidence_modifier": 1.0, "sl_adjusted": 0.50, "tp_adjusted": 0.80, "regime": "RANGING"}'
+                    "content": '{"quality": 5.0, "reason": "test ADX 15", "bias": "NEUTRAL", "confidence_modifier": 1.0, "sl_adjusted": 0.50, "tp_adjusted": 0.80, "regime": "RANGING"}'
                 }
             }]
         }
@@ -332,7 +332,7 @@ class TestReentryContext:
     async def test_prompt_carries_reentry_context(self):
         """Con cierre reciente: ventana, detalle del cierre y rúbrica."""
         client = _mock_qwen_client(
-            '{"quality": 8.0, "reason": "ok", "bias": "BULLISH",'
+            '{"quality": 8.0, "reason": "ok ADX 22", "bias": "BULLISH",'
             ' "confidence_modifier": 1.1, "sl_adjusted": 0.20,'
             ' "tp_adjusted": 0.40, "regime": "TRENDING", "reentry_ok": true}'
         )
@@ -353,7 +353,7 @@ class TestReentryContext:
         """Fuera de ventana / sin entrada: bloque presente (esquema
         constante) con la instrucción explícita reentry_ok=true."""
         client = _mock_qwen_client(
-            '{"quality": 8.0, "reason": "ok", "bias": "BULLISH",'
+            '{"quality": 8.0, "reason": "ok ADX 22", "bias": "BULLISH",'
             ' "confidence_modifier": 1.1, "sl_adjusted": 0.20,'
             ' "tp_adjusted": 0.40, "regime": "TRENDING", "reentry_ok": true}'
         )
@@ -371,7 +371,7 @@ class TestReentryContext:
         """Cierre registrado pero sin detalles: el cerebro juzga sólo con
         las velas (None honesto, nunca un cierre inventado)."""
         client = _mock_qwen_client(
-            '{"quality": 8.0, "reason": "ok", "bias": "BULLISH",'
+            '{"quality": 8.0, "reason": "ok ADX 22", "bias": "BULLISH",'
             ' "confidence_modifier": 1.1, "sl_adjusted": 0.20,'
             ' "tp_adjusted": 0.40, "regime": "TRENDING", "reentry_ok": true}'
         )
@@ -388,7 +388,7 @@ class TestReentryContext:
         """El juicio del cerebro viaja al serve: reentry_ok=false se parsea
         tal cual (es lo que dispara veto_reason=reentry_veto)."""
         client = _mock_qwen_client(
-            '{"quality": 8.0, "reason": "churn reopen", "bias": "BULLISH",'
+            '{"quality": 8.0, "reason": "churn reopen ADX 20", "bias": "BULLISH",'
             ' "confidence_modifier": 1.1, "sl_adjusted": 0.20,'
             ' "tp_adjusted": 0.40, "regime": "TRENDING", "reentry_ok": false}'
         )
@@ -404,7 +404,7 @@ class TestReentryContext:
         nunca un veto inventado."""
         log = MagicMock()
         client = _mock_qwen_client(
-            '{"quality": 8.0, "reason": "ok", "bias": "BULLISH",'
+            '{"quality": 8.0, "reason": "ok ADX 22", "bias": "BULLISH",'
             ' "confidence_modifier": 1.1, "sl_adjusted": 0.20,'
             ' "tp_adjusted": 0.40, "regime": "TRENDING"}'
         )
@@ -427,7 +427,7 @@ class TestPromptResponseTrace:
     (ANTES del parse — también visible si el parse falla)."""
 
     _CONTENT = (
-        '{"quality": 8.0, "reason": "ok", "bias": "BULLISH",'
+        '{"quality": 8.0, "reason": "ok ADX 22", "bias": "BULLISH",'
         ' "confidence_modifier": 1.1, "sl_adjusted": 0.20,'
         ' "tp_adjusted": 0.40, "regime": "TRENDING", "reentry_ok": true}'
     )
@@ -664,7 +664,7 @@ class TestEffProbRawTelemetry:
         """conf_mod 1.5 × ml_prob 0.99 → decisional 1.0 (recortado),
         raw 1.485 (auditable)."""
         client = _mock_qwen_client(
-            '{"quality": 8.0, "reason": "strong bearish trend", '
+            '{"quality": 8.0, "reason": "strong bearish trend ADX 30", '
             '"bias": "BEARISH", "confidence_modifier": 1.5, '
             '"regime": "TRENDING", "reentry_ok": true}'
         )
@@ -681,7 +681,7 @@ class TestEffProbRawTelemetry:
         """Sin saturación el bruto y el decisional coinciden — la
         telemetría no inventa divergencia."""
         client = _mock_qwen_client(
-            '{"quality": 6.0, "reason": "mixed signals fade", '
+            '{"quality": 6.0, "reason": "mixed signals fade ADX 16", '
             '"bias": "NEUTRAL", "confidence_modifier": 0.8, '
             '"regime": "RANGING", "reentry_ok": true}'
         )
