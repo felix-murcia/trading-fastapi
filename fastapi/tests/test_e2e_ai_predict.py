@@ -1049,7 +1049,11 @@ class TestRewardGate(_ServeHarness):
 
     @pytest.mark.parametrize(
         "position,direction,expected",
-        [(0, 0.0, "FLAT"), (1, 0.80, "HOLD")],
+        # T-31/Promo (2026-10-19): la RESPUESTA al EA sólo admite
+        # CLOSE/HOLD/BUY/SELL ⇒ el FLAT crudo (dead-band sin posición) se
+        # normaliza a HOLD. El valor CRUDO queda en la auditoría (neutral
+        # para la métrica T-28).
+        [(0, 0.0, "HOLD"), (1, 0.80, "HOLD")],
     )
     def test_non_entry_cycles_do_not_compute_reward(self, position, direction, expected):
         """FLAT (sin dirección) y HOLD (ya en largo) no son entradas: la
@@ -1063,6 +1067,9 @@ class TestRewardGate(_ServeHarness):
         assert trace["reward_below_min"] is False
         assert trace["reward_eur"] is None
         assert trace["veto_reason"] is None
+        # La auditoría conserva la decisión CRUDA del PPO.
+        assert trace["decision"] == ("FLAT" if direction == 0.0 else "HOLD")
+        assert trace["decision"] in ("FLAT", "HOLD", "CLOSE", "BUY", "SELL")
 
     def test_veto_reason_reward_priority(self):
         from routers.ai import _veto_reason

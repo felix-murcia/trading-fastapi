@@ -34,14 +34,16 @@ ACTION_SELL = [-0.80, 0.18, 0.15, 0.15]
 ACTION_BUY = [0.80, 0.18, 0.15, 0.15]
 
 
-def _qwen_payload(bias, bias_prob, quality=8.0, include_prob=True):
+def _qwen_payload(bias, bias_prob, quality=8.0, include_prob=True, reason=None):
     """Respuesta canned del LLM con el contrato T-31.
 
     El motivo lleva un NÚMERO (p. ej. la distancia al SMA200): T-31 exige
     evidencia citada — una razón sin número es plantilla y el LLM se
     abstiene (declarado, no silencioso)."""
+    if reason is None:
+        reason = "SMA200 -1.7 pct and ADX 22 falling"
     fields = [
-        '{"quality": %s, "reason": "SMA200 -1.7%% and ADX 22 falling",' % quality,
+        '{"quality": %s, "reason": "%s",' % (quality, reason),
         ' "bias": "%s",' % bias,
     ]
     if include_prob:
@@ -218,3 +220,53 @@ class TestBiasProbContract:
         assert response.status_code == 200, response.text
         data = audit_mock.await_args.args[1]
         assert data["llm_bias_prob"] == 1.0
+
+
+class TestEADecisionContract:
+    """T-31/Promo (2026-10-19): la respuesta al EA sólo puede contener
+    CLOSE/HOLD/BUY/SELL.
+
+    El decodificador v3 devuelve "FLAT" cuando la cabeza de dirección cae en
+    el dead-band y no hay posición. El EA v13.8 NO tiene catch-all para un
+    valor desconocido: con "FLAT" el ciclo terminaba sin orden y SIN
+    reportar (silencioso). Con el bundle promovido (dead-band mucho más
+    frecuente: 16 operaciones en el holdout vs 137 del anterior) eso pasa de
+    raro a habitual ⇒ la respuesta se normaliza a HOLD (equivalente exacto)
+    y la auditoría conserva el crudo para la métrica T-28."""
+
+    @pytest.mark.asyncio
+    async def test_response_decision_is_always_in_ea_contract(self, monkeypatch):
+        """Con la cabeza en dead-band (FLAT) la respuesta es HOLD, no FLAT."""
+        model = _mock_ppo_model()
+        # Dirección ~0 ⇒ dead-band ⇒ FLAT (sin posición)
+        model.predict.return_value = (np.array([0.01, 0.18, 0.15, 0.15], dtype=np.float32), None)
+        monkeypatch.setattr(qwen_client, "_QWEN_STATE", QwenHealthState())
+        fake_cls = lambda *a, **k: _QwenFakeClient(
+            _qwen_payload("NEUTRAL", 0.5, reason="ADX 18 flat, RSI 44.0"), *a, **k)
+        with patch("main.init_pool", AsyncMock()), \
+             patch("main.close_pool", AsyncMock()), \
+             patch("routers.ai.is_news_blackout", AsyncMock(return_value=(False, None))), \
+             patch("routers.ai.fetch_bars_since_close", AsyncMock(return_value=None)), \
+             patch("routers.ai.get_pool", return_value=MagicMock(execute=AsyncMock())), \
+             patch("routers.ai.PPO.load", return_value=model), \
+             patch("services.news_scraper.get_macro_news", AsyncMock(return_value="No macro news")), \
+             patch("routers.ai.log_to_audit", AsyncMock()) as audit_mock, \
+             patch("httpx.AsyncClient", fake_cls):
+            from services.trade_journal import get_recent_insights
+            monkeypatch.setattr(
+                "services.trade_journal.get_recent_insights", AsyncMock(return_value=[]))
+            with TestClient(app) as client:
+                response = client.post(
+                    "/api/v1/ai/predict",
+                    json={"symbol": "EURUSD", "timeframe": "H1", "position": 0},
+                    headers={"x-internal-token": "test-token", "x-cycle-id": "t31-flat"},
+                )
+        assert response.status_code == 200, response.text
+        decision = response.json()["decision"]
+        assert decision in ("CLOSE", "HOLD", "BUY", "SELL"), (
+            f"decisión fuera del contrato del EA: {decision!r}"
+        )
+        data = audit_mock.await_args.args[1]
+        # La auditoría conserva el CRUDO (neutral para la métrica T-28)
+        assert data["decision"] in ("FLAT", "HOLD", "CLOSE", "BUY", "SELL")
+        assert data["ppo_direction"] in ("FLAT", "HOLD", "CLOSE", "BUY", "SELL")

@@ -1765,11 +1765,30 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         cycle_id=cycle_id,
     )
 
+    # T-31/Promo (2026-10-19): el decodificador v3 devuelve "FLAT" cuando la
+    # cabeza de dirección cae en el dead-band y NO hay posición (semántica:
+    # "no hacer nada"). Pero el CONTRATO de la respuesta del backend (y lo que
+    # el EA entiende) es CLOSE/HOLD/BUY/SELL: el EA v13.8 no tiene catch-all
+    # para un valor desconocido ⇒ con "FLAT" el ciclo terminaba SIN orden y
+    # SIN reportar (silencioso). El bundle promovido (4cd9abb6) cae en el
+    # dead-band mucho más (16 operaciones en el holdout vs 137 del anterior),
+    # así que "FLAT" pasó de raro a frecuente ⇒ hay que normalizarlo.
+    # En la RESPUESTA: FLAT → HOLD (equivalente exacto: no hacer nada).
+    # En la AUDITORÍA se conserva el valor CRUDO ("FLAT") porque la métrica
+    # T-28 lo interpreta como señal neutra (polarity FLAT = 0) y el ALIGNMENT
+    # debe seguir viendo lo que el modelo decidió de verdad.
+    _ea_decision = "HOLD" if final_decision == "FLAT" else final_decision
+    if _ea_decision != final_decision:
+        logger.info(
+            "[%s] Decisión FLAT (dead-band sin posición) → HOLD en la respuesta "
+            "(contrato del EA: CLOSE/HOLD/BUY/SELL); la auditoría guarda el crudo",
+            cycle_id,
+        )
     return PredictResponse(
         cycle_id=cycle_id,
         ml_prob=round(ml_prob, 4),
         llm_bias=qwen["bias"],
-        decision=final_decision,
+        decision=_ea_decision,
         volume=final_lots if final_decision in ("BUY", "SELL") else None,
         sl_pips=round(sl_pips_final, 1) if final_decision in ("BUY", "SELL") else None,
         tp_pips=round(tp_pips_final, 1) if final_decision in ("BUY", "SELL") else None,
