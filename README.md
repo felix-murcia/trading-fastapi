@@ -3,6 +3,7 @@
 Sistema de trading automatizado que conecta Expert Advisors (MQL5) con MetaTrader 5 a través de FastAPI, utilizando **Machine Learning (PPO)** y **LLM (Qwen)** para decisiones de trading.
 
 ![Tests](https://github.com/felix-murcia/trading-fastapi/actions/workflows/tests.yml/badge.svg)
+![License: MIT](https://img.shields.io/badge/license-MIT-green?logo=open%20source%20initiative&logoColor=white)
 ![Stars](https://img.shields.io/github/stars/felix-murcia/trading-fastapi?style=social)
 ![Forks](https://img.shields.io/github/forks/felix-murcia/trading-fastapi?style=social)
 ![Issues](https://img.shields.io/github/issues/felix-murcia/trading-fastapi)
@@ -2739,6 +2740,11 @@ Orden de Félix: *«revisa que todos los timeframes estén alineados (EA, sistem
 
 **Lo que ya estaba bien (verificado, no supuesto):** la etiqueta de sesión, la rejilla horaria, el desfase detectado por dos vías, la medición canónica (`services/measurement` + `qwen_authority` + `ledger` + `cross_audit`: convierten los dos lados), y el emparejamiento del retrain (velas y outcomes **en el mismo reloj del bróquer** ⇒ el reward del PPO no se contamina).
 
-**Red de regresión:** `fastapi/tests/test_timebase_alignment.py` — 25 pruebas que fijan: desfase entero e independiente del minuto, coincidencia de las dos vías, día del bróquer (con +3 h y con el +2 h del 25-10), rollover a la medianoche del bróquer, corte del registro, etiqueta de sesión (incluido con el feed retrasado), rejillas H1/H4/D1 y **prohibición estructural de dejar un desfase fijo a mano en el código**. Suite completa: **1151 passed + 2 xfailed**.
+**Red de regresión:** `fastapi/tests/test_timebase_alignment.py` — 25 pruebas que fijan: desfase entero e independiente del minuto, coincidencia de las dos vías, día del bróquer (con +3 h y con el +2 h del 25-10), rollover a la medianoche del bróquer, corte del registro, etiqueta de sesión (incluido con el feed retrasado), rejillas H1/H4/D1 y **prohibición estructural de dejar un desfase fijo a mano en el código**. Suite completa: **1152 passed + 2 xfailed**.
 
 **Incidente y resistencia (20-10, 16:36–16:47):** el servidor MT5 (el terminal que hospeda el EA y el MCP) dejó de responder (500 y luego puerto cerrado). Comportamiento medido del backend: **`/predict` devolvió HOLD en 3,0 s** (fail-safe: sin entradas nuevas), el estado de riesgo quedó intacto (día de la cuenta `2026-10-20`, baseline 476,10 €) y el sistema **se recuperó solo** cuando el terminal volvió (16:47), con los ciclos del EA rep resumes a las 16:45 y 16:50. Dos mejoras de robustez nacidas de ese incidente: (1) la caída del MT5 **ahora avisa** con un mensaje claro («operativa en pausa por seguridad… hay que relanzar el terminal») en vez de quedar en un log invisible; (2) la auditoría cruzada **distingue "el MT5 está caído" de "hay discrepancias"** (`verdict: "SIN DATOS (servidor MT5 caído)"`, 0 discrepancias) en vez de reportar 5-6 errores con una sola causa raíz. Durante la caída se detectó además un **bug propio** (el check de latencia usaba un `pool` inexistente ⇒ siempre "error"): corregido y verificado (`latencia_ciclos: ok`).
+
+## Licencia
+
+MIT — ver [LICENSE](LICENSE). El sistema opera dinero real: el software se
+entrega «tal cual», sin garantía (ver el texto de la licencia).
