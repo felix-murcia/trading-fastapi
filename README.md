@@ -2810,3 +2810,34 @@ Al preguntar qué par implementar, se midió el mapa de edge de los 7 candidatos
 - **A3** — cero cambios en EURUSD.
 
 **Paradas:** si el gate rechaza ⇒ fin, se publica el rechazo y **no** se reintenta con otros hiperparámetros sin orden nueva. Si el gate pasa pero A2 no ⇒ el bundle queda promovido (el gate manda) y el **canario NO se enciende** hasta que Félix lo ordene.
+
+### U-3 · RESULTADO: el canario de USDCHF **RECHAZADO** (exp #44 y #45) — el canario NO se enciende
+
+**Pre-registro (commit `18358fa`):** gate = **canario absoluto** (Sharpe ≥ 1,0 en ≥4 folds + ≥200 aperturas), reward v1, lookback 30 000 H1, **una** corrida.
+**Omisión mía:** el warm start global (`RETRAIN_WARM_START_FROM=EURUSD`) no estaba fijado en el pre-registro ⇒ el **#44 no fue el experimento pre-registrado** (le dio un baseline ⇒ gate comparativo). El **#45** sí lo es (sin warm start ⇒ gate canario absoluto). Se publican **los dos**: no es «reintentar hasta que pase» (son dos hipótesis distintas) y la promoción está congelada (`RETRAIN_REPORT_ONLY=true`) ⇒ **ni siquiera un bundle se escribe aunque el gate pasara**.
+
+| | **#44** (warm start EURUSD) | **#45** (desde cero) |
+|---|---|---|
+| sum_reward (folds) | −28,93 | **−68,20** |
+| mean_sharpe | +0,90 | **−1,40** |
+| total_expectancy | −1,17 € | **−3,69 €** |
+| worst maxDD | 10,9 % | 17,3 % |
+| openings | 445 | 476 |
+| holdout reward | −12,86 | **−14,41** |
+| **holdout `direction_accuracy`** | **45,7 %** (n=105) | **45,0 %** (n=131) |
+| veredicto | RECHAZADO (`absolute_floor_sum_reward`) | RECHAZADO (idem) |
+
+**Criterios pre-registados:**
+- **A1 — FAIL (las dos corridas)**: el suelo absoluto (sum_reward > 0, mean_sharpe > 0, total_expectancy > 0) falla en los tres; el criterio canario de Sharpe tampoco (1/4 folds ≥ 1,0 en el #44; media −1,40 en el #45).
+- **A2 — FAIL**: la dirección del holdout (**45,7 %** y **45,0 %**) frente a la **base de 54,5 %** de esa misma ventana (calculada con la función canónica corregida sobre el **mismo snapshot**) ⇒ skill **−8,8 pp** y **−9,5 pp** ⇒ el modelo no supera ni su propia base.
+- **A3 — OK**: bundle vivo de EURUSD **intacto** (sha `4cd9abb6bc94`), **sin bundle de USDCHF**, 0 retrains de EURUSD lanzados, sistema vivo sin cambios (189 operaciones, equity 501,84 €).
+
+⇒ **U-4 BLOQUEADA: el canario NO se enciende. USDCHF queda registrado y APAGADO** (como GBPUSD). No se reintenta sin orden nueva.
+
+### El hallazgo que este resultado abre (y que hay que medir YA)
+
+En USDCHF hay una **señal trivial con skill real** (momentum 24 h: **+7,1 pp**, n=481, IC [+2,6,+11,4], p=0,001 con 20 000 barajados) y **el PPO no la captura** (45 % de acierto direccional contra una base del 54,5 %). ⇒ **El edge de USDCHF está en la REGLA, no en el agente** — la misma conclusión que T-34-CN para EURUSD (reward pura ⇒ dirección 50 %), ahora replicada en un **segundo par** y con la vara de la base.
+
+⇒ De ahí la tarea nueva **U-6** (pre-registrada en `doc/backlog-g3-usdchf-2026-10-20.md`, sólo lectura, prioridad alta): **«¿la dirección del sistema vivo supera su propia base?»** — el acierto direccional vivo es 53 % (80/151); hay que medir la base de **la misma ventana, el mismo horizonte de tenencia y el mismo subconjunto de operaciones**. Si el acierto ≤ la base ⇒ la dirección no aporta nada y todo el PnL viene del ratio de pago (1,23:1) y de la gestión del riesgo ⇒ el instrumento de decisión correcto sería la regla/benchmark o el LLM (línea E4 del punto de inflexión T-31), no el PPO.
+
+**Tests:** sin cambios de código en este bloque (sólo registro y lectura) ⇒ suite **1168 passed + 2 xfailed**.
