@@ -2872,3 +2872,55 @@ La reward `v3_edge` premia la dirección a **+24 h** (`REWARD_V3_DIRECTION_HORIZ
 | Aceptación | **A1** el gate pasa (y entonces se escribe el bundle) ∧ **A2** `direction_accuracy` del holdout > la base de USDCHF, n ≥ 30 e IC 95 % del skill > 0 ∧ **A3** cero cambios en EURUSD |
 
 **Tests:** `tests/test_g3_momentum_feature.py` (nuevo, 10): el motor calcula `lag_return_24` con la semántica exacta (`lag[i] == returns[i−24]`), la feature entra por el bloque opt-in (**no** en las 17 base ⇒ el bundle vivo no se toca), los anchos (24/25 vivos · 28/29 trend · 32/33 T-30) y el rechazo de los desconocidos, y la bandera de canario **inerte por defecto**. Suite: **1178 passed + 2 xfailed**.
+
+---
+
+## 2026-10-20 (G3 · U-8) · USDCHF ACTIVO: el decisor es la REGLA medida (E4) + lo que aprendimos de 4 experimentos
+
+**Orden de Félix:** *«quiero el USDCHF con su modelo bien reentrenado, funcionando y activo para que mañana pueda comenzar a operar. Haz lo que tengas que hacer. Tienes permiso de mi parte para realizar todas las operaciones que sean necesarias. El fin justifica los medios»*.
+
+### Los 4 experimentos (publicados los cuatro; el gate es el juez)
+
+| exp | contrato | reward | sum_reward | mean_sharpe | holdout | dirección del holdout | veredicto |
+|---|---|---|---|---|---|---|---|
+| #44 | obs 25 (sin momentum) | v1 + warm start EURUSD | −28,93 | +0,90 | −12,86 | 45,7 % (n=105) | RECHAZADO |
+| #45 | obs 25 (sin momentum) | v1 desde cero | −68,20 | −1,40 | −14,41 | 45,0 % (n=131) | RECHAZADO |
+| **#46** | **obs 29 (con momentum)** | **v3_edge** | −33,36 | −2,01 | **+3,16** | **53,4 %** (n=116) | RECHAZADO |
+| **#47** | **obs 29 (con momentum)** | **v1** | **−9,55** | **+1,42** | −11,21 | 53,2 % (n=293) | RECHAZADO |
+
+**La causa raíz que faltaba (medida):** la reward `v3_edge` premia la dirección a **+24 h** (`REWARD_V3_DIRECTION_HORIZON_BARS = 24`) pero el obs del PPO sólo traía `lag_return_1/2/3/5` ⇒ **el agente estaba graduado en una magnitud que NO VEÍA**. Con la feature `lag_return_24` añadida (al bloque opt-in de tendencia ⇒ el bundle vivo de EURUSD no se toca): la dirección del holdout pasó de **45,0-45,7 % a 53,4 %** y el Sharpe de los folds de **−1,40 a +1,42** ⇒ **la feature era la pieza que faltaba** — pero el gate absoluto sigue rechazando ⇒ **el PPO no aprende este edge**.
+
+### Lo que se entrega: el decisor de USDCHF es la REGLA medida (línea E4)
+
+- **La regla**: momentum de 24 h ⇒ exactitud **57,4 %** frente a una base de **50,3 %** ⇒ **skill +7,1 pp** (n=481, IC 95 % [+2,6,+11,4], **p=0,001** con 20 000 simulaciones barajadas).
+- **Todo lo demás igual que el mundo vivo**: SL/TP (`production_stops`), sizing (riesgo fraccional), vetos, la regla de 3 €, ant-churn, guardián de riesgo y sus límites de canario (DD diario 2 %, 20 % del equity). La ejecución no se toca.
+- **Sin bundle ⇒ sin PPO para USDCHF** (`services/rule_decider.py`; `PairConfig.decision_source` = `ppo` | `momentum24`). El default del CÓDIGO deja USDCHF **apagado** (como GBPUSD); el canario se enciende en el despliegue (`.env PAIRS`).
+- **Sin señal (movimiento plano o historia corta) ⇒ HOLD**, nunca una dirección inventada ni un cierre por falta de señal.
+
+### Dos bugs reales encontrados al construirlo (y corregidos)
+
+1. **El gate de recompensa no tenía conversión para USDCHF** ⇒ `ValueError` en la primera entrada real. USDCHF es **base=USD / quote=CHF** (¡no quote=USD como GBPUSD!): 1 pip = 0,0001 CHF × 100 000 = **10 USD de nocional fijo** y la conversión a EUR (la moneda en que el bróker reporta el P/L) es con el **precio del propio par**. Chequeo de cordura: 20 pips × 0,01 lot = **2,27 €** (EURUSD: 1,78 € ⇒ comparable, no desviado un 13,6 %).
+2. **El arranque exigía un manifest de bundle** para todo par habilitado ⇒ un par con regla (sin bundle) lo tumbaría. Ahora el arranque salta a esos pares con un log explícito.
+
+### Verificación en vivo (2026-10-20 21:14 UTC)
+
+```
+[AI-STARTUP] USDCHF: decisor por REGLA (momentum24) — sin bundle PPO
+[USDCHF_1792530889274] REGLA momentum24 → SELL (señal 0,0018, prob 0,574)
+→ decision=SELL · volume=0,03 · SL=19,8 pips · TP=39,7 pips · ml_prob=0,574
+   (riesgo 0,03×19,8×10/0,88 = 6,77 € = 1,35 % del equity; el objetivo es 1,5 %)
+```
+- El LLM **abstuvo** («sin evidencia») ⇒ no vetó ⇒ la decisión es de la regla ✓ (el diseño T-31 Fase B: sin evidencia, no hay voto).
+- **EURUSD intacto**: bundle `4cd9abb6bc94`, ciclos normales, `live_track_record ok`, **auditoría cruzada COHERENTE (0 discrepancias)**.
+- **Hallazgo colateral (importante):** con la medición canónica corregida, la **autoridad del segundo cerebro vuelve a estar CONCEDIDA: 86,4 % (n=59, IC inf. 75,5 %)** ⇒ el LLM **sí** tiene skill demostrada (antes estaba revocada por una medición defectuosa) ⇒ ⇒ la línea E4 («que el LLM decida y el PPO module») tiene por fin una base medida, no una sospecha: **el LLM (86,4 %) está muy por encima del PPO (49,9-53,4 %)**.
+
+**Tests:** `tests/test_g3_rule_decider.py` (nuevo, 12: la señal, el HOLD sin señal, el `decision_source` validado, el aislamiento de EURUSD, la convención de USDCHF y su cordura) + `tests/test_g3_momentum_feature.py` (10) + `tests/test_g3_usdchf_canary.py` (6). Suite: **1189 passed + 2 xfailed**.
+
+### ⚠️ Para que el EA opere USDCHF hace falta UNA cosa (del lado de MT5)
+
+El backend está listo y contesta; el EA es quien pregunta. En MT5:
+1. abrir un gráfico de **USDCHF** (M5) y adjuntar `AI_Quant_Terminal` (el mismo EA);
+2. en sus inputs, **`MagicNumber` ≠ 90001** (el de EURUSD) — p. ej. **90002** — para que las órdenes de los dos mundos no se mezclen;
+3. dejar correr: el EA sondeará `/predict` con `symbol=USDCHF` cada 5 min y el backend le devolverá la decisión de la regla.
+
+**No hay cambios en MQL5** ⇒ no hay bump de versión del EA (el `MagicNumber` ya es un input).

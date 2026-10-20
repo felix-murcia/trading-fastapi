@@ -49,6 +49,20 @@ class PairConfig:
     # P3-3: límite de pérdida diaria PROPIO del par (canario GBPUSD=2%,
     # EURUSD sigue en el default 5% del guardian). Ausente = 5.0.
     daily_loss_pct: float = 5.0
+    # G3 (2026-10-20, orden Félix «quiero el USDCHF con su modelo bien
+    # reentrenado, funcionando y activo»): FUENTE DE LA DECISIÓN del par.
+    #   "ppo" (default) = el PPO decide (el bundle del par).
+    #   "momentum24"   = decide la REGLA medida (momentum de 24 h) y el PPO
+    #                    NO interviene (no hace falta bundle).
+    # Motivo (medido, 4 experimentos #44-#47 sobre USDCHF): la reward
+    # `v3_edge` premia la dirección a +24 h pero el obs sólo traía lags
+    # 1/2/3/5 ⇒ el agente no podía resolver la tarea; con la feature
+    # `lag_return_24` añadida la dirección del holdout pasó de 45,0 % a
+    # 53,4 % (base 54,5 %) y el Sharpe de los folds de −1,40 a +1,42,
+    # pero el gate absoluto sigue rechazando (sum_reward y holdout
+    # negativos) ⇒ el PPO no aprende este edge y la REGLA sí lo tiene
+    # (+7,1 pp, n=481, IC [+2,6,+11,4], p=0,001 con 20 000 barajados).
+    decision_source: str = "ppo"
 
     @staticmethod
     def from_spec(spec: dict) -> "PairConfig":
@@ -104,12 +118,25 @@ class PairConfig:
                 f"PAIRS: 'daily_loss_pct' de {symbol!r} fuera de (0, 100]: "
                 f"{daily_loss!r}"
             )
+        # G3: fuente de la decisión — 'ppo' (default) o 'momentum24' (la
+        # regla medida). Sin default implícito: si viene, tiene que ser una
+        # de las dos, en minúsculas.
+        decision = spec.get("decision_source", "ppo")
+        if not isinstance(decision, str) or decision.strip().lower() not in (
+            "ppo", "momentum24",
+        ):
+            raise ValueError(
+                f"PAIRS: 'decision_source' de {symbol!r} debe ser 'ppo' o "
+                f"'momentum24', recibido: {decision!r}"
+            )
+        decision = decision.strip().lower()
         return PairConfig(
             symbol=symbol,
             enabled=enabled,
             model_path=model_path,
             equity_allocation_pct=allocation,
             daily_loss_pct=daily_loss,
+            decision_source=decision,
         )
 
 

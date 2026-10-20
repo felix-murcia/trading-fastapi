@@ -35,8 +35,17 @@ PIP_SIZE = {
     "USDSEK": 0.0001,
 }
 
-# Pares donde base=USD → pip_value = 10 / price
-_USD_BASE = {"USDJPY", "USDCHF", "USDCAD", "USDCNH", "USDSEK"}
+# Pares donde base=USD → pip_value = 10 / price (USDJPY: 0,01 JPY × 100 000
+# USD = 1000 JPY por lote, expresado en el precio). USDCHF NO entra aquí
+# (G3, 2026-10-20): su pip es 0,0001 CHF × 100 000 USD = **10 USD de
+# nocional fijo** (no 10/precio) ⇒ ver `expected_close_eur` y el test de
+# cordura de la convención (test_g3_rule_decider.py).
+_USD_BASE = {"USDJPY", "USDCAD", "USDCNH", "USDSEK"}
+
+# G3 (2026-10-20): pares base=USD con quote=CHF ⇒ el P/L del bróker llega
+# en la moneda de la cuenta (EUR) y la conversión USD→EUR se hace con el
+# precio del PROPIO par (1 USD = 1/precio EUR en USDCHF).
+_USD_BASE_CHF_QUOTE = {"USDCHF"}
 
 # B1 (G2): pares con QUOTE=USD y BASE≠EUR ⇒ su P/L está en USD y la
 # conversión a EUR (cuenta en EUR) se hace por el precio EURUSD — el MISMO
@@ -67,7 +76,9 @@ def pip_value_per_lot(symbol: str, price: float) -> float:
         return 10.0 / price     # pip=0.0001 → 0.0001×100000/price = 10/price
     if symbol == "XAUEUR":
         return 10.90            # Aprox 10💶 to 💵. Quote=EUR → 10 EUR * (EURUSD aprox 1.09)
-    return 10.0                 # quote=USD (EURUSD, GBPUSD, AUDUSD, NZDUSD, XAUUSD)
+    # quote=USD (EURUSD, GBPUSD, AUDUSD, NZDUSD, XAUUSD) y base=USD con
+    # nocional fijo de 10 USD por pip (USDCHF, G3).
+    return 10.0
 
 
 def expected_close_eur(
@@ -103,6 +114,12 @@ def expected_close_eur(
         # El P/L ya está en USD y el precio es EURUSD ⇒ /price (convención
         # del bróker, exacta).
         return float(pips) * float(volume) * pip_value_per_lot(symbol, price) / float(price)
+    if symbol in _USD_BASE_CHF_QUOTE:
+        # base=USD, quote=CHF (USDCHF): 1 pip (0,0001 CHF) × 100 000 USD =
+        # 10 USD de nocional fijo; el P/L del bróker llega en EUR ⇒
+        # 1 USD = 1/precio USDCHF EUR (convención del bróker, misma forma
+        # que el caso EURUSD pero con el precio del par).
+        return float(pips) * float(volume) * 10.0 / float(price)
     if symbol in _USD_QUOTE_NON_EUR_BASE:
         if not eurusd_price or float(eurusd_price) <= 0.0:
             raise ValueError(

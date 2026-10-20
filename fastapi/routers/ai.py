@@ -52,6 +52,11 @@ from services.alignment_metric import pair_state, rolling_alignment
 from services.feed_breaker import h4d_breaker_is_open, h4d_breaker_trip
 from services.feed_patcher import fill_feed_hole as _fill_feed_hole
 from services.market_time import utc_hour_from_candle
+from services.rule_decider import (  # G3 (2026-10-20): decisor por REGLA
+    RULE_MOMENTUM24_ACC,
+    RULE_MOMENTUM24_VOLUME_NORM,
+    momentum24_signal,
+)
 from services.quorum import collect_votes, detect_lateral, evaluate
 from services.memory_client import build_memory_query, fetch_relevant_memories
 from services.news_filter import get_upcoming_news, is_news_blackout
@@ -400,6 +405,18 @@ _BRAINS: dict[str, Brain] = {}
 _REGISTRY: Optional[PairRegistry] = None   # mundos configurados vía PAIRS
 
 
+# G3 (2026-10-20) · E4: cuando un par declara `decision_source="momentum24"`,
+# el decisor es la REGLA medida (services/rule_decider) y NO hace falta un
+# bundle PPO. Este "cerebro virtual" cumple el MISMO contrato que `Brain`
+# (los flags que el serve lee) para que el resto del flujo —features,
+# ventana, SL/TP, sizing, vetos— sea byte-idéntico al del mundo vivo.
+_RULE_BRAIN = Brain(
+    model=None, vec_norm=None,
+    bundle={"source": "rule_momentum24", "model_sha256": "regla_momentum24"},
+    memory_channel=False, trend_features=False, higher_tf_features=False,
+)
+
+
 def _get_registry() -> PairRegistry:
     """Registro de pares (mundos) — construido una vez, de forma explícita.
 
@@ -508,7 +525,16 @@ def reload_inference_artifacts(symbol: str) -> dict:
 @router.on_event("startup")
 async def on_startup():
     # P3-1b: cada par habilitado en PAIRS carga SU brain (mundo autónomo).
+    # G3/E4 (2026-10-20): un par con `decision_source="momentum24"` decide
+    # con la REGLA medida y NO tiene bundle ⇒ no se le exige un manifest
+    # inexistente (el arranque fallaría con RuntimeError al buscarlo).
     for ctx in _get_registry().enabled():
+        if ctx.config.decision_source != "ppo":
+            logger.info(
+                "[AI-STARTUP] %s: decisor por REGLA (%s) — sin bundle PPO",
+                ctx.config.symbol, ctx.config.decision_source,
+            )
+            continue
         load_inference_artifacts(ctx.config.symbol)
 
 
@@ -977,17 +1003,27 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     if raw_df.empty or len(raw_df) < 30:
         return PredictResponse(cycle_id=cycle_id, ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
 
+    # G3 (2026-10-20) · E4: la fuente de la decisión la declara el PAR
+    # (`decision_source` en PAIRS). "ppo" = el bundle decide (mundo vivo);
+    # "momentum24" = decide la REGLA medida (services/rule_decider) y no
+    # hace falta bundle. Se lee del registro ANTES de tocar el brain.
+    _ctx = _get_registry().get(sym)
+    _decision_source = (_ctx.config.decision_source if _ctx else "ppo")
+
     # T-22: el brain se resuelve ANTES de elegir la ventana de features — el
     # contrato del bundle (trend_features) decide cuántas velas alimentan el
     # obs. (Antes vivía tras el contexto de Qwen; nada entre aquí y su sitio
     # anterior depende del brain.)
-    brain = _BRAINS.get(sym)
-    if brain is None:
-        load_inference_artifacts(sym)
+    if _decision_source == "momentum24":
+        brain = _RULE_BRAIN
+    else:
         brain = _BRAINS.get(sym)
-    if brain is None:
-        logger.error("[%s] No hay modelo PPO disponible para %s.", cycle_id, sym)
-        return PredictResponse(cycle_id=cycle_id, ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
+        if brain is None:
+            load_inference_artifacts(sym)
+            brain = _BRAINS.get(sym)
+        if brain is None:
+            logger.error("[%s] No hay modelo PPO disponible para %s.", cycle_id, sym)
+            return PredictResponse(cycle_id=cycle_id, ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
 
     # Paquete 1-4 / T-22: la serie COMPLETA (hasta 240 velas) alimenta el
     # contexto de estructura (SMA200 del prompt); las features del MODELO se
@@ -1158,14 +1194,43 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     else:
         norm_obs = raw_obs
 
-    action, _ = brain.model.predict(norm_obs, deterministic=True)
-    raw_action = np.asarray(action, dtype=np.float32).reshape(-1)
+    if _decision_source == "momentum24":
+        # G3/E4: la REGLA decide. `direction` = signo × prob MEDIDA de la
+        # regla; `volume_norm` = el modulador de riesgo (1.0 = riesgo pleno
+        # del par, como el PPO). Sin señal (movimiento plano o historia
+        # corta) ⇒ HOLD fail-closed, nunca una dirección inventada.
+        _sig = momentum24_signal([float(x) for x in df["close"].tolist()])
+        _rule_no_signal = _sig is None
+        if _sig is None:
+            logger.info(
+                "[%s] REGLA momentum24 sin señal (movimiento plano o historia "
+                "insuficiente) → HOLD", cycle_id,
+            )
+            direction, volume_norm = 0.0, 0.0
+        else:
+            _dir_sign, _mag = _sig
+            direction = _dir_sign * RULE_MOMENTUM24_ACC
+            volume_norm = RULE_MOMENTUM24_VOLUME_NORM
+            logger.info(
+                "[%s] REGLA momentum24 → %s (señal %.4f, prob %.3f)",
+                cycle_id, "BUY" if _dir_sign > 0 else "SELL", _mag, RULE_MOMENTUM24_ACC,
+            )
+        action = None
+    else:
+        action, _ = brain.model.predict(norm_obs, deterministic=True)
+    raw_action = np.asarray(
+        action if action is not None else [direction, volume_norm], dtype=np.float32
+    ).reshape(-1)
     # P2-1 / D3: contrato [direction, volume]. El bundle activo pre-P2-1
     # (4 cabezas) sigue siendo válido durante la transición: sl/tp ya se
     # ignoraban en serve (los stops salen de production_stops).
     direction, volume_norm = float(raw_action[0]), float(raw_action[1])
 
     target_pos, decision = decode_v3_direction(float(direction), env_position)
+    if _decision_source == "momentum24" and _rule_no_signal:
+        # Sin señal la regla NO decide nada: HOLD explícito (nunca FLAT/CLOSE
+        # ⇒ la regla no puede cerrar una posición por falta de señal).
+        target_pos, decision = 0, "HOLD"
     # Histeresis CLOSE K=2 (ítem cierres tempranos, 2026-10-12): no cerrar en
     # el 1er ciclo en zona muerta — esperar 2 consecutivos antes de ejecutar.
     # Sin el contrafactual con datos reales, estos cierres dejaban +257€ sobre

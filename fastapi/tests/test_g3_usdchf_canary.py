@@ -39,6 +39,17 @@ class TestUsdChfCanaryRegistration:
         assert specs["USDCHF"].get("daily_loss_pct") == 2.0
         assert specs["USDCHF"].get("equity_allocation_pct") == 20
 
+    def test_usdchf_declares_the_rule_decider(self):
+        """El canario declara SU fuente de decisión (la regla medida): el
+        default del código lo deja APAGADO (como GBPUSD) y el despliegue lo
+        enciende con .env PAIRS."""
+        from config import settings
+
+        specs = {s["symbol"]: s for s in settings.pairs}
+        assert specs["USDCHF"].get("decision_source") == "momentum24", (
+            "USDCHF debe declarar el decisor por regla (momentum24)"
+        )
+
     def test_eurusd_stays_enabled(self):
         """A1/A3: registrar USDCHF no toca el mundo vivo."""
         from config import settings

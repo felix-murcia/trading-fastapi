@@ -109,7 +109,16 @@ class Settings(BaseSettings):
         # ATR) y es una apuesta distinta (−0,69 de correlación con EURUSD).
         # Registrar NO habilita: el canario exige un bundle que pase el
         # gate + la condición documental A2 (doc/backlog-g3-usdchf-2026-10-20.md).
+        # G3 · U-8 (2026-10-20, orden Félix «quiero el USDCHF con su modelo
+        # bien reentrenado, funcionando y activo para que mañana pueda
+        # comenzar a operar»): el decisor de USDCHF es la REGLA medida
+        # (momentum de 24 h: +7,1 pp frente a su base, n=481, IC
+        # [+2,6,+11,4], p=0,001) — el PPO NO aprende ese edge (4
+        # experimentos, el gate los rechaza) ⇒ línea E4 del punto de
+        # inflexión T-31: el poder va a quien tiene el edge medido.
+        # Límites de canario: DD diario 2 %, 20 % del equity.
         {"symbol": "USDCHF", "enabled": False,
+         "decision_source": "momentum24",
          "daily_loss_pct": 2.0, "equity_allocation_pct": 20},
     ]
 
