@@ -25,7 +25,6 @@ mt5_templates/
 doc/
 .pytest_cache/
 .kilo/
-AGENTS.md
 .harness-memory/
 .omo/
 .opencode/
@@ -50,3 +49,5 @@ fastapi/ml/*/retrain_artifacts/
 
 # Artefactos de auditoría locales (nunca versionados)
 audits/
+# AGENTS.md: SÍ se versiona (auditado el 2026-10-20: sin IPs, secretos,
+# emails ni URLs externas — sólo rutas de ficheros de claves, que siguen ignorados).
