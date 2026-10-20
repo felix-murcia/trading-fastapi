@@ -303,6 +303,8 @@ def _veto_reason(
     reentry_rejected: bool = False,
     low_confidence: bool = False,
     reward_rejected: bool = False,
+    bias_veto_fired: bool = False,
+    quorum_rejected: bool = False,
 ) -> str | None:
     if original == final:
         return None
@@ -348,13 +350,22 @@ def _veto_reason(
     # mecánicos (time-stop/position/reentry) por la misma regla de prioridad.
     if low_confidence:
         return "low_confidence"
+    # T-31 (2026-10-20): el veto de QUÓRUM (mercado lateral sin consenso)
+    # se declara cuando BLOQUEÓ de verdad — antes el HOLD caía en
+    # "unknown_veto" o se atribuía a un motivo de Qwen que no había actuado.
+    if quorum_rejected:
+        return "quorum_veto"
     if final == "HOLD" and qwen.get("regime") == "RANGING":
         return "ranging_veto"
     if final == "HOLD" and qwen.get("quality", 10) < QUALITY_THRESHOLD:
         return "quality_veto"
-    if original == "BUY" and final == "HOLD" and qwen.get("bias") == "BEARISH":
+    # El veto de SESGO sólo se declara si REALMENTE revirtió la decisión.
+    # Antes se infería del mero hecho de que el sesgo se opusiera ⇒ un HOLD
+    # bloqueado por el quórum o por la falta de autoridad del LLM se
+    # registraba como "bias_veto_bullish" (atribución FALSA, medida el 20-10).
+    if bias_veto_fired and original == "BUY" and final == "HOLD" and qwen.get("bias") == "BEARISH":
         return "bias_veto_bearish"
-    if original == "SELL" and final == "HOLD" and qwen.get("bias") == "BULLISH":
+    if bias_veto_fired and original == "SELL" and final == "HOLD" and qwen.get("bias") == "BULLISH":
         return "bias_veto_bullish"
     return "unknown_veto"
 
@@ -1448,7 +1459,8 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     elif qwen["quality"] < QUALITY_THRESHOLD and final_decision in ("BUY", "SELL"):
         logger.warning("[%s] VETO CALIDAD ║ Score %.1f < %.1f → HOLD", cycle_id, qwen["quality"], QUALITY_THRESHOLD)
         final_decision = "HOLD"
-    elif final_decision == "BUY" and qwen["bias"] == "BEARISH" and qwen.get("bias_prob", 0.5) <= 0.3:
+    bias_veto_fired = False
+    if final_decision == "BUY" and qwen["bias"] == "BEARISH" and qwen.get("bias_prob", 0.5) <= 0.3:
         # T-31: el veto direccional sólo tiene autoridad si el juez la ha
         # demostrado con datos reales (services/qwen_authority.py). Un juez
         # que dice «0.85» y acierta el 22 % NO puede revertir señales.
@@ -1457,12 +1469,14 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         else:
             logger.warning("[%s] VETO BIAS ║ BUY revertido por LLM BEARISH (conf=%.2f)", cycle_id, qwen.get("bias_prob", 0.5))
             final_decision = "HOLD"
+            bias_veto_fired = True
     elif final_decision == "SELL" and qwen["bias"] == "BULLISH" and qwen.get("bias_prob", 0.5) >= 0.7:
         if not await _qwen_veto_authorized(sym, cycle_id):
             pass  # sin autoridad → la señal pasa (log explícito en el helper)
         else:
             logger.warning("[%s] VETO BIAS ║ SELL revertido por LLM BULLISH (conf=%.2f)", cycle_id, qwen.get("bias_prob", 0.5))
             final_decision = "HOLD"
+            bias_veto_fired = True
 
     # T-31 (orden Félix 2026-10-19) — QUÓRUM ENTRE MODELOS EN MERCADO
     # LATERAL. En rango, una entrada direccional sostenida por un solo
@@ -1475,6 +1489,7 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     # En régimen NO lateral el quorum NO se aplica (cero cambios de
     # comportamiento fuera del lateral).
     quorum_audit: Optional[dict] = None
+    quorum_rejected = False
     if decision in ("BUY", "SELL"):
         _adx_val = float(df['adx'].iloc[-1]) if 'adx' in df.columns else None
         # T-31: desplazamiento por TIEMPO (24 h reales, no 24 barras: la
@@ -1531,6 +1546,7 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
                     cycle_id, _verdict["reason"],
                 )
                 final_decision = "HOLD"
+                quorum_rejected = True
         else:
             # T-31: la trazabilidad del veredicto — aunque NO sea lateral se
             # declaran las ENTRADAS del detector (si no, un "no lateral" sin
@@ -1580,6 +1596,8 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         reentry_rejected=reentry_window and reentry_ok is False,
         low_confidence=low_confidence,
         reward_rejected=reward_below_min,
+        bias_veto_fired=bias_veto_fired,
+        quorum_rejected=quorum_rejected,
     )
     try:
         deliberation = await deliberate(

@@ -44,6 +44,10 @@ PSI_CRIT = 0.2                # cambio significativo de distribución
 DECAY_MIN_SAMPLES = 20        # mínimo de cierres para testar decaimiento
 DECAY_Z_CRIT = -1.645         # z_{0.05} unilateral (p<0.05)
 LIVE_CANDLES = 200            # velas vivas para la ventana de PSI
+# Ventana del baseline de drift (2026-10-20): comparable con la ventana viva
+# (200 velas) — el baseline sobre toda la historia producía un PSI estructural
+# en las features de nivel de precio (sma20: PSI 12,4 sin significado).
+BASELINE_WINDOW = 400
 MIN_LIVE_VALUES = 50          # masa mínima de valores no-NaN por feature
 PSI_EPS = 1e-6                # suavizado para bins vacíos
 DRIFT_CHECK_DELAY_S = 300     # primera pasada tras el arranque
@@ -69,11 +73,25 @@ def build_feature_baseline(train_df: pd.DataFrame) -> dict:
     bin (calculadas con los mismos datos, no supuestas uniformes). Features
     degeneradas (std=0, <100 muestras o bins no estrictamente crecientes) se
     excluyen: no hay distribución que comparar.
+
+    VENTANA COMPARABLE (fix 2026-10-20): el baseline se calcula sobre la
+    COLA reciente del df de entrenamiento (BASELINE_WINDOW velas), no sobre
+    toda la historia. Motivo (medido el 20-10): la ventana viva de PSI son
+    200 velas, y features de NIVEL DE PRECIO (p. ej. `sma20`, media 1,0987
+    sobre 4 años) comparadas contra 4 años de historia (precio 1,05→1,25)
+    concentran TODA la distribución viva en un solo bin ⇒ PSI ≈ 12 (crítico
+    estructural) que no dice nada de las entradas del modelo: mide "el
+    precio cambió de nivel", no "la forma de las features cambió". Con la
+    ventana comparable, el PSI mide lo que debe medir.
     """
     from ml.trading_env_v2 import MARKET_FEATURES
 
     features: dict = {}
     excluded: list[str] = []
+    # Cola comparable con la ventana viva (LIVE_CANDLES=200): con margen para
+    # que los deciles no se estimen con muy pocos datos.
+    if len(train_df) > BASELINE_WINDOW:
+        train_df = train_df.tail(BASELINE_WINDOW)
     for col in MARKET_FEATURES:
         if col not in train_df.columns:
             excluded.append(f"{col}:ausente")
