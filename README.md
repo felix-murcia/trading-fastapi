@@ -2601,3 +2601,19 @@ Relación **INVERSA**: con un gate armado ≥0.7 esa semana se habrían bloquead
 - **Módulo `services/measurement.py`** (L1): `canonical_direction` (terminal determinista + cerrado), `skill_of` (veredicto con significancia: exige distinguirse del azar), `wilson_lower_bound` y `benchmark_predictions`. Consumidores: autoridad del veto, T-28, calibración, drift y (próximamente) el ledger. **Una sola definición ⇒ una sola verdad.**
 - **Consecuencias operativas:** (a) la autoridad del veto está **REVOCADA por falta de muestra madura** (no por mala skill) ⇒ el veto direccional está inerte y el LLM **no puede bloquear** hasta que su evidencia madure; (b) el **quórum** y los vetos mecánicos siguen operando; (c) la vara canónica sugiere una fuente de dirección **determinista y verificable** (estructura SMA200+pendiente, 62,6 %) como candidata a ser admitida mientras el LLM madura.
 - **Script re-ejecutable:** `fastapi/scripts/benchmark_canonico.py` (la vara, y el estado de cada fuente en los ciclos reales). Suite **1090 passed + 2 xfailed**.
+
+### Evidencia 2026-10-20 (E1b · la exactitud de clasificación NO es un edge traducible)
+
+- **La vara canónica (L2)**: la estructura (SMA200+pendiente) acierta el **62,6 %** de las direcciones a +24 h (CI 58,0 %) y el momentum está **invertido** (42,1 %). Pero evaluada como **POLÍTICA** —con la mecánica real de producción (spread 0,17 pips, SL/TP, sizing, regla 3 €, ancla anti-churn)— en el mismo walk-forward congelado (`fastapi/scripts/e1b_structure_policy.py`): la dirección OOS cae al **48,4 %** (folds 49,4 %) y la expectancy es **negativa** (**−0,226 €/trade** en el holdout; 3 de 4 folds en negativo).
+- **Por qué:** (a) la clasificación pasiva cuenta la misma señal como **24 aciertos consecutivos** (muestra autocorrelacionada ⇒ n efectivo muy menor ⇒ el CI de la vara es optimista); (b) al operarla, la fricción + el SL + el churn (96 operaciones en el holdout) se comen el edge.
+- **Consecuencia de método (reencuadra L2/L3/L5):** lo que decide si una fuente puede tomar decisiones NO es su exactitud de clasificación sino **sus métricas de trading en OOS** (expectancy, sharpe, DD, nº de operaciones) medidas con la mecánica real — que es justo lo que el walk-forward ya produce. La clasificación queda como **diagnóstico** (calibración, contexto), no como criterio de admisión.
+- **La verdad de hoy, con las métricas de trading:**
+
+  | Candidato | holdout reward | expectancy | trades | maxDD | veredicto |
+  |---|---|---|---|---|---|
+  | **Bundle vivo (exp39, reward v1)** | **+1,965** | **+0,895 €** | 30 | 5,60 % | **el mejor de los tres** (en producción: +21,80 € hoy) |
+  | exp41 (v3_edge, L3) | −19,651 | −2,203 € | 100 | 24,96 % | rechazado |
+  | exp40/39 (v1) | −1,863 / +0,016 | −0,496 € | 17 | 4,51 % | rechazado / vivo |
+  | Regla de estructura (E1b) | −5,450 | −0,226 € | 96 | 3,45 % | no es tradable |
+
+- **Estado del sistema:** sano, bundle vivo `4cd9abb6`, equity ~502,7 €, +21,80 € hoy (3 trades) y una posición abierta con +5,81 €. La autoridad del veto está **REVOCADA por falta de muestra madura** (n=0 evaluable, no por mala skill) ⇒ el veto direccional está inerte hasta que la evidencia del LLM madure.
