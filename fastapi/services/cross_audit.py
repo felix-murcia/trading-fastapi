@@ -160,6 +160,38 @@ async def run_cross_audit(symbol: str = "EURUSD") -> dict:
     except Exception as exc:  # noqa: BLE001
         checks.append({"check": "benchmark_sma200", "status": "error", "error": str(exc)})
 
+    # ── 5) EDGE VIVO del par (G2/mapa de edge) ──────────────────────────
+    # Orden Félix 2026-10-20: «cada par tiene su propia idiosincrasia» ⇒ el
+    # sistema debe saber si el edge que explota sigue encendido. El mapa
+    # canónico por ventana (30/14/7 d) lo dice: si la estructura acierta
+    # <50 % en la ventana viva, el edge que el modelo explotaba está APAGADO
+    # ⇒ se DECLARA (no se esconde ni se opera en silencio).
+    try:
+        from services.ledger import _edge_decay_map
+        emap = await _edge_decay_map()
+        for sym, v in (emap or {}).items():
+            if "error" in v:
+                checks.append({"check": f"edge_vivo_{sym}", "status": "error",
+                               "error": v["error"]})
+                continue
+            w = v.get("windows", {})
+            acc7 = (w.get("7d") or {}).get("acc")
+            alive = bool(v.get("edge_alive"))
+            checks.append({
+                "check": f"edge_vivo_{sym}",
+                "status": "ok" if alive else "edge_apagado",
+                "acc_30d": (w.get("30d") or {}).get("acc"),
+                "acc_14d": (w.get("14d") or {}).get("acc"),
+                "acc_7d": acc7,
+                "n_7d": (w.get("7d") or {}).get("n"),
+                "note": "el edge trivial (sma200 H1) que el modelo explota "
+                        "está por debajo del azar en la ventana viva ⇒ el "
+                        "sistema opera sobre una señal apagada: la expectativa "
+                        "viva del sistema tenderá a decaer",
+            })
+    except Exception as exc:  # noqa: BLE001
+        checks.append({"check": "edge_vivo", "status": "error", "error": str(exc)})
+
     discrepancias = [c for c in checks if c.get("status") in ("discrepancia", "error")]
     veredicto = {
         "generated_at": ts,

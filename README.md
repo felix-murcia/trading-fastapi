@@ -2656,3 +2656,25 @@ Relación **INVERSA**: con un gate armado ≥0.7 esa semana se habrían bloquead
 - **POR QUÉ no lo pasa (análisis de SOLO LECTURA, benchmark canónico +24 h):** GBPUSD es **menos predecible** con las mismas reglas triviales que EURUSD — `sma200` **61,7 %** (CI 58,1 %) en EURUSD vs **53,9 %** (CI 50,2 %) en GBPUSD; `mom24` 43,9 % vs **35,6 %** (más invertido). ⇒ **el PPO no puede superar una vara que el propio mercado no pone**: los rechazos no son un fallo de implementación, son la realidad del mercado. Y el holdout ampliado (5 956 barras) ya daba potencia de sobra (n=479/357 aperturas) ⇒ no es falta de estadística.
 - **Opciones para Félix:** (a) GBPUSD queda como **canario listado y no habilitado** — la infra por mundo está lista y el flip es un cambio de env en cuanto haya bundle que pase el gate; (b) **reformular GBPUSD con otro marco** (el edge de EURUSD vive en H4/D1: −1,66 % bajo SMA200-H4, −3,23 % bajo D1) ⇒ medir si GBPUSD lo tiene en H4/D1 antes de reentrenar; (c) no reintentar el retrain sin hipótesis nueva.
 - **Estado del sistema (EURUSD, sin cambios):** sano · equity 489,37 € · **+13,27 € hoy (3 trades)** · bundle vivo `4cd9abb6` intacto · la 2ª instancia del EA para GBPUSD **no hace falta hasta que el mundo se habilite**. Suite **1122 passed + 2 xfailed**.
+
+### Evidencia 2026-10-20 (mapa de edge por par y por marco + DECAIMIENTO del edge publicado)
+
+- **Idea de Félix (que ordena el workstream):** *«cada par de divisas tiene su propia idiosincrasia, por eso es lo de distinguir "mundos distintos" — si se usara el mismo marco para todos los pares, ¿cuál sería el sentido de dividirlo en mundos diferentes?»* ⇒ El sentido de los mundos es la **especialización**: cada mundo puede tener **su propio contrato de obs** (⇒ su propio marco), porque el serve deriva las features del `obs_shape` de **cada** bundle. Faltaba la evidencia para elegir el marco de cada mundo.
+- **MAPA DE EDGE (medido con la definición canónica, +24 h reales, marco de decisión variable):**
+
+  | marco | EURUSD | GBPUSD |
+  |---|---|---|
+  | **H1** | **sma200 54,6 %** (CI 51,1 %) ★ | sma200 47,4 % · mom24h **35,0 %** |
+  | H4 | sma200 49,7 % · mom24h 44,4 % | sma200 46,5 % · mom24h 45,9 % |
+  | D1 | sma200 47,7 % · mom24h 50,3 % | sma200 48,7 % · mom24h 49,8 % |
+
+  ⇒ **EURUSD tiene edge medible: H1 + estructura** — el único predictor de todo el mapa que supera el azar con significación, y es exactamente el que el bundle vivo explotó (16 trades, +1,81 €/trade). **GBPUSD no tiene edge en NINGÚN marco** (máximo 50,6 %, CI 47,4 %) ⇒ **"otro marco" no arregla GBPUSD: no hay señal que capturar.** (Y la arquitectura ya lo permite: un mundo con edge en otro marco se entrena con ese contrato y el serve lo deriva de su bundle.)
+- **DECAIMIENTO DEL EDGE (nuevo, publicado en el ledger + en la auditoría cruzada):** el edge de estructura que el sistema explota **se está apagando**:
+  | | 30 d | 14 d | **7 d** | edge vivo |
+  |---|---|---|---|---|
+  | **EURUSD** | 62,6 % (n=436) | 48,7 % | **27,8 %** (n=36) | **NO** |
+  | GBPUSD | 47,7 % (n=346) | 11,8 % | **0,0 %** (n=12) | **NO** |
+
+  ⇒ En los últimos 7 días la regla de estructura acierta el **27,8 %** en EURUSD (es decir, **invertida**: se equivoca el 72 % de las veces). El bundle vivo fue entrenado para explotar ese edge ⇒ **su expectativa tiende a decaer**, aunque la mecánica siga ganando a corto plazo (+13,27 € hoy con n=3).
+- **La auditoría cruzada lo DECLARA** (`edge_apagado` por par) — con la exigencia de Félix: que el sistema sea «absolutamente fiable» ⇒ si su señal de mercado está apagada, tiene que **decirlo**, no operar en silencio. Checks: `llm_skill` (sin_datos) · `live_track_record` (ok, 187 trades, +1,76 €/trade) · `drift_psi` (ok, 4,885) · `benchmark_sma200` (divergencia_regimen) · `edge_vivo_EURUSD` (**edge_apagado**) · `edge_vivo_GBPUSD` (**edge_apagado**). Veredicto: COHERENTE (0 discrepancias).
+- **PENDIENTE DE DECISIÓN (Félix):** con el edge apagado, ¿el sistema **reduce su actividad** (regla deMinimum-volatilidad/edge-off), sigue operando con la mecánica (que a corto plazo gana), o **congela** la operativa hasta que el edge vuelva? La regla de admisión por expectation ya cubre al challenger; esto es para el sistema vigente.

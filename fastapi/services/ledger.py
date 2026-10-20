@@ -143,6 +143,59 @@ def _live_bundle_report(symbol: str = "EURUSD") -> Optional[dict]:
     return None
 
 
+async def _edge_decay_map(symbols: tuple = ("EURUSD", "GBPUSD")) -> dict:
+    """DECAIMIENTO DEL EDGE por par y por ventana (solo lectura).
+
+    Orden Félix 2026-10-20: «cada par tiene su propia idiosincrasia» ⇒ el
+    ledger publica, por par, la exactitud del predictor trivial con skill en
+    ventanas de 30/14/7 días (el mapa de edge por marco, medido con la
+    definición canónica). Sirve para dos cosas:
+      1. ver si el edge de un par se apaga (el ledger lo declara antes de que
+         la expectativa viva del sistema lo refleje);
+      2. elegir el marco de cada mundo por evidencia, no por copia.
+    """
+    from services.measurement import benchmark_predictions, canonical_direction
+    from services.mt5_client import get_candles_with_offset
+    import datetime as _dt
+
+    out: dict = {}
+    now = _dt.datetime.now(_dt.timezone.utc).timestamp()
+    for sym in symbols:
+        try:
+            cands, _off = await get_candles_with_offset(sym, "H1", 1200)
+            if not cands:
+                continue
+            bt = [float(c["time"]) for c in cands]
+            bc = [float(c["close"]) for c in cands]
+            windows = {}
+            for label, days in (("30d", 30), ("14d", 14), ("7d", 7)):
+                since = now - days * 86400
+                h = n = 0
+                for i in range(0, len(bt)):
+                    if bt[i] < since:
+                        continue
+                    d = canonical_direction(bt, bc, bt[i], now)
+                    if d is None:
+                        continue
+                    pred = benchmark_predictions(bt, bc, bt[i], now).get("sma200")
+                    if pred is None:
+                        continue
+                    n += 1
+                    h += 1 if ((pred > 0) == (d > 0)) else 0
+                if n:
+                    windows[label] = {"acc": round(h / n, 4), "n": n}
+            out[sym] = {
+                "predictor": "sma200 (H1) — el único con skill en EURUSD",
+                "windows": windows,
+                "edge_alive": bool(
+                    windows.get("7d", {}).get("acc", 0) > 0.50
+                ),
+            }
+        except Exception as exc:  # noqa: BLE001
+            out[sym] = {"error": f"{type(exc).__name__}: {exc}"}
+    return out
+
+
 async def build_ledger(symbol: str = "EURUSD") -> dict:
     """Construye el ledger (estado del mundo con la vara correcta)."""
     now = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -227,12 +280,13 @@ async def build_ledger(symbol: str = "EURUSD") -> dict:
                             "dirección (filtra, no decide)",
     }
 
-    # ── 4) el benchmark (la vara) ────────────────────────────────────────
+    # ── 4) el benchmark (la vara) + el DECAIMIENTO del edge por par ───────
     ledger["benchmark"] = {
         "note": "predictores triviales medidos con la definición canónica; "
                 "una fuente sólo se admite si supera al mejor de ellos en "
                 "expectancy OOS (no en clasificación)",
         "script": "fastapi/scripts/benchmark_canonico.py",
+        "edge_map": await _edge_decay_map(),
     }
 
     # ── 5) el REPLAY del LLM como decisor (P4): su expectancy con la
