@@ -46,6 +46,7 @@ TRADING_AGENT.md
 fastapi/ml/backups/
 fastapi/ml/snapshots/
 fastapi/ml/retrain_artifacts/
+fastapi/ml/*/retrain_artifacts/
 
 # Artefactos de auditoría locales (nunca versionados)
 audits/
