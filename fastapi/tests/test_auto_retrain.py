@@ -262,7 +262,10 @@ class TestEvaluateModelDeterminism:
         metrics = _evaluate_model(_ZerosModel(), df, _env_cfg(df))
         assert set(metrics) == {"openings", "trades", "wins", "losses",
                                 "win_rate", "reward", "balance",
-                                "equity_curve", "step_rewards", "trade_pnls"}
+                                "equity_curve", "step_rewards", "trade_pnls",
+                                # T-31.9 / L3: acierto direccional por trade
+                                # (comparable con el benchmark L2).
+                                "direction_hits"}
         assert metrics["openings"] == 0  # política de ceros nunca abre
 
     def test_normalized_run_uses_obs_rms(self, df):
@@ -768,7 +771,15 @@ class TestT27Activation:
         from pathlib import Path
         root = Path(__file__).resolve().parent.parent
         src = (root / "services" / "auto_retrain.py").read_text(encoding="utf-8")
-        assert 'reward_version: str = "v1"' in src
+        # T-31.9 / L3 (2026-10-20): la versión de reward pasa a ser
+        # seleccionable por env (RETRAIN_REWARD_VERSION) para poder lanzar el
+        # run de "v3_edge"; el DEFAULT sigue siendo "v1" (el estado
+        # post-revert de T-27 no se toca: sólo se abre una vía explícita).
+        assert 'RETRAIN_REWARD_VERSION", "v1"' in src
+        assert 'reward_version: str = "v1"' not in src, (
+            "la reward por defecto debe seguir siendo v1 (byte-idéntico); "
+            "la vía v3_edge es explícita (env) — no un cambio de default"
+        )
         assert "trend_features=settings.higher_tf_features" in src
         assert "higher_tf_features=settings.higher_tf_features" in src
         cfg_src = (root / "config.py").read_text(encoding="utf-8")

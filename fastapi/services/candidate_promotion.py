@@ -190,6 +190,16 @@ async def _promote_bundle_files(
          "promotion_path": extra.get("promotion_path")},
         symbol=symbol,
     )
+    # 5. Marcador de promoción (last_promotion.json) — el mismo que escribe
+    #    la vía normal del retrain. Sin él, el artefacto queda sin versionar y
+    #    el registro de promociones miente sobre el bundle activo (fix
+    #    2026-10-20: el marcador seguía con el sha del bundle anterior).
+    from services.auto_retrain import _write_promotion_marker
+    _write_promotion_marker(
+        symbol=symbol,
+        model_path=model_path,
+        reason=(extra.get("promotion_path") or {}).get("reason", "promoted"),
+    )
     from core.adapters import AiModelStoreAdapter
     AiModelStoreAdapter().reload(symbol)
 

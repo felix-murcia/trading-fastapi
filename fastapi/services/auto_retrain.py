@@ -88,13 +88,17 @@ class RetrainConfig:
     churn_friction_per_lot: float = 7.0  # ancla anti-churn (decisión Félix "fricción completa";
                                          # plan: fricción 7 €/lot) — parámetro de política,
                                          # NO coste de bróker (separado desde O-2)
-    reward_version: str = "v1"           # T-27 REVERTIDO (2026-10-17, orden «revert T-27»):
+    reward_version: str = os.getenv("RETRAIN_REWARD_VERSION", "v1")
+                                          # T-27 REVERTIDO (2026-10-17, orden «revert T-27»):
                                          # el gate del retrain único cayó (3/6) ⇒ el candidato
                                          # «Sat-Align» queda invalidado y el default vuelve a
                                          # "v1" byte-idéntico (antes: flip pre-registrado a
                                          # "v2_align"). Eval y train siguen compartiendo la
                                          # MISMA versión (env_cfg → _evaluate_model los copia
                                          # a ambos). Serve no lee reward_version.
+    # T-31.9 / L3 (2026-10-20): "v3_edge" — reward SÓLO direccional (fuera la
+    # regla 3 € y el ancla anti-churn: son reglas de negocio de la CAPA DE
+    # EJECUCIÓN). Se selecciona con la env RETRAIN_REWARD_VERSION.
     n_epochs: int = 3                    # Epochs de entrenamiento (compatibilidad/auditoría)
     total_timesteps: int = 100_000      # PPO steps por retrain; 1.500 era insuficiente
     learning_rate: float = 3e-4
@@ -701,6 +705,9 @@ def _evaluate_model(model, df: pd.DataFrame, env_cfg: dict, obs_rms=None) -> dic
         # Fase 3 / R-1: pnl por trade — segment_metrics calcula la expectancy
         # con la regla 3 €; None si el env no lo expone (error allí, no aquí).
         "trade_pnls": info.get("trade_pnls"),
+        # T-31.9 / L3: acierto direccional por trade (1/0) — la métrica que
+        # se compara con el benchmark L2 (SMA200-trend 66,7 %, LLM 69,6 %).
+        "direction_hits": info.get("direction_hits"),
     }
 
 
@@ -933,9 +940,14 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int, symbol: str = TRAINING
         reward_version=cfg.reward_version,
     )
     logger.warning(
-        "[RETRAIN] Costes del env (O-2): spread=%.2f pips, comisión_bróker=%.4f €/lot, ancla_churn=%.2f €/lot",
+        "[RETRAIN] Costes del env (O-2): spread=%.2f pips, comisión_bróker=%.4f €/lot, "
+        "ancla_churn=%.2f €/lot | reward_version=%s",
         env_cfg["spread_pips"], env_cfg["commission_per_lot"],
         env_cfg["churn_friction_per_lot"],
+        # T-31.9 / L3: la versión de reward AHORA es explícita en el log del
+        # run (antes un contenedor con imagen vieja podía entrenar con otra
+        # reward sin que nadie lo viera — pasó el 20-10).
+        env_cfg.get("reward_version", "?"),
     )
 
     from stable_baselines3 import PPO

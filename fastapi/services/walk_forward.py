@@ -237,6 +237,19 @@ def segment_metrics(result: dict, initial_balance: float) -> dict:
             p if is_winning_close(p) else -abs(p) for p in pnls
         ]))
 
+    # T-31.9 / L3: exactitud DIRECCIONAL del segmento (aciertos de dirección
+    # sobre trades con futuro disponible). Es la métrica comparable con el
+    # benchmark L2 (mismo horizonte +24 h). None si el env no la expone (no
+    # se inventa: el valor ausente es "no medido", no 0).
+    dir_hits = result.get("direction_hits")
+    if dir_hits is None:
+        direction_accuracy = None
+        direction_n = 0
+    else:
+        dir_hits = list(dir_hits)
+        direction_n = len(dir_hits)
+        direction_accuracy = (float(sum(dir_hits)) / direction_n) if direction_n else None
+
     return {
         "reward": float(result.get("reward", 0.0)),
         "sharpe": _sharpe(rets),
@@ -251,12 +264,22 @@ def segment_metrics(result: dict, initial_balance: float) -> dict:
         "openings": int(result.get("openings", 0)),
         "n_steps": int(len(rewards)),
         "final_equity": float(equity[-1]) if len(equity) else float(initial_balance),
+        "direction_accuracy": direction_accuracy,
+        "direction_n": direction_n,
     }
 
 
 def _aggregate(folds_metrics: list) -> dict:
     if not folds_metrics:
         raise RuntimeError("[WALK-FORWARD] aggregate sobre 0 folds")
+    # T-31.9 / L3: exactitud direccional agregada de los folds (ponderada
+    # por el número de trades medidos). None si ningún fold la midió.
+    _dir_n = int(sum(m.get("direction_n", 0) for m in folds_metrics))
+    _dir_hits = 0
+    for m in folds_metrics:
+        acc = m.get("direction_accuracy")
+        if acc is not None and m.get("direction_n"):
+            _dir_hits += acc * m["direction_n"]
     return {
         "sum_reward": float(sum(m["reward"] for m in folds_metrics)),
         "mean_sharpe": float(np.mean([m["sharpe"] for m in folds_metrics])),
@@ -266,6 +289,8 @@ def _aggregate(folds_metrics: list) -> dict:
         "total_trades": int(sum(m["trades"] for m in folds_metrics)),
         "total_openings": int(sum(m["openings"] for m in folds_metrics)),
         "n_steps": int(sum(m["n_steps"] for m in folds_metrics)),
+        "direction_accuracy": (_dir_hits / _dir_n) if _dir_n else None,
+        "direction_n": _dir_n,
     }
 
 
