@@ -7,6 +7,8 @@ para que el resto del código no cambie.
 MCP Server: http://<MT5_HTTP_URL>/api/v1/...
 """
 
+import datetime as dt
+
 import httpx
 import logging
 from config import settings
@@ -59,6 +61,55 @@ async def get_prices() -> dict:
 async def get_spread(symbol: str) -> float:
     data = await _get(f"/api/v1/market/price/{symbol}")
     return float(data.get("ask", 0.0)) - float(data.get("bid", 0.0))
+
+
+async def get_candles_with_offset(symbol: str, timeframe: str, count: int):
+    """Velas en UTC real + el desfase broker→UTC aplicado (para alinear marcas
+    que vienen en el reloj del broker).
+
+    T-31 (2026-10-20): el `mt5_time` del audit lo manda el EA y está en el
+    RELOJ DEL BROKER (+3 h medidos), NO en UTC real (ej: ciclo creado a las
+    10:10 UTC → mt5_time 13:10). Las velas del MCP también venían en reloj
+    de broker. Al normalizar SÓLO las velas, la medición quedaba
+    desalineada 3 h ⇒ las cifras de skill publicadas eran basura.
+
+    Aquí se devuelven AMBAS cosas: las velas ya en UTC real y el desfase
+    aplicado, para que el consumidor alinee sus marcas (mt5_time − offset).
+    """
+    import httpx
+    from config import settings
+    from services.market_time import broker_offset_hours_from_candles, correct_candle_epoch
+
+    async with httpx.AsyncClient(timeout=settings.mt5_http_timeout) as c:
+        r = await c.get(
+            settings.mt5_http_url + "/api/v1/market/candles/latest",
+            params={"symbol_name": symbol, "timeframe": timeframe, "count": count},
+        )
+        r.raise_for_status()
+        data = r.json()
+    raw = data if isinstance(data, list) else data.get("candles", [])
+
+    def _to_ts(t) -> float:
+        if isinstance(t, (int, float)):
+            return float(t)
+        return dt.datetime.fromisoformat(str(t).replace("Z", "+00:00")).timestamp()
+
+    offset_h = broker_offset_hours_from_candles(raw)
+    candles = sorted(
+        (
+            {
+                "time": correct_candle_epoch(_to_ts(x.get("time", 0)), offset_h),
+                "open": float(x.get("open", 0)),
+                "high": float(x.get("high", 0)),
+                "low": float(x.get("low", 0)),
+                "close": float(x.get("close", 0)),
+                "volume": float(x.get("tick_volume", x.get("volume", 0))),
+            }
+            for x in raw
+        ),
+        key=lambda c: c["time"],
+    )
+    return candles, offset_h
 
 
 async def get_candles(symbol: str, timeframe: str, count: int) -> list[dict]:

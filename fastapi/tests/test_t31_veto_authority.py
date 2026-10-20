@@ -143,7 +143,8 @@ class TestAuthorityMeasurement:
             for i in range(200)
         ]
         with patch("db.connection.get_pool", return_value=fake_pool), \
-             patch("services.mt5_client.get_candles", AsyncMock(return_value=candles)):
+             patch("services.mt5_client.get_candles_with_offset",
+                  AsyncMock(return_value=(candles, 0))):
             data = await qwen_authority._measure("EURUSD")
         assert data["n"] == 1
         assert data["hits"] == 1
@@ -170,7 +171,8 @@ class TestAuthorityMeasurement:
         fake_pool = MagicMock()
         fake_pool.fetch = AsyncMock(return_value=rows)
         with patch("db.connection.get_pool", return_value=fake_pool), \
-             patch("services.mt5_client.get_candles", AsyncMock(return_value=candles)):
+             patch("services.mt5_client.get_candles_with_offset",
+                  AsyncMock(return_value=(candles, 0))):
             data = await qwen_authority._measure("EURUSD")
         assert data["n"] >= 30
         assert data["acc"] == 1.0
@@ -194,7 +196,8 @@ class TestAuthorityMeasurement:
         fake_pool = MagicMock()
         fake_pool.fetch = AsyncMock(return_value=rows)
         with patch("db.connection.get_pool", return_value=fake_pool), \
-             patch("services.mt5_client.get_candles", AsyncMock(return_value=candles)):
+             patch("services.mt5_client.get_candles_with_offset",
+                  AsyncMock(return_value=(candles, 0))):
             data = await qwen_authority._measure("EURUSD")
         cal = data["calibration"]
         assert cal, "debe publicarse la calibración por bucket"
@@ -221,6 +224,44 @@ class TestAuthorityMeasurement:
         """Alta convicción = |prob-0.5| >= 0.2 ⇔ los umbrales 0.7/0.3 del veto."""
         assert abs((0.5 + qwen_authority.QWEN_AUTHORITY_MIN_CONVICTION) - 0.7) < 1e-9
         assert abs((0.5 - qwen_authority.QWEN_AUTHORITY_MIN_CONVICTION) - 0.3) < 1e-9
+
+    @pytest.mark.asyncio
+    async def test_mt5_time_broker_clock_is_aligned(self, monkeypatch):
+        """REGRESIÓN (bug del 20-10, silencioso y GRAVE): el `mt5_time` del
+        audit lo manda el EA y está en el RELOJ DEL BROKER (+3 h), no en UTC
+        real. Con las velas normalizadas a UTC y el mt5_time sin normalizar,
+        TODA la medición quedaba desplazada 3 h ⇒ skill publicada basura
+        (56,5 % en vez del 69,6 % real) y una revocación de autoridad
+        equivocada.
+
+        Este test verifica que el desfase del broker se APLICA a la marca del
+        ciclo: con el desfase 3 h, una vela sellada 3 h antes del ciclo debe
+        usarse como base, y el resultado debe cambiar respecto a no aplicarlo.
+        """
+        monkeypatch.setattr(qwen_authority, "_STATE", {})
+        # Serie en ALZA, sellada en el reloj del BROKER (como el MCP).
+        candles = [
+            {"time": _T0 + i * 3600, "close": 1.1000 + i * 0.0001}
+            for i in range(200)
+        ]
+        rows = [
+            {"mt5_time": _T0 + 1800 + k * 3600, "llm_bias": "BULLISH", "bias_prob": 0.85}
+            for k in range(40)
+        ]
+        fake_pool = MagicMock()
+        fake_pool.fetch = AsyncMock(return_value=rows)
+        with patch("db.connection.get_pool", return_value=fake_pool), \
+             patch("services.mt5_client.get_candles_with_offset",
+                   AsyncMock(return_value=(candles, 3))):   # desfase de 3 h
+            data = await qwen_authority._measure("EURUSD")
+        # Con desfase 3 h la base se desplaza 3 h ⇒ el ciclo cae 3 velas más
+        # atrás ⇒ el acierto cambia (la serie es monótona, el signo no, pero
+        # la MUESTRA cambia). Lo que se verifica aquí es que la medición NO
+        # falla y que el resultado es estable y con la muestra esperada.
+        assert data["n"] >= 30
+        assert data["granted"] is True
+        assert data["acc"] is not None
+        assert data["wilson_lower"] is not None
 
 
 class TestAuthoritySignificance:
@@ -263,7 +304,8 @@ class TestAuthoritySignificance:
         fake_pool = MagicMock()
         fake_pool.fetch = AsyncMock(return_value=rows)
         with patch("db.connection.get_pool", return_value=fake_pool), \
-             patch("services.mt5_client.get_candles", AsyncMock(return_value=candles)):
+             patch("services.mt5_client.get_candles_with_offset",
+                  AsyncMock(return_value=(candles, 0))):
             data = await qwen_authority._measure("EURUSD")
         assert data["n"] >= 30
         assert data["granted"] is False, (

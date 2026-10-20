@@ -90,7 +90,7 @@ def _to_epoch(bar: dict) -> float:
 async def _measure(symbol: str) -> dict:
     """Mide la skill direccional del LLM en la ventana reciente (live)."""
     from db.connection import get_pool
-    from services.mt5_client import get_candles
+    from services.mt5_client import get_candles_with_offset
 
     pool = get_pool()
     since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=QWEN_AUTHORITY_WINDOW_DAYS)
@@ -123,7 +123,7 @@ async def _measure(symbol: str) -> dict:
     if not rows:
         return result
 
-    raw = await get_candles(symbol, "H1", 600)
+    raw, offset_h = await get_candles_with_offset(symbol, "H1", 600)
     # Sólo velas H1 CERRADAS (fix 2026-10-20): la vela en formación lleva el
     # precio ACTUAL como "close" y.tickea. Como cierre terminal del horizonte
     # +24 h la usaba para ~12 ciclos (los de la hora en curso) ⇒ la skill
@@ -136,6 +136,10 @@ async def _measure(symbol: str) -> dict:
     if not pairs:
         result["reason"] = "sin velas H1 cerradas"
         return result
+    # El `mt5_time` del audit viene en el reloj del BROKER (+3 h) → a UTC real
+    # (T-31, 2026-10-20: sin esta alineación TODA la medición estaba
+    # desplazada 3 h y las cifras publicadas eran basura).
+    offset_s = float(offset_h) * 3600.0
     bar_ep = [p[0] for p in pairs]
     bar_close = [p[1] for p in pairs]
 
@@ -170,7 +174,7 @@ async def _measure(symbol: str) -> dict:
         if prob is None or abs(prob - 0.5) < QWEN_AUTHORITY_MIN_CONVICTION:
             continue  # sólo llamadas de alta convicción: el veto nunca
             #             habría actuado sobre las demás
-        rd = realized(float(r["mt5_time"]))
+        rd = realized(float(r["mt5_time"]) - offset_s)
         if rd is None:
             continue
         n += 1
