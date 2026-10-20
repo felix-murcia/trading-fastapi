@@ -2748,3 +2748,36 @@ Orden de Félix: *«revisa que todos los timeframes estén alineados (EA, sistem
 
 MIT — ver [LICENSE](LICENSE). El sistema opera dinero real: el software se
 entrega «tal cual», sin garantía (ver el texto de la licencia).
+
+---
+
+## 2026-10-20 (T-31.9 · bis) — RETRACTACIÓN Y CORRECCIÓN: el «mapa de edge» medía la DERIVA DEL MERCADO, no el skill
+
+Al preguntar qué par implementar, se midió el mapa de edge de los 7 candidatos y **las cifras publicadas hasta aquí resultaron ser incorrectas**. Lo que se encontró y lo que se corrige (todo medido, con n e IC):
+
+**Bug 1 · el desfase broker→UTC se detectaba en marcos donde no vale.** La detección por «vela en formación» sólo es exacta en **H1**: con el feed real daba **+1 h en H4** y **−19 h en D1** (la vela diaria tiene ~19 h ⇒ la aritmética de hora devolvía basura). Ese valor envenenaba la caché global de desfases, que usa el **día de la cuenta** ⇒ el corte diario de riesgo podía quedar 19 h descuadrado. Corregido: la detección por velas **sólo en H1** (los demás marcos usan el desfase ya conocido, que es del servidor), ventana de contemporaneidad 36 h → **2 h**, y la caché **rechaza** cualquier valor fuera de ±12 h.
+
+**Bug 2 · el horizonte de la medición canónica no era de 24 h.** El terminal era «la **primera** vela ≥ t0+24 h», que **salta los huecos** (pausa diaria de 1 h y fin de semana) ⇒ el horizonte medido era de 26 a 72 h en el 19-26 % de los casos. Medido sobre el momentum de 24 h de EURUSD (7 d): **37,2 % con la regla antigua vs 52,7 % con la exacta** ⇒ 15 pp de diferencia por el hueco, no por el mercado. Corregido: el terminal es «la **última** vela ≤ t0+24 h» (horizonte real 23-24 h y determinista: los huecos del mercado son permanentes).
+
+**El hallazgo de fondo: la exactitud de una regla trivial NO es su skill.** Si la regla dice siempre lo mismo (p. ej. «precio sobre su SMA200 y la SMA200 sube» en un mercado que lleva semanas subiendo), su exactitud **es** la base del mercado. Medido: en USDCHF (7 d) la regla dispara **67 de 67** veces y «acierta» el **76,1 %** ⇒ ese 76,1 % es «el mercado subió el 76 % de los días», no un acierto de la regla (el test de la suerte con 20 000 barajados da **p = 1,0000**). Por tanto **el skill se mide contra su propia base** (`services.measurement.skill_vs_base`): `skill = exactitud − base`.
+
+**Consecuencia: se retiran las cifras misledas de este README** (las de arriba quedan como registro histórico de lo que se creía entonces, no como verdad):
+- «EURUSD H1 sma200 54,6 %» ⇒ su base en esa ventana era la misma ⇒ **skill 0,0 pp**.
+- «el edge se apaga / decae (62,6 % → 48,7 % → 27,8 %)» ⇒ era **el cambio de deriva del mercado**, no un(edge) que se apagaba.
+- «GBPUSD no tiene señal» ⇒ es cierto, pero **no es una propiedad de GBPUSD**: ningún par supera hoy su propia base con la regla de estructura (la tabla completa está abajo).
+
+**Mapa corregido (publicado ahora por el propio sistema en `/api/v1/ai/ledger`, skill contra la base, 30 d):**
+
+| par | sma200 | mom24 | barra previa | skill real |
+|---|---|---|---|---|
+| EURUSD | +0,0 pp | −12,1 pp | −5,3 pp | — |
+| GBPUSD | −9,0 pp | −18,8 pp | +0,8 pp | — |
+| AUDUSD | +0,0 pp | −4,8 pp | −8,8 pp | — |
+| NZDUSD | +0,0 pp | −11,1 pp | −2,1 pp | — |
+| USDJPY | −45,5 pp | −12,4 pp | −7,0 pp | — |
+| **USDCHF** | +0,0 pp | **+7,1 pp** (n=481, IC [+2,6,+11,4], p=0,001) | −0,4 pp | **★ el único** |
+| XAUUSD | −2,5 pp | −9,0 pp | −4,2 pp | — |
+
+**Y el dato de Cordura que faltaba (por fin medido bien):** el **edge del sistema vivo NO viene de estas reglas triviales** ⇒ el acierto del 53 % y el PnL de +343,98 € son del **PPO + las reglas de negocio**, no de la «estructura». Por eso el filtro «si no hay tendencia, no entres» destruye el sistema (−304 €) y por eso el «decay del edge» no era una alarma.
+
+**Tests:** `tests/test_measurement_horizon.py` (nuevo, 6) fija el horizonte real (los tests son **discriminantes**: con la regla antigua dan −1 donde la correcta da +1 ⇒ fallan) y `tests/test_timebase_alignment.py` (+5) fija que ninguna serie vieja (H4/D1) pueda envenenar la caché del desfase ni descuadrar el día de la cuenta. Suite: **1163 passed + 2 xfailed**.

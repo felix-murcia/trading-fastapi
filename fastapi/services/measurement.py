@@ -10,9 +10,13 @@ El 20-10, tres mediciones seguidas del MISMO conjunto de llamadas dieron
 
 1. El `mt5_time` que manda el EA está en el reloj del BROKER (+3 h) y las
    velas también ⇒ alinear exige el mismo desfase a los dos lados.
-2. El cierre terminal del horizonte NO puede ser "la última vela ≤ t0+H":
-   la serie H1 tiene huecos (pausa diaria, fines de semana) ⇒ esa vela
-   cambia según se rellenan los huecos ⇒ cada cifra se movía con el reloj.
+2. El cierre terminal del horizonte debe respetar el horizonte REAL. La
+   primera versión usaba "la primera vela con time >= t0+H": con los huecos
+   de la serie (pausa diaria, fines de semana) eso salta al hueco y mide
+   26-72 h en vez de 24 h (medido: 19-26 % de los casos) ⇒ la cifra no
+   correspondía a lo que decía medir. Ahora es "la última vela con
+   time <= t0+H" (horizonte 23-24 h reales, determinista: los huecos del
+   mercado son permanentes y no se rellenan).
 3. El terminal debe ser una vela CERRADA: si la vela en formación (su
    "close" es el precio actual) entra como terminal, la dirección medida
    tickea con el precio.
@@ -23,7 +27,7 @@ El 20-10, tres mediciones seguidas del MISMO conjunto de llamadas dieron
 Definición canónica (la única que se usa):
 
     base_i  = última vela con time <= t0                (la que contiene t0)
-    term_i  = PRIMERA vela con time >= t0 + H            (determinista)
+    term_i  = ÚLTIMA vela con time <= t0 + H            (determinista)
     evaluable ⇔ term_i existe y está CERRADA
     dirección = sign(close[term_i] − close[base_i])
 
@@ -64,8 +68,25 @@ def canonical_direction(
     if not bar_t:
         return None
     i0 = bisect.bisect_right(bar_t, t0) - 1
-    i1 = bisect.bisect_left(bar_t, t0 + horizon_h * 3600)
-    if i0 < 0 or i1 >= len(bar_t):
+    # T-31.9 (2026-10-20) — HORIZONTE REAL: el terminal es la ÚLTIMA vela
+    # con time <= t0 + H, NO la primera con time >= t0 + H.
+    #
+    # Por qué (medido): con la regla "primera ≥", el terminal SALTA los
+    # huecos de la serie (pausa diaria del bróquer de 1 h y fin de semana)
+    # ⇒ el horizonte medido no era de 24 h sino de 26 a 72 h: en el 19-26 %
+    # de los casos (30 d) y el 25-26 % (7 d) la medición mezclaba
+    # horizontes. Consecuencia medida sobre el momentum de 24 h de EURUSD
+    # (7 d): 37,2 % (regla antigua) vs 52,7 % (regla exacta) ⇒ 15 pp de
+    # diferencia por el hueco, no por el mercado.
+    #
+    # Por qué no rompe el determinismo (el motivo original de la regla
+    # "primera ≥"): los huecos del mercado son PERMANENTES (la pausa diaria
+    # y el fin de semana no se rellenan nunca) ⇒ dado el mismo tramo de
+    # serie, "última ≤ t0+H" devuelve SIEMPRE la misma vela. Y el
+    # horizonte resultante es 23-24 h reales (la pausa diaria es de 1 h),
+    # que es lo que la definición dice medir.
+    i1 = bisect.bisect_right(bar_t, t0 + horizon_h * 3600) - 1
+    if i0 < 0 or i1 >= len(bar_c) or i1 <= i0:
         return None
     # el terminal debe ser una vela CERRADA (la formacional lleva el precio
     # actual como "close" y.tickearía la medición)
@@ -86,6 +107,55 @@ def wilson_lower_bound(hits: int, n: int, z: float = 1.96) -> Optional[float]:
     centre = p + z * z / (2 * n)
     margin = z * ((p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5)
     return max(0.0, (centre - margin) / den)
+
+
+def base_rate(directions: list) -> Optional[float]:
+    """BASE de la ventana: la mejor predicción CONSTANTE posible.
+
+    T-31.9 (2026-10-20) — HALLAZGO QUE CAMBIA LA LECTURA DE TODO:
+    una regla que dice siempre lo mismo (p. ej. «el precio está sobre su
+    SMA200 y la SMA200 sube» en un mercado que lleva 30 días subiendo) NO
+    tiene skill: su exactitud ES la base del mercado. Medido: en USDCHF
+    (7 d) la regla dispara 67 de 67 veces y «acierta» el 76,1 % ⇒ ese
+    76,1 % es «el mercado subió el 76 % de las veces», no un acierto.
+
+    Por eso el skill se mide contra esta base y no contra el 50 %:
+        skill = exactitud − base
+    Sin esa corrección, el mapa de edge publicaba la DERIVA DEL MERCADO
+    (y «el decay del edge» era en realidad el cambio de deriva).
+    """
+    if not directions:
+        return None
+    pos = sum(1 for d in directions if d > 0)
+    return max(pos, len(directions) - pos) / len(directions)
+
+
+def skill_vs_base(hits: int, n: int, directions: list) -> dict:
+    """Skill de una fuente frente a SU PROPIA base (no frente al azar).
+
+    Devuelve: acc, base, skill (pp), IC de Wilson re-centrado en la base
+    y `granted` (¿el skill es demostrablemente > 0?).
+    """
+    base = base_rate(directions)
+    if n == 0 or base is None:
+        return {"acc": None, "base": base, "skill": None, "granted": False,
+                "reason": "sin datos"}
+    acc = hits / n
+    lo = wilson_lower_bound(hits, n)
+    skill = acc - base
+    granted = bool(lo is not None and (lo - base) > 0)
+    return {
+        "acc": round(acc, 4),
+        "base": round(base, 4),
+        "skill_pp": round(skill * 100, 2),
+        "wilson_lo": round(lo, 4) if lo is not None else None,
+        "skill_lo_pp": round((lo - base) * 100, 2) if lo is not None else None,
+        "n": n,
+        "granted": granted,
+        "reason": ("skill > su base (IC 95 % por encima de 0)" if granted
+                   else f"skill {skill*100:+.1f} pp vs base {base*100:.1f} %"
+                        " (IC no por encima de 0)"),
+    }
 
 
 def skill_of(hits: int, n: int) -> dict:

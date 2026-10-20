@@ -241,6 +241,76 @@ class TestLedgerDayCut:
             timebase.set_broker_offset(0, source="test-reset")
 
 
+class TestStaleSeriesCannotPoisonTheOffset:
+    """T-31.9 (2026-10-20): el desfase es del SERVIDOR, no del marco.
+
+    Medido con el feed real: la serie D1 entrega su última vela con ~19 h
+    ⇒ la aritmética de hora devolvía −19 h (BASURA) y la serie H4 con
+    ~1 h ⇒ +1 h. Ese valor envenenaba la caché global de desfases, que usa
+    el DÍA DE LA CUENTA (riesgo) ⇒ el corte diario podía quedar 19 h
+    descuadrado. Aquí se fija el comportamiento correcto.
+    """
+
+    def _candles(self, stamp: dt.datetime) -> list:
+        return [{"time": stamp.strftime("%Y-%m-%dT%H:%M:%SZ")}]
+
+    def test_daily_series_does_not_produce_a_bogus_offset(self):
+        """La última vela D1 (19 h vieja) ⇒ 0 (no detectable), no −19 h."""
+        now = _stamp(2026, 10, 20, 19, 0)
+        d1_last = now - dt.timedelta(hours=19)  # la vela diaria en curso
+        assert detect_utc_offset_hours(d1_last, now) == 0
+
+    def test_four_hour_series_does_not_produce_a_wrong_offset(self):
+        """La serie H4 no puede deducir el desfase (rejilla no múltiplo).
+
+        Con el feed real, la última vela H4 formándose daba +1 h (falso).
+        El paso H4→D1 exige el marco: la aritmética de hora sola no puede
+        distinguir "el bróker va +3 h" de "esta vela tiene 2 h".
+        """
+        from services.market_time import broker_offset_hours_from_candles
+
+        now = _stamp(2026, 10, 20, 19, 0)
+        h4_last = now - dt.timedelta(hours=2)   # vela H4 formándose
+        cs = self._candles(h4_last)
+        assert broker_offset_hours_from_candles(cs, now=now, timeframe="H4") == 0
+        assert broker_offset_hours_from_candles(cs, now=now, timeframe="H1") == -2, (
+            "en H1 (con la vela en formación) el desfase sí se deduce"
+        )
+
+    def test_only_h1_is_allowed_to_detect(self):
+        from services.market_time import broker_offset_hours_from_candles
+
+        now = _stamp(2026, 10, 20, 16, 20)
+        forming = now + dt.timedelta(hours=3)   # vela H1 formándose
+        cs = self._candles(forming)
+        assert broker_offset_hours_from_candles(cs, now=now, timeframe="H1") == 3
+        assert broker_offset_hours_from_candles(cs, now=now, timeframe="H4") == 0
+        assert broker_offset_hours_from_candles(cs, now=now, timeframe="D1") == 0
+
+    def test_cache_rejects_implausible_offset(self):
+        """Defensa en profundidad: −19 h (o cualquier basura) no entra."""
+        timebase.set_broker_offset(3, source="test")
+        try:
+            timebase.set_broker_offset(-19, source="d1_basura")
+            assert timebase.current_broker_offset() == 3, (
+                "la caché aceptó un desfase implausible"
+            )
+        finally:
+            timebase.set_broker_offset(0, source="test-reset")
+
+    def test_stale_candle_does_not_shift_the_account_day(self):
+        """Una serie vieja no puede descuadrar el día de la cuenta."""
+        timebase.set_broker_offset(3, source="test")
+        try:
+            antes = timebase.broker_today(_stamp(2026, 10, 20, 12, 0))
+            # una detección basura (D1) llega a la caché ⇒ se rechaza
+            timebase.set_broker_offset(-19, source="d1_basura")
+            despues = timebase.broker_today(_stamp(2026, 10, 20, 12, 0))
+            assert antes == despues
+        finally:
+            timebase.set_broker_offset(0, source="test-reset")
+
+
 class TestNoHardcodedOffsets:
     """Regla estructural: el desfase NUNCA se fija a mano en el código."""
 

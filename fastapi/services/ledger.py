@@ -143,7 +143,15 @@ def _live_bundle_report(symbol: str = "EURUSD") -> Optional[dict]:
     return None
 
 
-async def _edge_decay_map(symbols: tuple = ("EURUSD", "GBPUSD")) -> dict:
+# Candidatos por defecto del mapa de edge (T-31.9, 2026-10-20): el mapa es
+# el INSTRUMENTO DE SELECCIÓN de par ⇒ tiene que cubrir a los candidatos, no
+# sólo a los ya operativos.
+EDGE_MAP_SYMBOLS: tuple = (
+    "EURUSD", "GBPUSD", "AUDUSD", "NZDUSD", "USDJPY", "USDCHF", "XAUUSD",
+)
+
+
+async def _edge_decay_map(symbols: tuple = EDGE_MAP_SYMBOLS) -> dict:
     """DECAIMIENTO DEL EDGE por par y por ventana (solo lectura).
 
     Orden Félix 2026-10-20: «cada par tiene su propia idiosincrasia» ⇒ el
@@ -154,7 +162,11 @@ async def _edge_decay_map(symbols: tuple = ("EURUSD", "GBPUSD")) -> dict:
          la expectativa viva del sistema lo refleje);
       2. elegir el marco de cada mundo por evidencia, no por copia.
     """
-    from services.measurement import benchmark_predictions, canonical_direction
+    from services.measurement import (
+        benchmark_predictions,
+        canonical_direction,
+        skill_vs_base,
+    )
     from services.mt5_client import get_candles_with_offset
     import datetime as _dt
 
@@ -167,29 +179,60 @@ async def _edge_decay_map(symbols: tuple = ("EURUSD", "GBPUSD")) -> dict:
                 continue
             bt = [float(c["time"]) for c in cands]
             bc = [float(c["close"]) for c in cands]
-            windows = {}
-            for label, days in (("30d", 30), ("14d", 14), ("7d", 7)):
-                since = now - days * 86400
-                h = n = 0
-                for i in range(0, len(bt)):
-                    if bt[i] < since:
-                        continue
-                    d = canonical_direction(bt, bc, bt[i], now)
-                    if d is None:
-                        continue
-                    pred = benchmark_predictions(bt, bc, bt[i], now).get("sma200")
-                    if pred is None:
-                        continue
-                    n += 1
-                    h += 1 if ((pred > 0) == (d > 0)) else 0
-                if n:
-                    windows[label] = {"acc": round(h / n, 4), "n": n}
+            # Las TRES reglas triviales (T-31.9): la de estructura (sma200),
+            # la de momentum (mom24) y la de la vela previa. Con la base
+            # corregida, la que tiene skill real puede ser CUALQUIERA (medido
+            # el 20-10: en USDCHF la única con skill es mom24, no sma200).
+            por_regla: dict = {}
+            for regla in ("sma200", "mom24", "barra_previa"):
+                windows = {}
+                for label, days in (("30d", 30), ("14d", 14), ("7d", 7)):
+                    since = now - days * 86400
+                    h = n = 0
+                    dirs: list = []
+                    for i in range(0, len(bt)):
+                        if bt[i] < since:
+                            continue
+                        d = canonical_direction(bt, bc, bt[i], now)
+                        if d is None:
+                            continue
+                        pred = benchmark_predictions(bt, bc, bt[i], now).get(regla)
+                        if pred is None:
+                            continue
+                        n += 1
+                        dirs.append(d)
+                        h += 1 if ((pred > 0) == (d > 0)) else 0
+                    if n:
+                        # T-31.9 (2026-10-20): el skill se mide contra SU
+                        # PROPIA BASE (la mejor predicción constante de la
+                        # ventana), no contra el 50 %. Sin esto, el mapa
+                        # publicaba la DERIVA DEL MERCADO: en una ventana
+                        # donde la regla dice siempre lo mismo, su exactitud
+                        # ES la base (medido: USDCHF 7 d → «76,1 %» era «el
+                        # mercado subió el 76 % de los días»).
+                        sk = skill_vs_base(h, n, dirs)
+                        windows[label] = {
+                            "acc": sk["acc"], "n": n,
+                            "base": sk["base"], "skill_pp": sk["skill_pp"],
+                            "skill_lo_pp": sk["skill_lo_pp"],
+                            "skill_real": sk["granted"],
+                        }
+                por_regla[regla] = windows
+            # el "edge_alive" del par = ¿alguna regla tiene skill real en la
+            # ventana viva (7 d) con el IC 95 % por encima de 0?
+            reglas_vivas = [
+                r for r, w in por_regla.items()
+                if w.get("7d", {}).get("skill_real")
+            ]
             out[sym] = {
-                "predictor": "sma200 (H1) — el único con skill en EURUSD",
-                "windows": windows,
-                "edge_alive": bool(
-                    windows.get("7d", {}).get("acc", 0) > 0.50
-                ),
+                "predictor": "las 3 reglas triviales (H1), SKILL contra su propia base",
+                "windows": por_regla.get("sma200", {}),
+                "por_regla": por_regla,
+                "reglas_con_skill_vivo": reglas_vivas,
+                "edge_alive": bool(reglas_vivas),
+                "nota": "skill = exactitud − base de la ventana; "
+                        "edge_alive exige que el IC 95 % del skill esté por "
+                        "encima de 0 (no basta con superar el 50 %)",
             }
         except Exception as exc:  # noqa: BLE001
             out[sym] = {"error": f"{type(exc).__name__}: {exc}"}
@@ -203,7 +246,7 @@ async def build_ledger(symbol: str = "EURUSD") -> dict:
         "generated_at": now,
         "method": {
             "module": "services.measurement (definición canónica)",
-            "terminal": "primera vela >= t0 + 24 h, CERRADA (determinista)",
+            "terminal": "ULTIMA vela <= t0 + 24 h, CERRADA (determinista) — horizonte real 23-24 h (T-31.9: la regla anterior saltaba los huecos y media 26-72 h)",
             "admission_var": "métricas de TRADING OOS (expectancy, sharpe, maxDD, ops)",
             "classification_var": "diagnóstico (calibración) — NO decide admisión",
             "admission_rules": {

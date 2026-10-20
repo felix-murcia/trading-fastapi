@@ -140,7 +140,11 @@ async def run_cross_audit(symbol: str = "EURUSD") -> dict:
 
     # ── 4) benchmark (muestra de la serie viva, con la definición canónica) ─
     try:
-        from services.measurement import benchmark_predictions, canonical_direction
+        from services.measurement import (
+            benchmark_predictions,
+            canonical_direction,
+            skill_vs_base,
+        )
         from services.mt5_client import get_candles_with_offset
 
         candles, _off = await get_candles_with_offset(symbol, "H1", 400)
@@ -160,22 +164,34 @@ async def run_cross_audit(symbol: str = "EURUSD") -> dict:
                 hit += 1 if ((pred > 0) == (d > 0)) else 0
             if n:
                 acc = hit / n
-                # Comparación con el valor PUBLICADO (30 días, 1 200 velas):
-                # si difieren mucho, no es un error de cálculo sino un CAMBIO
-                # DE RÉGIMEN (el edge de la estructura no está en la ventana
-                # viva) ⇒ se declara como tal, no se esconde.
-                published_ref = 0.626   # benchmark_canonico.py, 30 días, 1200 velas
-                delta = abs(acc - published_ref)
-                status = "ok" if delta <= 0.05 else "divergencia_regimen"
+                # T-31.9 (2026-10-20): la exactitud de un predictor trivial
+                # NO es su skill: si la regla dice siempre lo mismo, su
+                # exactitud ES la base de la ventana (la deriva del
+                # mercado). El benchmark se mide, por tanto, contra SU
+                # PROPIA BASE (la mejor predicción constante) ⇒ lo que se
+                # compara es el SKILL, no la exactitud bruta.
+                dirs: list = []
+                for i in range(0, len(bt)):
+                    d0 = canonical_direction(bt, bc, bt[i], now)
+                    if d0 is None:
+                        continue
+                    dirs.append(d0)
+                sk = skill_vs_base(hit, n, dirs)
+                published_ref = 0.0   # el skill del trivial es 0 por definición
+                delta = abs((sk["skill_pp"] or 0.0) - published_ref)
+                status = "ok" if delta <= 5.0 else "divergencia_regimen"
                 checks.append({
                     "check": "benchmark_sma200", "status": status,
                     "recomputed_ventana_viva": round(acc, 4), "n": n,
+                    "base_ventana": sk["base"],
+                    "skill_pp": sk["skill_pp"],
+                    "skill_real": sk["granted"],
                     "published_30dias": published_ref,
                     "delta": round(delta, 4),
-                    "note": "la ventana viva (400 velas) puede diferir del valor "
-                            "publicado (30 días) por un CAMBIO DE RÉGIMEN: "
-                            "el edge trivial no es estable en el tiempo ⇒ "
-                            "no se puede capitalizar como edge fijo",
+                    "note": "el skill del predictor trivial frente a SU PROPIA "
+                            "BASE (la deriva del mercado): si no supera su "
+                            "base, no hay edge que capitalizar, por muy alto "
+                            "que sea su acierto bruto",
                 })
             else:
                 checks.append({"check": "benchmark_sma200", "status": "sin_datos"})

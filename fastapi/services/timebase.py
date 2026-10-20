@@ -60,8 +60,20 @@ _KNOWN_OFFSET: dict = {"offset_h": 0, "source": "sin_detecccion"}
 
 
 def set_broker_offset(offset_h: int, source: str = "deteccion") -> None:
-    """Guarda el desfase conocido (para los consumidores sincrónicos)."""
+    """Guarda el desfase conocido (para los consumidores sincrónicos).
+
+    Defensa en profundidad (T-31.9, 2026-10-20): un valor fuera de ±12 h
+    es BASURA (así se coló un −19 h desde la serie D1) ⇒ se RECHAZA y se
+    conserva el valor anterior. La caché nunca puede quedar envenenada.
+    """
     off = int(offset_h)
+    if abs(off) > 12:
+        logger.error(
+            "[TIMEBASE] Desfase IMPLAUSIBLE rechazado (%+d h, fuente=%s) — "
+            "se conserva el conocido (%+d h)", off, source,
+            int(_KNOWN_OFFSET["offset_h"]),
+        )
+        return
     if off != int(_KNOWN_OFFSET["offset_h"]):
         logger.warning(
             "[TIMEBASE] Desfase del bróquer: %+d h (antes %+d h, fuente=%s)",
