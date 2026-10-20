@@ -6,6 +6,10 @@ services:
     container_name: trading-fastapi
     volumes:
       - ./fastapi/ml:/app/ml
+      # T-31.9 (2026-10-20): el REGISTRO DIARIO INMUTABLE vive en el HOST
+      # para que sea visible y versionable en git (append-only: una línea
+      # por vez; cualquier retoque posterior deja rastro en el historial).
+      - ./fastapi/ops:/app/ops
       - ./mql5:/mql5:ro
       - ./resultadosBT:/resultadosBT:ro
 

@@ -122,6 +122,11 @@ async def lifespan(app: FastAPI):
     # (un error del MEDIDOR, no del modelo).
     from services.cross_audit import _cross_audit_loop
     _bg_tasks.add(asyncio.create_task(_cross_audit_loop()))
+    # REGISTRO DIARIO INMUTABLE (append-only, versionado en git): los números
+    # del sistema los escribe el propio sistema y quedan en el historial —
+    # para que "es cierto" se compruebe con el fichero, no con quien narra.
+    from services.daily_ledger import _daily_ledger_loop
+    _bg_tasks.add(asyncio.create_task(_daily_ledger_loop()))
     # P4 (orden Félix 2026-10-20): replay del LLM como decisor con la
     # MECÁNICA REAL (SL/TP, sizing, spread, regla 3 €, churn) → su
     # expectancy, que es la vara de admisión. Sólo lectura.
