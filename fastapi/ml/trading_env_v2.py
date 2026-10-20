@@ -145,6 +145,32 @@ REWARD_V2_LAMBDA_ALIGN = 0.000298  # × reward_scale → 0,0298 u/paso (ancla an
 REWARD_V2_ADX_TREND = 0.25       # mismo umbral ADX tendencial del bloque de régimen
 REWARD_V2_VERSIONS = ("v1", "v2_align")  # contrato del parámetro reward_version
 
+# T-31.9 / L3 (2026-10-20) — reward «v3_edge»: SOLO el término direccional.
+#
+# CAUSA RAÍZ medida (punto de inflexión del 20-10): la reward v1 codifica las
+# REGLAS DE NEGOCIO, no el edge:
+#   (a) la regla de 3 € INVIERTE el reward de cualquier close en (0, 3 €);
+#   (b) el churn cobra 7 €/lot (×2) en cada reapertura.
+# Con esos dos términos, el óptimo del agente es «operar poco y sólo en
+# movimientos grandes» — que es EXACTAMENTE lo que hace el bundle promovido
+# (16 operaciones en el holdout, DD 4,51 %) — y NO «acertar la dirección».
+# Medido: con la reward v1 el PPO acierta el 50,7 % (n=146): moneda al aire.
+# El edge de la ventana lo tiene la ESTRUCTURA (SMA200+pendiente: 66,7 %,
+# CI 55,4 %) y el LLM (69,6 %, CI 55,2 %) — no el momentum (39,8 %, invertido).
+#
+# SEPARACIÓN DE OBJETIVOS (L3): la reward aprende SÓLO la dirección; las
+# reglas de negocio se quedan donde son exactas y auditables — la CAPA DE
+# EJECUCIÓN (core.rules.MIN_WIN_EUR, el veto de re-entrada, el ancla de
+# churn, SL/TP, sizing, límites de pérdida, risk guardian). En el reward
+# quedan: el término de equity (direccional), el risk_penalty (restricciones
+# de riesgo del propio agente: filtro ATR + capital en riesgo) y el feedback
+# de outcomes REALES (con el pnl CRUDO, sin la inversión de 3 €).
+# Los costes reales (spread, comisión) siguen dentro del Δequity: no se
+# esconde ningún coste, sólo se sacan las REGLAS DE NEGOCIO del gradiente.
+REWARD_V3_VERSIONS = ("v1", "v2_align", "v3_edge")
+# Horizonte de la métrica de dirección (mismo que el benchmark L2: +24 h).
+REWARD_V3_DIRECTION_HORIZON_BARS = 24
+
 
 def engineer_market_features(df: pd.DataFrame) -> pd.DataFrame:
     """Calcula indicadores técnicos normalizados y acotados para redes neuronales.
@@ -683,10 +709,10 @@ class ForexTradingEnvV2(gym.Env):
         # T-24: versión de la recompensa. Contrato declarado (v1/v2_align);
         # cualquier otro valor es un error EXPLÍCITO — jamás caer a v1 en
         # silencio (convención del repo: sin fallbacks).
-        if reward_version not in REWARD_V2_VERSIONS:
+        if reward_version not in REWARD_V3_VERSIONS:
             raise ValueError(
                 f"reward_version={reward_version!r} desconocida; "
-                f"esperadas {REWARD_V2_VERSIONS} (T-24)."
+                f"esperadas {REWARD_V3_VERSIONS} (T-24 + T-31.9/L3)."
             )
         self.reward_version = reward_version
         self.random_reset = random_reset
@@ -841,6 +867,18 @@ class ForexTradingEnvV2(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
 
+        # T-31.9 / L3 — métrica de DIRECCIÓN (criterio de aceptación):
+        # ¿acertó el agente la dirección del mercado? Se registra POR TRADE
+        # (1 = el mercado fue a su favor, 0 = en contra) usando el movimiento
+        # del precio a +24 h desde la apertura — el MISMO horizonte y la
+        # MISMA definición que el benchmark L2 (así la comparación es
+        # directa: candidato vs SMA200-trend vs LLM).
+        # Es una MEDIDA POST-HOC: no influye en la decisión del agente (el
+        # df completo está disponible en el env, pero el agente sólo ve la
+        # ventana de observación).
+        self.direction_hits: list = []
+        self._pending_direction: Optional[dict] = None
+
         max_start = len(self.df) - self.max_episode_steps - 2
         if self.random_reset and max_start > self.window_size:
             self.current_step = int(self.np_random.integers(self.window_size, max_start))
@@ -960,6 +998,16 @@ class ForexTradingEnvV2(gym.Env):
             gross_diff = (exit_price - self.entry_price) if self.position == 1 else (self.entry_price - exit_price)
             realized_pnl = (self.volume * self.lot_size * gross_diff) - (self.volume * self.commission_per_lot)
 
+            # T-31.9 / L3: acierto DIRECCIONAL del trade (1 = el mercado fue a
+            # su favor a +24 h desde la apertura; 0 = en contra). Es la
+            # métrica comparable con el benchmark L2. Post-hoc: no influye en
+            # la decisión.
+            if self._pending_direction is not None:
+                self.direction_hits.append(
+                    1 if self._pending_direction == self.position else 0
+                )
+            self._pending_direction = None
+
             self.balance += realized_pnl
             self.equity = self.balance
             self.trade_count += 1
@@ -1067,6 +1115,12 @@ class ForexTradingEnvV2(gym.Env):
                 capital_at_risk = self.volume * self.lot_size * (self.sl_pips * self.pip_size)
                 risk_penalty = (capital_at_risk / self.balance) * 0.02
 
+                # T-31.9 / L3: registra la dirección del mercado a +24 h desde
+                # la apertura (para la métrica de dirección). El acierto se
+                # evalúa al cerrar. Si el futuro no está disponible (últimas
+                # barras del segmento) no se registra (sin dato, sin valor).
+                self._pending_direction = self._future_direction_sign()
+
         elif self.position != 0:
             # (P1: la edad `steps_in_trade` ya avanzó al inicio del paso)
             # Mark-to-market con precio Bid/Ask de cierre
@@ -1106,11 +1160,26 @@ class ForexTradingEnvV2(gym.Env):
         # balance de dinero real queda intacto; sólo cambia la señal de
         # aprendizaje. Así un candidato que sobrevive de closes <3 € no puede
         # acumular reward positivo.
-        if closed_this_step and last_realized_pnl > 0.0 and not is_winning_close(last_realized_pnl):
+        #
+        # T-31.9 / L3 (v3_edge): la regla 3 € es una REGLA DE NEGOCIO (se
+        # aplica en la capa de ejecución: core.rules.MIN_WIN_EUR), no un
+        # objetivo de aprendizaje ⇒ en v3_edge NO se invierte (el gradiente
+        # queda sólo con la dirección). v1/v2_align: byte-idénticos.
+        if (
+            self.reward_version != "v3_edge"
+            and closed_this_step
+            and last_realized_pnl > 0.0
+            and not is_winning_close(last_realized_pnl)
+        ):
             reward -= 2.0 * (last_realized_pnl / self.initial_balance) * self.reward_scale
 
         # Anti-churn (Félix 2026-10-01): recargo cobrado en la apertura.
-        reward -= churn_penalty
+        # T-31.9 / L3 (v3_edge): el ancla anti-churn es una REGLA DE NEGOCIO
+        # (se aplica en la ejecución: veto de re-entrada + CHURN_BARS) ⇒ fuera
+        # del gradiente. El coste REAL (spread + comisión) sigue dentro del
+        # Δequity: no se esconde ningún coste, sólo la regla.
+        if self.reward_version != "v3_edge":
+            reward -= churn_penalty
 
         # Penalización por estancamiento si supera tiempo máximo sugerido
         if self.steps_in_trade > self.max_holding_steps:
@@ -1176,6 +1245,10 @@ class ForexTradingEnvV2(gym.Env):
             # Fase 3 / R-1: pnl por trade para que el gate walk-forward calcule
             # la expectancy con la regla 3 € (sin lista no se inventa un valor).
             'trade_pnls': list(self.trade_pnls),
+            # T-31.9 / L3: acierto DIRECCIONAL por trade (1/0) — comparable
+            # con el benchmark L2 (mismo horizonte +24 h). Vacío = sin trades
+            # o sin futuro disponible en el segmento.
+            'direction_hits': list(self.direction_hits),
         }
 
         return self._get_observation(), float(reward), terminated, truncated, info
@@ -1305,6 +1378,27 @@ class ForexTradingEnvV2(gym.Env):
         if moved:
             self.sl_pips = abs(self.entry_price - self.sl_price) / self.pip_size
 
+    def _future_direction_sign(self) -> Optional[int]:
+        """Dirección del mercado a +24 h (1 = arriba, -1 = abajo) desde el
+        paso actual. None si el futuro no está disponible (fin del segmento).
+
+        Es una medida POST-HOC de la skill direccional (T-31.9 / L3): el
+        agente no la ve (sólo su ventana de observación) — no hay fuga.
+        """
+        try:
+            j = self.current_step + REWARD_V3_DIRECTION_HORIZON_BARS
+            if j >= len(self.df):
+                return None
+            now = float(self.df["close"].iloc[self.current_step])
+            fut = float(self.df["close"].iloc[j])
+            if fut > now:
+                return 1
+            if fut < now:
+                return -1
+            return None
+        except (IndexError, KeyError, TypeError, ValueError):
+            return None
+
     def _apply_real_outcome_feedback(self, action: np.ndarray) -> float:
         outcome = self._real_outcomes_by_step.get(self.current_step)
         if outcome is None or self.current_step in self._used_outcomes:
@@ -1318,7 +1412,15 @@ class ForexTradingEnvV2(gym.Env):
         # R-1 / regla 3 €: la evidencia real se clasifica igual que AGENTS.md —
         # un cierre <3 € es pérdida, así que coincidir con él es MALO (antes
         # un win sub-3 € recompensaba la coincidencia: pnl crudo).
-        evidence = pnl_norm if is_winning_close(outcome.pnl) else -abs(pnl_norm)
+        #
+        # T-31.9 / L3 (v3_edge): la evidencia real es DIRECCIONAL (el pnl
+        # crudo de ese trade real, sin la inversión de la regla 3 €): lo que
+        # se enseña al agente es «el mercado fue a mi favor», no «el trade
+        # pasó el filtro de negocio».
+        if self.reward_version == "v3_edge":
+            evidence = pnl_norm
+        else:
+            evidence = pnl_norm if is_winning_close(outcome.pnl) else -abs(pnl_norm)
 
         if target_pos == real_pos and target_pos != 0:
             return evidence * self.real_outcome_weight
