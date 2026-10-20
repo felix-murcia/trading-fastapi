@@ -2841,3 +2841,34 @@ En USDCHF hay una **señal trivial con skill real** (momentum 24 h: **+7,1 pp**,
 ⇒ De ahí la tarea nueva **U-6** (pre-registrada en `doc/backlog-g3-usdchf-2026-10-20.md`, sólo lectura, prioridad alta): **«¿la dirección del sistema vivo supera su propia base?»** — el acierto direccional vivo es 53 % (80/151); hay que medir la base de **la misma ventana, el mismo horizonte de tenencia y el mismo subconjunto de operaciones**. Si el acierto ≤ la base ⇒ la dirección no aporta nada y todo el PnL viene del ratio de pago (1,23:1) y de la gestión del riesgo ⇒ el instrumento de decisión correcto sería la regla/benchmark o el LLM (línea E4 del punto de inflexión T-31), no el PPO.
 
 **Tests:** sin cambios de código en este bloque (sólo registro y lectura) ⇒ suite **1168 passed + 2 xfailed**.
+
+---
+
+## 2026-10-20 (G3 · U-7) · EXPERIMENTO PRE-REGISTRADO: USDCHF CON EL CONTRATO QUE PUEDE VER SU EDGE
+
+**Orden de Félix (textual):** *«quiero el USDCHF con su modelo bien reentrenado, funcionando y activo para que mañana pueda comenzar a operar. Haz lo que tengas que hacer. Tienes permiso de mi parte para realizar todas las operaciones que sean necesarias. El fin justifica los medios».*
+**Alcance:** con el permiso explícito, este run **escribe el bundle si el gate pasa** (el congelamiento `RETRAIN_REPORT_ONLY=true` se levanta **sólo para este canario y sólo si el gate pasa** ⇒ el gate sigue siendo el juez; si el gate rechaza, no se escribe nada y el canario sigue apagado).
+
+### La causa raíz que faltaba (medida, no supuesta)
+
+La reward `v3_edge` premia la dirección a **+24 h** (`REWARD_V3_DIRECTION_HORIZON_BARS = 24`), pero el obs del PPO sólo traía `lag_return_1/2/3/5` ⇒ **el agente estaba graduado en una magnitud que NO VEÍA**. En USDCHF, la única señal con skill real medido es justo ese momentum de 24 h (+7,1 pp, n=481, IC [+2,6,+11,4], p=0,001) ⇒ los dos rechazos anteriores (#44, #45) se explican: el modelo no podía resolver la tarea.
+
+**Cambio (quirúrgico, el bundle vivo de EURUSD NO se toca):**
+- `engineer_market_features` calcula `lag_return_24` (el retorno de 24 velas atrás).
+- El bloque opt-in de tendencia pasa de 3 a 4 features: `("dist_sma200", "sma200_slope", "adx", "lag_return_24")` ⇒ **los anchos de la escalera se desplazan** (trend 28/29, T-30 32/33). El contrato **VIVO (24/25) no se mueve** ⇒ el bundle de EURUSD sigue byte-idéntico y servible.
+- `derive_obs_contract` es la fuente única (serve y retrain) ⇒ un bundle de 29 columnas se sirve con el bloque de tendencia; un ancho desconocido ⇒ `RuntimeError`, nunca degradación silenciosa.
+- Bandera de canario `RETRAIN_TREND_FEATURES` (default **inerte** ⇒ el retrain del vivo sigue en (20,25)).
+
+### Experimento pre-registrado (una sola corrida)
+
+| Parámetro | Valor |
+|---|---|
+| Símbolo | **USDCHF** (canario, `enabled=false`) |
+| Contrato | obs **(20,29)** = 17 market + 4 tendencia (incl. `lag_return_24`) + 8 estado |
+| Reward | **v3_edge** (la direccional pura: premia exactamente el horizonte de 24 h que el agente ahora ve) |
+| Lookback | 30 000 H1 (2021-12-23 → hoy) · split train=17 866 · 4 folds · holdout@23 821 |
+| Gate | el **canario absoluto** ya existente (Sharpe ≥ 1,0 en ≥4 folds + ≥200 aperturas) — **umbrales intocables** |
+| Corridas | **UNA** |
+| Aceptación | **A1** el gate pasa (y entonces se escribe el bundle) ∧ **A2** `direction_accuracy` del holdout > la base de USDCHF, n ≥ 30 e IC 95 % del skill > 0 ∧ **A3** cero cambios en EURUSD |
+
+**Tests:** `tests/test_g3_momentum_feature.py` (nuevo, 10): el motor calcula `lag_return_24` con la semántica exacta (`lag[i] == returns[i−24]`), la feature entra por el bloque opt-in (**no** en las 17 base ⇒ el bundle vivo no se toca), los anchos (24/25 vivos · 28/29 trend · 32/33 T-30) y el rechazo de los desconocidos, y la bandera de canario **inerte por defecto**. Suite: **1178 passed + 2 xfailed**.

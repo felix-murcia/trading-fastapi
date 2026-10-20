@@ -1,4 +1,4 @@
-"""T-30 — canales de horizonte lento H4/D1 en el obs (contrato 31/32).
+"""T-30 — canales de horizonte lento H4/D1 en el obs (contrato 32/33 tras G3).
 
 Pre-registrado en audits/t30-pre-registration-hf-obs-2026-10-17.md. Un SOLO
 candidato (dist/slope SMA200 de H4 y D1, sin tuning de umbrales), flag
@@ -13,7 +13,7 @@ candidato (dist/slope SMA200 de H4 y D1, sin tuning de umbrales), flag
 3. Serve: brain (20,32) une los canales desde el fetch P3-4 existente; serie
    no servible (breaker/Exception/<205 velas/gap>168h) o ventana del obs sin
    canales formados → HOLD fail-closed con log explícito (nunca obs de
-   relleno). Contratos 24/25/27/28 no se tocan: el bloque no se ejecuta.
+   relleno). Contratos 24/25/28/29 no se tocan: el bloque no se ejecuta (G3: el bloque trend pasó a 4 features).
 4. Train: con el flag on se fetchean H4 (lookback//4+300) y D1
    (lookback//24+500), se unen al df ANTES del trim de warm-up y CERO NaN
    tolerados (RuntimeError explícito antes del snapshot).
@@ -39,6 +39,7 @@ import services.feed_breaker as feed_breaker
 from config import Settings
 from main import app
 from ml.trading_env_v2 import (
+    TREND_MARKET_FEATURES,
     HIGHER_TF_MARKET_FEATURES,
     MARKET_FEATURES,
     ForexTradingEnvV2,
@@ -187,7 +188,7 @@ def _serve(monkeypatch, model, candles, h4=(), d1=(), qwen=None,
             yield client, qwen_mock
 
 
-def _hf_model(width: int = 32) -> MagicMock:
+def _hf_model(width: int = 33) -> MagicMock:
     """Modelo serve para el brain bajo prueba: obs_space del contrato T-30."""
     model = _model()
     model.observation_space = Box(-np.inf, np.inf, shape=(20, width),
@@ -321,7 +322,7 @@ _HF_LINE = re.compile(
 # ─── 3. Serve: obs (20,32) con paridad vs prompt ─────────────────────────────
 
 class TestServeHigherTfContract:
-    def test_serves_obs_20_32_with_parity_to_prompt(self, monkeypatch):
+    def test_serves_obs_20_33_with_parity_to_prompt(self, monkeypatch):
         """Brain (20,32): el serve une los canales H4/D1 desde el mismo fetch
         del prompt y sirve el obs con ellos — los reconstructan EXACTAMENTE
         los {dist}/{slope} crudos de la línea del LLM (tol 6e-5 = render
@@ -337,12 +338,14 @@ class TestServeHigherTfContract:
             qwen_mock.assert_awaited_once()
 
         obs = hf_model.predict.call_args.args[0]
-        assert obs.shape == (20, 32)
+        assert obs.shape == (20, 33)
         # canales en los índices 20..23 (17 base + 3 tendencia) y no nulos
-        assert abs(float(obs[-1, 20])) > 1e-3    # dist_sma200_h4 ≈ 0.017
-        assert abs(float(obs[-1, 21])) > 1e-5    # slope_sma200_h4 ≈ 8.7e-4
-        assert abs(float(obs[-1, 22])) > 1e-3    # dist_sma200_d1 ≈ 0.040
-        assert abs(float(obs[-1, 23])) > 1e-5    # slope_sma200_d1 ≈ 2.0e-3
+        # G3: el bloque de tendencia tiene 4 features ⇒ HF empieza en 21
+        _hf_pos = len(MARKET_FEATURES) + len(TREND_MARKET_FEATURES)
+        assert abs(float(obs[-1, _hf_pos])) > 1e-3   # dist_sma200_h4 ≈ 0.017
+        assert abs(float(obs[-1, _hf_pos + 1])) > 1e-5   # slope_sma200_h4 ≈ 8.7e-4
+        assert abs(float(obs[-1, _hf_pos + 2])) > 1e-3   # dist_sma200_d1 ≈ 0.040
+        assert abs(float(obs[-1, _hf_pos + 3])) > 1e-5   # slope_sma200_d1 ≈ 2.0e-3
 
         block = qwen_mock.await_args.kwargs["higher_tf_context"]
         lines = {m.group(1): (float(m.group(2)), float(m.group(3)))
@@ -350,13 +353,13 @@ class TestServeHigherTfContract:
         assert set(lines) == {"H4", "D1"}, block
         c_h4 = float(max(h4, key=lambda c: c["time"])["close"])
         c_d1 = float(max(d1, key=lambda c: c["time"])["close"])
-        np.testing.assert_allclose(float(obs[-1, 20]) * (c_h4 + 1e-10),
+        np.testing.assert_allclose(float(obs[-1, _hf_pos + 0]) * (c_h4 + 1e-10),
                                    lines["H4"][0], atol=6e-5)
-        np.testing.assert_allclose(float(obs[-1, 21]) * (c_h4 + 1e-10),
+        np.testing.assert_allclose(float(obs[-1, _hf_pos + 1]) * (c_h4 + 1e-10),
                                    lines["H4"][1], atol=6e-5)
-        np.testing.assert_allclose(float(obs[-1, 22]) * (c_d1 + 1e-10),
+        np.testing.assert_allclose(float(obs[-1, _hf_pos + 2]) * (c_d1 + 1e-10),
                                    lines["D1"][0], atol=6e-5)
-        np.testing.assert_allclose(float(obs[-1, 23]) * (c_d1 + 1e-10),
+        np.testing.assert_allclose(float(obs[-1, _hf_pos + 3]) * (c_d1 + 1e-10),
                                    lines["D1"][1], atol=6e-5)
 
 
@@ -474,7 +477,7 @@ class TestExistingContractsUntouched:
         assert obs_up.tobytes() == obs_down.tobytes()
 
     def test_trend_contract_is_not_gated_by_hf_outage(self, monkeypatch):
-        """Contrato trend (20,28): el gating T-30 es SÓLO para brains con
+        """Contrato trend (20,29): el gating T-30 es SÓLO para brains con
         higher_tf_features — la caída H4/D1 no puede tumbar a T-22."""
         startup = _model()
         with _serve(monkeypatch, startup, _candles(240),
@@ -489,7 +492,7 @@ class TestExistingContractsUntouched:
             assert resp.status_code == 200, resp.text
             qwen_mock.assert_awaited_once()
         obs = trend_model.predict.call_args.args[0]
-        assert obs.shape == (20, 28)
+        assert obs.shape == (20, 29)
 
 
 # ─── 6. Env: flag, ValueError y columnas del obs ─────────────────────────────
@@ -524,7 +527,7 @@ class TestEnvHigherTfContract:
         with pytest.raises(ValueError, match="exige trend_features=True"):
             ForexTradingEnvV2(df=df, higher_tf_features=True)
 
-    def test_trend_hf_memory_gives_obs_20_32_with_hf_channels(self):
+    def test_trend_hf_memory_gives_obs_20_33_with_hf_channels(self):
         """trend+hf+memoria → obs (20,32) y los canales 20..23 del obs son
         los valores del df en la ventana del episodio (paridad por
         construcción, mismo patrón que T-22)."""
@@ -533,15 +536,18 @@ class TestEnvHigherTfContract:
             df=df, random_reset=False, memory_channel=True,
             trend_features=True, higher_tf_features=True,
         )
-        assert env.observation_space.shape == (20, 32)
+        assert env.observation_space.shape == (20, 33)
         obs = env.reset()[0]
-        assert obs.shape == (20, 32) and obs.dtype == np.float32
+        assert obs.shape == (20, 33) and obs.dtype == np.float32
+        # G3: los canales HF van detrás del bloque de tendencia, que ahora
+        # tiene 4 features ⇒ la posición se deriva de las constantes.
+        _hf_pos = len(MARKET_FEATURES) + len(TREND_MARKET_FEATURES)
         for offset, col in enumerate(HIGHER_TF_MARKET_FEATURES):
             np.testing.assert_allclose(
-                obs[:, 20 + offset], df[col].iloc[1:21].values,
+                obs[:, _hf_pos + offset], df[col].iloc[1:21].values,
                 rtol=1e-5, atol=1e-7,
             )
-        assert abs(float(obs[-1, 20])) > 1e-5     # canal honesto, no relleno
+        assert abs(float(obs[-1, _hf_pos])) > 1e-5   # canal honesto, no relleno
 
     def test_default_env_ignores_hf_columns(self):
         """Flag off (default): el df puede traer las columnas H4/D1 y el env
@@ -565,15 +571,15 @@ class TestEnvHigherTfContract:
         }))
         with pytest.raises(ValueError, match="include_higher_tf"):
             get_market_features(df, include_trend=True, include_higher_tf=True)
-        # con las columnas: vector ordenado 17 + 3 + 4
+        # con las columnas: vector ordenado 17 + 4 (trend, G3) + 4 (HF)
         df_hf = join_higher_tf_channels(df, _h4_candles(320, end="2026-01-20T00:00"),
                                         _d1_candles(300, end="2026-01-18T00:00"))
         features = get_market_features(df_hf, include_trend=True,
                                        include_higher_tf=True)
         assert features == (list(MARKET_FEATURES)
-                            + ["dist_sma200", "sma200_slope", "adx"]
+                            + list(TREND_MARKET_FEATURES)
                             + list(HIGHER_TF_MARKET_FEATURES))
-        assert len(features) == 24
+        assert len(features) == 25   # G3: el bloque trend pasó a 4 features
 
 
 # ─── 7. Eval del retrain: contrato por ancho (31/32 y legacy) ────────────────
@@ -603,8 +609,8 @@ class TestEvaluateModelHigherTfContract:
         )
 
     @pytest.mark.parametrize("width,expected", [
-        (31, (1, 20, 31)),      # T-30 pre-memoria
-        (32, (1, 20, 32)),      # candidato T-30 (20,32)
+        (32, (1, 20, 32)),      # G3: T-30 pre-memoria
+        (33, (1, 20, 33)),      # G3: T-30 + memoria
         (25, (1, 20, 25)),      # contrato vivo: las columnas HF se IGNORAN
     ])
     def test_models_are_evaluated_in_their_own_env(self, width, expected):

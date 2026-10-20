@@ -8,7 +8,7 @@ información; REQ-2 — el PPO es fiable con y sin LLM. Evidencia y spec:
 
 Propiedades que fija cada clase:
 
-1. Contrato → `derive_obs_contract` mapea los 4 anchos (24/25/27/28) y nada
+1. Contrato → `derive_obs_contract` mapea los anchos (24/25/28/29) y nada
    más; `get_market_features(include_trend=True)` añade las 3 features al
    FINAL del vector de 17 base (MARKET_FEATURES intacta → bundle vivo (20,25)
    byte-idéntico).
@@ -76,13 +76,17 @@ class TestObsContract:
     def test_derive_obs_contract_maps_the_known_widths(self):
         assert derive_obs_contract(24) == (False, False, False)   # pre-memoria legado
         assert derive_obs_contract(25) == (False, False, True)    # contrato VIVO (20,25)
-        assert derive_obs_contract(27) == (True, False, False)    # trend pre-memoria
-        assert derive_obs_contract(28) == (True, False, True)     # objetivo T-27 (20,28)
-        assert derive_obs_contract(31) == (True, True, False)     # T-30 pre-memoria
-        assert derive_obs_contract(32) == (True, True, True)      # CANDIDATO T-30 (20,32)
+        # G3 (2026-10-20): el bloque trend pasó de 3 a 4 features
+        # (+lag_return_24) ⇒ los anchos se desplazan: 28/29 (trend),
+        # 32/33 (T-30). El contrato VIVO (24/25) no se toca.
+        assert derive_obs_contract(28) == (True, False, False)    # trend pre-memoria
+        assert derive_obs_contract(29) == (True, False, True)     # trend + memoria (G3)
+        assert derive_obs_contract(32) == (True, True, False)     # T-30 pre-memoria
+        assert derive_obs_contract(33) == (True, True, True)      # T-30 + memoria
 
     def test_derive_obs_contract_rejects_everything_else(self):
-        for width in (None, 0, 23, 26, 29, 30, 33, 99):
+        # G3: 29 y 33 son ahora VÁLIDOS (trend+memoria, T-30+memoria)
+        for width in (None, 0, 23, 26, 27, 30, 31, 34, 99):
             assert derive_obs_contract(width) is None, width
 
     def test_trend_features_appended_after_the_17_base(self):
@@ -92,7 +96,7 @@ class TestObsContract:
         assert len(base) == 17
         trend = get_market_features(df, include_trend=True)
         assert trend == list(MARKET_FEATURES) + list(TREND_MARKET_FEATURES)
-        assert len(trend) == 20
+        assert len(trend) == 21   # G3: +lag_return_24 (momentum 24 h)
 
     def test_engineer_creates_trend_columns_for_every_path(self):
         # Ventana corta (ruta serve bundle vivo) y larga (entrenamiento):
@@ -205,8 +209,8 @@ class TestEnvTrendContract:
             df=df, random_reset=False, max_episode_steps=50, trend_features=True,
         )
         obs = env.reset()[0]
-        assert env.observation_space.shape == (20, 28)
-        assert obs.shape == (20, 28) and obs.dtype == np.float32
+        assert env.observation_space.shape == (20, 29)
+        assert obs.shape == (20, 29) and obs.dtype == np.float32
         assert env.features == list(MARKET_FEATURES) + list(TREND_MARKET_FEATURES)
         # canales 17..19 = dist_sma200 / sma200_slope / adx de la ventana 1..20
         np.testing.assert_allclose(obs[:, 17], df["dist_sma200"].iloc[1:21].values, rtol=1e-5, atol=1e-7)
@@ -215,7 +219,7 @@ class TestEnvTrendContract:
         # el canal de tendencia no está degenerado a 0 (rampa real)
         assert abs(obs[-1, 17]) > 1e-4
         next_obs, *_ = env.step(np.array([0.1, 0.5], dtype=np.float32))
-        assert next_obs.shape == (20, 28)
+        assert next_obs.shape == (20, 29)
 
 
 # ─── 5. Eval del retrain: contrato derivado del observation_space ─────────────
@@ -245,8 +249,8 @@ class TestEvaluateModelTrendContract:
         )
 
     @pytest.mark.parametrize("width,expected", [
-        (27, (1, 20, 27)),
-        (28, (1, 20, 28)),
+        (28, (1, 20, 28)),      # G3: trend pre-memoria (4 features)
+        (29, (1, 20, 29)),      # G3: trend + memoria
     ])
     def test_trend_models_are_evaluated_in_their_own_env(self, width, expected):
         from services.auto_retrain import _evaluate_model
@@ -276,12 +280,12 @@ class TestServeTrendBundle:
     @staticmethod
     def _trend_model() -> MagicMock:
         model = _model()   # (20,25) para la validación de manifest del startup
-        model.observation_space = Box(-np.inf, np.inf, shape=(20, 28), dtype=np.float32)
+        model.observation_space = Box(-np.inf, np.inf, shape=(20, 29), dtype=np.float32)
         return model
 
-    def test_fixed_window_and_obs_20_28(self, monkeypatch):
+    def test_fixed_window_and_obs_20_29(self, monkeypatch):
         """Contrato trend → features sobre la ventana FIJA 224 (SMA200 real en
-        las últimas 20 velas del obs) y obs (20,28) con los canales de
+        las últimas 20 velas del obs) y obs (20,29) con los canales de
         tendencia presentes y no degenerados."""
         startup_model = _model()
         with _serve(monkeypatch, startup_model, _candles(240)) as (client, *_):
@@ -300,7 +304,7 @@ class TestServeTrendBundle:
             assert eng.call_args_list[0].args[0].shape[0] == TREND_FEATURE_WINDOW_MIN
 
         obs = trend_model.predict.call_args.args[0]
-        assert obs.shape == (20, 28)
+        assert obs.shape == (20, 29)
         assert abs(float(obs[-1, 17])) > 1e-4      # dist_sma200 honesto
         assert abs(float(obs[-1, 18])) > 1e-6      # sma200_slope honesto
         assert 0.0 <= float(obs[-1, 19]) <= 1.0    # adx en rango
@@ -326,7 +330,7 @@ class TestServeTrendBundle:
             r2 = _post(client, "t22-trend-obs-b")
             assert r2.status_code == 200, r2.text
             obs_b = trend_model.predict.call_args.args[0].copy()
-        assert obs_a.shape == (20, 28)
+        assert obs_a.shape == (20, 29)
         assert obs_a.tobytes() == obs_b.tobytes()
 
     def test_holds_below_min_window_instead_of_serving_filled_trend(self, monkeypatch):

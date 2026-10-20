@@ -69,6 +69,18 @@ class Settings(BaseSettings):
     # pre-registrado report-only (audits/t30-pre-registration §4).
     higher_tf_features: bool = False
 
+    # G3 (2026-10-20, orden Félix «arranca USDCHF»): único canario del
+    # contrato del CANDIDATO con el bloque de TENDENCIA (que desde G3 incluye
+    # `lag_return_24`, el momentum de 24 h — la señal con skill medido en
+    # USDCHF: +7,1 pp, n=481, p=0,001). Con true, el retrain entrena con
+    # obs (20,29) (17+4 market + 8 state). Con false (default) el pipeline
+    # es byte-idéntico al vivo (20,25). Serve NUNCA lee este flag: allí el
+    # contrato lo decide el ancho del bundle (derive_obs_contract).
+    # Nota: la reward `v3_edge` premia la dirección a +24 h
+    # (REWARD_V3_DIRECTION_HORIZON_BARS=24) ⇒ sin esta feature el agente
+    # estaba graduado en una magnitud que no veía.
+    retrain_trend_features: bool = False
+
     # ─── P3-2b: Backup del bundle ─────────────────────────────────────────────
     model_backup_enabled: bool = True         # GCS además del backup local verificado
     model_backup_interval_hours: int = 24     # Cadencia del backup programado

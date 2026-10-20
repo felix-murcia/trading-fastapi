@@ -966,7 +966,10 @@ async def _do_retrain_core(df: pd.DataFrame, exp_id: int, symbol: str = TRAINING
         # candidato H4/D1 exige el bloque de tendencia (contrato 31/32 =
         # 20+3+4 market, validado en el env con ValueError). Default off =
         # contrato vivo (20,25) byte-idéntico.
-        trend_features=settings.higher_tf_features,
+        # G3 (2026-10-20): el bloque de tendencia (que ya incluye el momentum
+        # de 24 h) se puede activar SOLO para el run del canario; el HF lo
+        # implica. La línea de T-27 se conserva LITERAL (default inerte).
+        trend_features=settings.higher_tf_features or settings.retrain_trend_features,
         # T-30: bloque de horizonte lento — sólo para el run pre-registrado
         # report-only (flag en .env; serve lo ignora, decide por el ancho).
         higher_tf_features=settings.higher_tf_features,

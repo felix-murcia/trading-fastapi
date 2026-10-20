@@ -75,7 +75,12 @@ MARKET_FEATURES = (
 # en crudo, el PPO normalizado). NO entra en MARKET_FEATURES (17 base): el
 # contrato se decide por el ANCHO del obs (`derive_obs_contract`), así el
 # bundle vivo (20,25) sigue servible intacto hasta que T-27 promueva (20,28).
-TREND_MARKET_FEATURES = ("dist_sma200", "sma200_slope", "adx")
+# G3 (2026-10-20): + `lag_return_24` (momentum de 24 h — la señal con skill
+# medido en USDCHF y la que la reward `v3_edge` premia). Al crecer el bloque
+# de 3 a 4 features, los ANCHOS de la escalera se desplazan (trend 28/29,
+# T-30 32/33); el contrato VIVO (20,25) NO se toca (el bloque sigue siendo
+# opt-in por ancho).
+TREND_MARKET_FEATURES = ("dist_sma200", "sma200_slope", "adx", "lag_return_24")
 
 # T-30 (2026-10-17, orden Félix «ejecución del candidato H4/D1»): bloque de
 # horizonte LENTO — las 4 coordenadas del estado de la tendencia ~41d (H4) y
@@ -266,7 +271,15 @@ def engineer_market_features(df: pd.DataFrame) -> pd.DataFrame:
     bb_raw = (close - result["sma20"]) / (2.0 * std20 + 1e-10)
     result["bb_pos"] = np.clip(bb_raw, -3.0, 3.0)
 
-    for lag in (1, 2, 3, 5):
+    # G3 (2026-10-20, orden Félix «arranca USDCHF»): `lag_return_24` — el
+    # momentum de 24 h. Es la ÚNICA señal con skill real medida en USDCHF
+    # (+7,1 pp, n=481, IC [+2,6,+11,4], p=0,001 con 20 000 barajados) y es
+    # la misma que la reward `v3_edge` premia (REWARD_V3_DIRECTION_HORIZON_BARS
+    # = 24). Sin ella el agente estaba GRADUADO en una magnitud que NO VEÍA
+    # (sólo tenía lags 1/2/3/5) ⇒ no podía resolver la tarea. Entra en el
+    # bloque opt-in de tendencia, NO en MARKET_FEATURES: el contrato vivo
+    # (20,25) de EURUSD debe seguir byte-idéntico.
+    for lag in (1, 2, 3, 5, 24):
         result[f"lag_return_{lag}"] = result["returns"].shift(lag).fillna(0.0)
 
     # ============================================================
@@ -394,10 +407,16 @@ def derive_obs_contract(obs_width: Optional[int]) -> Optional[Tuple[bool, bool, 
 
     - 24 = 17 market + 7 state            → pre-memoria legado (Fase 3)
     - 25 = 24 + memoria                   → CONTRATO VIVO (20,25)
-    - 27 = 20 market + 7 state            → trend pre-memoria (T-22)
-    - 28 = 27 + memoria                   → objetivo T-27 (20,28)
-    - 31 = 24 market + 7 state            → T-30 pre-memoria (trend + HF)
-    - 32 = 31 + memoria                   → CANDIDATO T-30 (20,32)
+    - 28 = 21 market + 7 state            → trend pre-memoria (T-22 + G3)
+    - 29 = 28 + memoria                   → trend + memoria (G3: USDCHF)
+    - 32 = 25 market + 7 state            → T-30 pre-memoria (trend + HF)
+    - 33 = 32 + memoria                   → T-30 + memoria
+
+    G3 (2026-10-20): el bloque de tendencia pasó de 3 a 4 features (se suma
+    `lag_return_24`, el momentum de 24 h) ⇒ los anchos de la escalera se
+    desplazan (trend 27/28 → 28/29; T-30 31/32 → 32/33). Los anchos viejos
+    NO se reutilizan (no hay bundle vivo con ellos: el vivo es 25) ⇒ un
+    bundle con ancho desconocido falla con RuntimeError, nunca en silencio.
 
     Devuelve None si el ancho no corresponde a ningún contrato construible:
     el llamador decide el RuntimeError contextual (sin degradación silenciosa).
