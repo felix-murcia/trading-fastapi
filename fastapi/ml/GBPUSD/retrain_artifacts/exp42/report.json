@@ -1,0 +1,161 @@
+{
+  "exp_id": 42,
+  "symbol": "GBPUSD",
+  "obs_shape": [
+    20,
+    25
+  ],
+  "cfg": {
+    "reward_version": "v1",
+    "trend_features": false,
+    "total_timesteps": 100000,
+    "warmup_trim_rows": 204,
+    "rows": 29777
+  },
+  "gate": {
+    "ok": false,
+    "reason": "absolute_floor_sum_reward"
+  },
+  "t28_alignment": {
+    "ok": true,
+    "status": "not_applicable_bootstrap",
+    "reasons": [
+      "not_applicable_no_prior_bundle"
+    ],
+    "n_window": 0,
+    "n_active": 0,
+    "agreement_rate": null,
+    "conflict_rate": null,
+    "joint_entropy_bits": null
+  },
+  "walk_forward": {
+    "n_folds": 4,
+    "embargo_bars": 20,
+    "train_bars": 17866,
+    "folds": [
+      {
+        "fold": 0,
+        "bars": 1483,
+        "candidate": {
+          "reward": -39.93756466600826,
+          "sharpe": -2.7207833795517926,
+          "sortino": -2.955752247603951,
+          "max_dd": 0.3422473496954605,
+          "expectancy": -2.8584283388022427,
+          "expectancy_raw": -2.609861589011898,
+          "trades": 110,
+          "wins": 31,
+          "losses": 79,
+          "win_rate": 0.2818181818181818,
+          "openings": 111,
+          "n_steps": 1000,
+          "final_equity": 718.9802252086909,
+          "direction_accuracy": 0.5,
+          "direction_n": 110
+        },
+        "baseline": null
+      },
+      {
+        "fold": 1,
+        "bars": 1483,
+        "candidate": {
+          "reward": 19.917047055572766,
+          "sharpe": 2.6072607300930417,
+          "sortino": 3.319712071716893,
+          "max_dd": 0.23063116491375218,
+          "expectancy": 2.7993215236799736,
+          "expectancy_raw": 2.8999994897816235,
+          "trades": 118,
+          "wins": 40,
+          "losses": 78,
+          "win_rate": 0.3389830508474576,
+          "openings": 119,
+          "n_steps": 1000,
+          "final_equity": 1344.2329397942315,
+          "direction_accuracy": 0.4576271186440678,
+          "direction_n": 118
+        },
+        "baseline": null
+      },
+      {
+        "fold": 2,
+        "bars": 1483,
+        "candidate": {
+          "reward": -4.127326973997697,
+          "sharpe": 1.2495486918914125,
+          "sortino": 1.5081748310837282,
+          "max_dd": 0.2056776187578172,
+          "expectancy": 0.6977462706914428,
+          "expectancy_raw": 0.9339876500017484,
+          "trades": 116,
+          "wins": 34,
+          "losses": 82,
+          "win_rate": 0.29310344827586204,
+          "openings": 117,
+          "n_steps": 1000,
+          "final_equity": 1105.674567400202,
+          "direction_accuracy": 0.5431034482758621,
+          "direction_n": 116
+        },
+        "baseline": null
+      },
+      {
+        "fold": 3,
+        "bars": 1486,
+        "candidate": {
+          "reward": 19.390340700017987,
+          "sharpe": 2.922352895547025,
+          "sortino": 3.753456407320657,
+          "max_dd": 0.17267161347733845,
+          "expectancy": 2.9137733751784025,
+          "expectancy_raw": 3.0579805854963316,
+          "trades": 131,
+          "wins": 48,
+          "losses": 83,
+          "win_rate": 0.366412213740458,
+          "openings": 132,
+          "n_steps": 1000,
+          "final_equity": 1398.5044567000189,
+          "direction_accuracy": 0.5267175572519084,
+          "direction_n": 131
+        },
+        "baseline": null
+      }
+    ],
+    "holdout": {
+      "bars": 5956,
+      "candidate": {
+        "reward": -22.234145918453578,
+        "sharpe": -0.038531629472104596,
+        "sortino": -0.046234053352334485,
+        "max_dd": 0.26953373682573845,
+        "expectancy": -0.42623630492400605,
+        "expectancy_raw": -0.32637692992408596,
+        "trades": 128,
+        "wins": 42,
+        "losses": 86,
+        "win_rate": 0.328125,
+        "openings": 129,
+        "n_steps": 1000,
+        "final_equity": 956.4417529697157,
+        "direction_accuracy": 0.4765625,
+        "direction_n": 128
+      },
+      "baseline": null
+    },
+    "candidate": {
+      "sum_reward": -4.7575038844152004,
+      "mean_sharpe": 1.0145947344949215,
+      "mean_sortino": 1.4063977656293318,
+      "worst_max_dd": 0.3422473496954605,
+      "total_expectancy": 3.552412830747576,
+      "total_trades": 475,
+      "total_openings": 479,
+      "n_steps": 4000,
+      "direction_accuracy": 0.5073684210526316,
+      "direction_n": 475
+    },
+    "baseline": null,
+    "fold_wins": null
+  }
+}

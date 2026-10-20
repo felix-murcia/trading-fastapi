@@ -38,6 +38,23 @@ PIP_SIZE = {
 # Pares donde base=USD → pip_value = 10 / price
 _USD_BASE = {"USDJPY", "USDCHF", "USDCAD", "USDCNH", "USDSEK"}
 
+# B1 (G2): pares con QUOTE=USD y BASE≠EUR ⇒ su P/L está en USD y la
+# conversión a EUR (cuenta en EUR) se hace por el precio EURUSD — el MISMO
+# convenio que el bróker y que el risk_guardian (G2-5/D2).
+_USD_QUOTE_NON_EUR_BASE = {"GBPUSD", "AUDUSD", "NZDUSD", "XAUUSD"}
+
+
+async def eurusd_price() -> float:
+    """Precio EURUSD vigente (para la conversión honesta USD→EUR del gate de
+    recompensa). Misma fuente que usa el risk_guardian (G2-5/D2): la última
+    vela H1 del feed. Sin precio ⇒ el llamador falla ruidosamente.
+    """
+    from services.mt5_client import get_candles
+    rows = await get_candles("EURUSD", "H1", 1)
+    if not rows:
+        raise ValueError("eurusd_price: feed sin velas")
+    return float(rows[-1]["close"])
+
 
 def is_supported(symbol: str) -> bool:
     return symbol in PIP_SIZE
@@ -53,28 +70,53 @@ def pip_value_per_lot(symbol: str, price: float) -> float:
     return 10.0                 # quote=USD (EURUSD, GBPUSD, AUDUSD, NZDUSD, XAUUSD)
 
 
-def expected_close_eur(symbol: str, pips: float, volume: float, price: float) -> float:
-    """Opción A (Félix 2026-10-12): beneficio en EUR que produciría un
-    cierre a `pips` de distancia con `volume` lotes — el dato que el gate
-    de recompensa mínima de `/predict` compara contra MIN_WIN_EUR.
+def expected_close_eur(
+    symbol: str,
+    pips: float,
+    volume: float,
+    price: float,
+    eurusd_price: float | None = None,
+) -> float:
+    """Beneficio en EUR que produciría un cierre a `pips` de distancia con
+    `volume` lotes — el dato que el gate de recompensa mínima de `/predict`
+    compara contra MIN_WIN_EUR.
 
     Convención de la cuenta (EUR) idéntica al deal del bróker: en EURUSD
     el pip value está en USD y USD→EUR = /price (1 EUR = price USD),
     exacto — verificado contra el trade #255 (21.6 p × 0.01 lot a
     1.12094 → 1.927 € calculado vs 1.93 € pagados por el bróker).
 
-    Símbolos sin conversión honesta definible desde el propio par (cual-
-    quiera que no sea EURUSD): ValueError — nada de tasas inventadas; el
-    gate no aplica donde la conversión no está definida y el error se
-    propaga (fracaso ruidoso, nunca silencioso).
+    B1 (G2, orden Félix 2026-10-20 — «continúa con GBPUSD hasta el final»):
+    antes esto crasheaba el ciclo de GBPUSD con `ValueError` (el gate de
+    recompensa es EURUSD-only ⇒ **GBPUSD no podía operar**). Ahora los pares
+    con QUOTE=USD y BASE≠EUR (GBPUSD, AUDUSD, NZDUSD, XAUUSD) se convierten
+    con el MISMO convenio que el bróker y que el risk_guardian (G2-5/D2):
+    el P/L en USD se divide por el precio EURUSD (1 EUR = price USD).
+    Sin el precio EURUSD NO hay conversión honesta definible ⇒ ValueError
+    (fracaso ruidoso, nunca silencioso) — no se inventan tasas.
     """
-    if symbol != "EURUSD":
-        raise ValueError(f"expected_close_eur sin conversión EUR definida para {symbol}")
     if pips <= 0.0 or volume <= 0.0 or price <= 0.0:
         raise ValueError(
             f"expected_close_eur exige pips/volume/price > 0: {pips}/{volume}/{price}"
         )
-    return float(pips) * float(volume) * pip_value_per_lot(symbol, price) / float(price)
+    if symbol == "EURUSD":
+        # El P/L ya está en USD y el precio es EURUSD ⇒ /price (convención
+        # del bróker, exacta).
+        return float(pips) * float(volume) * pip_value_per_lot(symbol, price) / float(price)
+    if symbol in _USD_QUOTE_NON_EUR_BASE:
+        if not eurusd_price or float(eurusd_price) <= 0.0:
+            raise ValueError(
+                f"expected_close_eur para {symbol} exige el precio EURUSD "
+                "(convención bróker USD→EUR); sin él no hay conversión honesta"
+            )
+        # P/L en USD (quote=USD) → EUR dividiendo por EURUSD.
+        return (
+            float(pips) * float(volume) * pip_value_per_lot(symbol, price)
+            / float(eurusd_price)
+        )
+    raise ValueError(
+        f"expected_close_eur sin conversión EUR definida para {symbol}"
+    )
 
 
 def size_ppo_position(

@@ -85,7 +85,9 @@ class TestCheckScheduledRetrain:
         result = await ar.check_scheduled_retrain()
 
         assert result is True
-        spawn.assert_called_once_with("scheduled")
+        # G2-6/B3: el retrain programado se lanza POR MUNDO (antes sin
+        # símbolo ⇒ GBPUSD nunca entraba por el calendario).
+        spawn.assert_called_once_with("scheduled", symbol=ar.TRAINING_SYMBOL)
 
     @pytest.mark.asyncio
     async def test_skips_while_retrain_in_progress(self, ctx):

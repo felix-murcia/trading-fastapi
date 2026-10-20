@@ -737,6 +737,29 @@ def _load_or_create_model(model_path: str, train_env, cfg) -> "PPO":
                    verbose=cfg.verbose)
 
     if not os.path.exists(model_path):
+        # G2-8/G2-3b (orden Félix 2026-10-20, «continúa con GBPUSD hasta el
+        # final»): un mundo NUEVO no tiene de dónde heredar el
+        # comportamiento conservador ⇒ entrenando desde cero el agente aprende
+        # a operar MUCHO (medido en GBPUSD exp42: 110 operaciones por fold,
+        # DD 34 %, folds −39,9) mientras que el bundle de EURUSD (heredado
+        # de un warm start) abre 16 en el holdout.
+        # ⇒ WARM START explícito desde el bundle de otro mundo, cuando se
+        # declara por env (RETRAIN_WARM_START_FROM). El bundle resultante es
+        # PROPIO del mundo (fichero, manifest y baseline suyos): el
+        # acoplamiento es de ARRANQUE (un prior), no de ESTADO en runtime
+        # (los mundos siguen siendo independientes — G2-7).
+        warm_src = os.getenv("RETRAIN_WARM_START_FROM", "").strip().upper()
+        if warm_src:
+            from core.pair import default_model_path
+            src_path = default_model_path(warm_src)
+            if os.path.exists(src_path) and src_path != model_path:
+                logger.warning(
+                    "[RETRAIN] Arranque en frío con WARM START desde %s (%s) — "
+                    "prior explícito (el bundle resultante es propio de este "
+                    "mundo; los mundos no comparten estado en runtime)",
+                    warm_src, os.path.basename(src_path),
+                )
+                return PPO.load(src_path, env=train_env)
         logger.warning("[RETRAIN] No hay modelo previo — creando nuevo")
         return _fresh()
 
@@ -1476,8 +1499,32 @@ async def check_scheduled_retrain() -> bool:
     Con `retrain_auto_approve=false` deja `scheduled_due` para el flujo de
     aprobación (approve_retrain lo acepta sin alcanzar el umbral de trades);
     con true, dispara directamente con trigger='scheduled'.
+
+    G2-6/B3 (orden Félix 2026-10-20): el calendario era EURUSD-only
+    (`_ensure_retrain_state()` sin símbolo ⇒ default TRAINING_SYMBOL) ⇒
+    GBPUSD **jamás entraba por el calendario 168 h** (fallo silencioso).
+    Ahora se evalúa POR MUNDO habilitado, cada uno con su propio estado,
+    su propio ancla y su propio `scheduled_due` (G2-8: los contadores de un
+    mundo nuevo empiezan en 0 — evidencia nueva, no heredada).
     """
-    state = await _ensure_retrain_state()
+    from core.container import build_registry_from_settings
+
+    try:
+        symbols = [ctx.config.symbol for ctx in build_registry_from_settings().enabled()]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[RETRAIN-SCHED] no se pudo leer el registro de pares: %s", exc)
+        symbols = [TRAINING_SYMBOL]
+
+    toca = False
+    for symbol in symbols:
+        if await _check_scheduled_retrain_for(symbol):
+            toca = True
+    return toca
+
+
+async def _check_scheduled_retrain_for(symbol: str) -> bool:
+    """Calendario de retrain de UN mundo (G2-6/B3)."""
+    state = await _ensure_retrain_state(symbol)
     if state.retrain_in_progress:
         return False
     now = time.time()
@@ -1485,20 +1532,20 @@ async def check_scheduled_retrain() -> bool:
     anchor = state.last_retrain_time or state.schedule_anchor
     if anchor <= 0:
         state.schedule_anchor = now
-        await _save_retrain_state(state)
+        await _save_retrain_state(state, symbol)
         logger.info(
-            "[RETRAIN-SCHED] Sin historial: primer check del calendario anclado "
-            "ahora — primer retrain programado en %dh", interval_h,
+            "[RETRAIN-SCHED] [%s] Sin historial: primer check del calendario anclado "
+            "ahora — primer retrain programado en %dh", symbol, interval_h,
         )
         return False
     elapsed_h = (now - anchor) / 3600.0
     if elapsed_h < interval_h:
         return False
     state.scheduled_due = True
-    await _save_retrain_state(state)
+    await _save_retrain_state(state, symbol)
     logger.warning(
-        "[RETRAIN-SCHED] Retrain programado pendiente: último intento hace "
-        "%.1fh (intervalo %dh)", elapsed_h, interval_h,
+        "[RETRAIN-SCHED] [%s] Retrain programado pendiente: último intento hace "
+        "%.1fh (intervalo %dh)", symbol, elapsed_h, interval_h,
     )
     if not settings.retrain_auto_approve:
         logger.warning(
@@ -1506,7 +1553,8 @@ async def check_scheduled_retrain() -> bool:
             "POST /api/v1/ai/retrain/approve"
         )
         return True
-    _spawn_retrain_task("scheduled")
+    # G2-6/B3: el retrain programado se lanza PARA SU MUNDO (no el default).
+    _spawn_retrain_task("scheduled", symbol=symbol)
     return True
 
 

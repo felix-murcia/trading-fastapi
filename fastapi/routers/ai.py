@@ -1400,11 +1400,23 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     # min_entry_confidence). Mutuamente excluyente con sizing (exige
     # final_lots > 0 → el veto de abajo se queda la atribución si no cabe
     # lote). La conversión es honesta por diseño: expected_close_eur lanza
-    # ValueError para símbolos sin tasa EUR (hoy sólo EURUSD operativo).
+    # ValueError para símbolos sin tasa EUR definible (nunca tasas
+    # inventadas).
+    # B1 (G2): para los pares con quote=USD y base≠EUR (GBPUSD…) el P/L está
+    # en USD y se convierte con el precio EURUSD (el convenio del bróker, el
+    # mismo que usa el risk_guardian). El precio se pide SÓLO cuando hace
+    # falta (hay entrada propuesta) y sólo para esos símbolos.
     reward_eur: Optional[float] = None
     reward_below_min = False
     if final_decision in ("BUY", "SELL") and final_lots > 0.0 and tp_pips_final > 0.0:
-        reward_eur = expected_close_eur(req.symbol, tp_pips_final, final_lots, current_price)
+        _eurusd_px = None
+        if req.symbol != "EURUSD":
+            from services.position_sizing import eurusd_price
+            _eurusd_px = await eurusd_price()
+        reward_eur = expected_close_eur(
+            req.symbol, tp_pips_final, final_lots, current_price,
+            eurusd_price=_eurusd_px,
+        )
     # A-1: flip con posición abierta → el EA lo rechaza siempre en ejecución
     # (L407/L440/L475: rejected_position_open) porque la salida es exclusiva
     # SL/TP. El backend lo declara AQUÍ, antes de la cadena Qwen y del sizing,

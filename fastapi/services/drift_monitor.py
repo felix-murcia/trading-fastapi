@@ -233,15 +233,20 @@ async def _recent_pnl(limit: int = 50) -> list[float]:
     return [float(r["pnl"]) for r in rows]
 
 
-async def run_drift_check() -> dict:
+async def run_drift_check(symbol: str = LEGACY_SYMBOL) -> dict:
     """Un pase completo: PSI de features vivas + decay de métricas + alertas.
 
     Devuelve SIEMPRE el reporte (endpoint de observabilidad): los fallos
     parciales (red MT5, BD) se alertan aparte y quedan reflejados en el
     reporte en lugar de romperlo.
+
+    G2-6/B2 (orden Félix 2026-10-20): el pase estaba HARDCODEADO a EURUSD
+    (baseline sin símbolo + fetch symbol="EURUSD") ⇒ **el drift de GBPUSD
+    nunca se reportaba** ⇒ mundo a ciegas. Ahora el pase es POR MUNDO.
     """
     report: dict = {
         "checked_at": datetime.now(timezone.utc).isoformat(),
+        "symbol": symbol,
         "baseline": None,
         "features": {},
         "max_psi": None,
@@ -250,7 +255,7 @@ async def run_drift_check() -> dict:
         "decay": None,
     }
 
-    baseline = load_baseline()
+    baseline = load_baseline(symbol)
     if baseline is None:
         report.update(status="no_baseline", level="warning")
         send_alert(
@@ -265,13 +270,13 @@ async def run_drift_check() -> dict:
         }
         try:
             from services.auto_retrain import _build_training_dataframe, _fetch_historical_candles
-            candles = await _fetch_historical_candles(symbol="EURUSD", count=LIVE_CANDLES)
+            candles = await _fetch_historical_candles(symbol=symbol, count=LIVE_CANDLES)
             # Parche de agujero con CSV (orden Félix 2026-10-13, recom. 1):
             # sin él, si el feed vuelve a cortar la historia la ventana de PSI
             # se llena de saltos fantasma y el monitor queda CIEGO (PSI≈11.2
             # por overflow de sma20, medido en vivo 2026-10-12). El fetch del
             # retrain NO se toca (freeze de datos de entrenamiento).
-            candles = fill_feed_hole(candles, LEGACY_SYMBOL, "H1")
+            candles = fill_feed_hole(candles, symbol, "H1")
             live_df = _build_training_dataframe(candles)
             for col, stats in baseline.get("features", {}).items():
                 if col not in live_df.columns:
@@ -374,11 +379,16 @@ async def _drift_monitor_loop() -> None:
     await asyncio.sleep(DRIFT_CHECK_DELAY_S)
     while True:
         try:
-            report = await run_drift_check()
-            logger.warning(
-                "[DRIFT] programado → level=%s (próximo en %dh)",
-                report.get("level"), settings.drift_check_interval_hours,
-            )
+            # G2-6/B2: el drift se mide POR MUNDO habilitado (antes sólo
+            # EURUSD ⇒ el drift de GBPUSD nunca se reportaba).
+            from core.container import build_registry_from_settings
+            symbols = [ctx.config.symbol for ctx in build_registry_from_settings().enabled()]
+            for sym in symbols:
+                report = await run_drift_check(sym)
+                logger.warning(
+                    "[DRIFT] [%s] programado → level=%s (próximo en %dh)",
+                    sym, report.get("level"), settings.drift_check_interval_hours,
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
