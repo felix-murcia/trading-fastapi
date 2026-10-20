@@ -2578,3 +2578,26 @@ Relación **INVERSA**: con un gate armado ≥0.7 esa semana se habrían bloquead
 - **Instrumentación añadida (auditable):** `direction_hits` en el env (acierto direccional por trade a +24 h, el mismo horizonte que el benchmark), `direction_accuracy` por fold/holdout en el informe del walk-forward, y la `reward_version` **efectiva** en el log de cada run (un contenedor con imagen vieja entrenaba con otra reward sin que nadie lo viera: pasó hoy — por eso el run #40 no era el candidato de L3).
 - **Además:** la promoción de candidato (exp39) no escribía `last_promotion.json` ⇒ el marcador mentía con el sha del bundle del 07-10 (corregido: ahora escribe el marcador y el sha real es `4cd9abb6`).
 - **Consecuencia para el plan (L5):** la palanca del PPO está agotada con evidencia (T-27 reward, T-30 obs, L3 reward) ⇒ el camino con edge medido es **E3/E4: el LLM (69,6 %, CI 55,2 %)** como fuente de dirección, con el PPO rebaixado a gestión de riesgo — y el **gate de admisión** (L4) para que la dirección entre sólo con skill demostrada. Suite **1087 passed + 2 xfailed**.
+
+### Evidencia 2026-10-20 (L1 · MÓDULO DE MEDICIÓN CANÓNICO — y la verdad que sustituye a las cifras de hoy)
+
+- **Por qué módulo:** el 20-10, tres mediciones seguidas de las **MISMAS** llamadas dieron **87 %, 69,6 % y 10 %**. No era el modelo: era la definición. Cuatro fallos encadenados, todos silenciosos:
+  1. El `mt5_time` que manda el EA está en el **reloj del broker (+3 h)** (y las velas también) ⇒ alinear exige el mismo desfase a los dos lados; el fix anterior normalizó **sólo** las velas.
+  2. El desfase se deducía con un truco del **punto medio** de la vela ⇒ dependía del **minuto** (2 a las 11:59, 3 a las 12:00, 4 a las 12:01) ⇒ la serie se desplazaba ±1 h según el minuto de la medición.
+  3. El cierre terminal era *"la última vela ≤ t0+24 h"*, pero la serie H1 tiene **huecos** (pausa diaria, fines de semana) ⇒ esa vela **cambia** al rellenarse los huecos ⇒ la cifra se movía con el reloj.
+  4. La vela **en formación** (su "close" es el precio actual) entraba como terminal ⇒ la dirección medida tickeaba con el precio.
+- **Definición canónica (`services/measurement.py`, la única que usa el sistema):** base = última vela ≤ t0 · terminal = **primera vela ≥ t0+24 h** (determinista) · evaluable sólo si el terminal **está cerrado**. Con ella cada llamada tiene un resultado **fijo** en cuanto su terminal cierra ⇒ medición estable y reproducible (verificado: dos corridas seguidas, idénticas).
+- **Veredicto con la medición canónica (estable):**
+
+  | | Acierto +24 h | n | CI 95 % inf. | |
+  |---|---|---|---|---|
+  | **sma200 (estructura)** | **62,6 %** | 436 | **58,0 %** | ★ **la vara: el edge está en la ESTRUCTURA** |
+  | mom24 (momentum) | 42,1 % | 484 | 37,8 % | **invertido** |
+  | barra previa | 51,0 % | 486 | 46,6 % | azar |
+  | **PPO** (ciclos reales) | 7,1 % | 14 | 1,3 % | **sin edge demostrado** |
+  | **LLM** (ciclos reales) | — | **0** | — | **no medible aún**: su muestra tiene <24 h ⇒ su terminal aún no ha cerrado (madura desde el 20-10 18:19) |
+
+  ⇒ **Corrección pública**: las cifras de skill del LLM de hoy (87 % / 69,6 % / 10 %) eran **artefactos de terminales inmaduros**; la verdad es **n=0 evaluable**. La del PPO (50,7 %) era de la definición laxa; con la canónica da 7,1 % (n=14, no significativo). **El único número hoy con significación es el del benchmark: el edge trivial está en la ESTRUCTURA (62,6 %, CI 58,0 %) y el momentum está invertido (42,1 %).**
+- **Módulo `services/measurement.py`** (L1): `canonical_direction` (terminal determinista + cerrado), `skill_of` (veredicto con significancia: exige distinguirse del azar), `wilson_lower_bound` y `benchmark_predictions`. Consumidores: autoridad del veto, T-28, calibración, drift y (próximamente) el ledger. **Una sola definición ⇒ una sola verdad.**
+- **Consecuencias operativas:** (a) la autoridad del veto está **REVOCADA por falta de muestra madura** (no por mala skill) ⇒ el veto direccional está inerte y el LLM **no puede bloquear** hasta que su evidencia madure; (b) el **quórum** y los vetos mecánicos siguen operando; (c) la vara canónica sugiere una fuente de dirección **determinista y verificable** (estructura SMA200+pendiente, 62,6 %) como candidata a ser admitida mientras el LLM madura.
+- **Script re-ejecutable:** `fastapi/scripts/benchmark_canonico.py` (la vara, y el estado de cada fuente en los ciclos reales). Suite **1090 passed + 2 xfailed**.

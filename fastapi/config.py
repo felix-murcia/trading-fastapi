@@ -157,6 +157,13 @@ class Settings(BaseSettings):
     # gobernando la vía NORMAL (suelo absoluto) sin cambios.
     retrain_promote_drastic: bool = False
 
+    # L1 (2026-10-20) — umbrales de la MEDICIÓN CANÓNICA (services/measurement).
+    # "Lo no medido no tiene poder": sin muestra madura, la autoridad se
+    # revoca; y "skill demostrada" exige distinguirse DEL AZAR (límite
+    # inferior de Wilson > 50 %), no sólo no ser peor.
+    measurement_min_samples: int = 30
+    measurement_min_acc: float = 0.55
+
     class Config:
         env_file = "/app/.env"
 

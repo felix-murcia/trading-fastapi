@@ -144,26 +144,21 @@ async def _measure(symbol: str) -> dict:
     bar_close = [p[1] for p in pairs]
 
     def realized(t0: float) -> str | None:
-        """Dirección realizada a +24 h REALES (no +24 barras).
+        """Dirección realizada a +24 h REALES — DEFINICIÓN CANÓNICA (L1).
 
-        T-31 (2026-10-19): dos correcciones frente a la primera versión —
-        (a) las velas llegan ya en UTC real (services/mt5_client normaliza
-            el desfase broker→UTC de +3 h; antes la base quedaba 3 h
-            desplazada);
-        (b) el horizonte es por TIEMPO: la serie H1 tiene huecos (fin de
-            semana, pausa diaria) ⇒ 24 barras ≈ 35 h, no 24 h.
-        Se toma el último cierre en o antes de t0 y el último cierre en o
-        antes de t0+24 h."""
-        c0_i = bisect.bisect_right(bar_ep, t0) - 1
-        c1_i = bisect.bisect_right(bar_ep, t0 + QWEN_AUTHORITY_HORIZON_H * 3600) - 1
-        if c0_i < 0 or c1_i <= c0_i:
+        Delega en services.measurement.canonical_direction: el terminal es la
+        PRIMERA vela con time ≥ t0+24 h (determinista: no cambia al
+        rellenarse los huecos de la serie) y debe estar CERRADA. Con la
+        definición anterior ("última vela ≤ t0+24 h") la cifra se movía con
+        el reloj (87 % → 69,6 % → 10 % sobre las MISMAS llamadas)."""
+        from services.measurement import canonical_direction
+        d = canonical_direction(
+            bar_ep, bar_close, t0, now_epoch,
+            horizon_h=QWEN_AUTHORITY_HORIZON_H,
+        )
+        if d is None:
             return None
-        d = bar_close[c1_i] - bar_close[c0_i]
-        if d > 0.00005:
-            return "UP"
-        if d < -0.00005:
-            return "DOWN"
-        return None
+        return "UP" if d > 0 else "DOWN"
 
     n = 0
     hits = 0
@@ -187,37 +182,32 @@ async def _measure(symbol: str) -> dict:
         b["hits"] += hit
 
     acc = (hits / n) if n else None
-    wilson_lo = _wilson_lower_bound(hits, n) if n else None
+    # Veredicto con la MISMA lógica del módulo canónico (L1) — una sola
+    # definición de "skill demostrada" en todo el sistema.
+    from services.measurement import skill_of
+    _sk = skill_of(hits, n)
     result["n"] = n
     result["hits"] = hits
-    result["acc"] = acc
-    result["wilson_lower"] = wilson_lo
+    result["acc"] = _sk["acc"]
+    result["wilson_lower"] = _sk["wilson_lower"]
     result["calibration"] = {
         f"{p:.2f}": {"n": b["n"], "hits": b["hits"],
                      "acc": (b["hits"] / b["n"]) if b["n"] else None}
         for p, b in sorted(buckets.items())
     }
-    if n < QWEN_AUTHORITY_MIN_SAMPLES:
-        result["reason"] = f"muestra insuficiente ({n} < {QWEN_AUTHORITY_MIN_SAMPLES})"
-    elif acc is not None and acc < QWEN_AUTHORITY_MIN_ACC:
-        result["reason"] = (
-            f"skill no demostrada ({acc*100:.1f}% < {QWEN_AUTHORITY_MIN_ACC*100:.0f}% sobre {n})"
-        )
-    elif (
-        QWEN_AUTHORITY_REQUIRE_SIGNIFICANCE
-        and wilson_lo is not None
-        and wilson_lo <= 0.50
-    ):
-        result["reason"] = (
-            f"skill indistinguible del azar (acc {acc*100:.1f}%, límite inferior "
-            f"Wilson 95% {wilson_lo*100:.1f}% ≤ 50% sobre {n} llamadas)"
-        )
+    if QWEN_AUTHORITY_REQUIRE_SIGNIFICANCE:
+        result["granted"] = _sk["granted"]
+        result["reason"] = _sk["reason"]
     else:
-        result["granted"] = True
-        result["reason"] = (
-            f"skill demostrada ({acc*100:.1f}% sobre {n} llamadas; "
-            f"límite inferior {wilson_lo*100:.1f}%)"
-        )
+        # Vía legada (sin exigencia de significancia) — se conserva por
+        # compatibilidad; el criterio vivo es el de L1.
+        if n < QWEN_AUTHORITY_MIN_SAMPLES:
+            result["reason"] = f"muestra insuficiente ({n} < {QWEN_AUTHORITY_MIN_SAMPLES})"
+        elif _sk["acc"] is not None and _sk["acc"] >= QWEN_AUTHORITY_MIN_ACC:
+            result["granted"] = True
+            result["reason"] = f"skill demostrada ({_sk['acc']*100:.1f}% sobre {n} llamadas)"
+        else:
+            result["reason"] = f"skill no demostrada ({_sk['acc']*100:.1f}% sobre {n})"
     return result
 
 

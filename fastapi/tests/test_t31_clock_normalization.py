@@ -18,6 +18,7 @@ el desfase se deduce de la vela más reciente (la formándose) ⇒ cero
 hardcode, sigue solo si el broker cambia de huso.
 """
 import datetime as dt
+import datetime as _dt
 
 import pytest
 from unittest.mock import patch
@@ -125,6 +126,40 @@ def test_shift_is_reversible_in_offset_math(offset):
     vuelve al sello original (sin acumular error ni redondeo)."""
     epoch = 1792443600.0
     assert correct_candle_epoch(correct_candle_epoch(epoch, offset), -offset) == epoch
+
+
+class TestOffsetDetectionIsMinuteIndependent:
+    """REGRESIÓN CRÍTICA (2026-10-20): el desfase NO puede depender del
+    minuto de la hora.
+
+    Con el método anterior (punto medio + `round`) el desfase fluctuaba:
+    2 a las 11:59, 3 a las 12:00 y 4 a las 12:01 ⇒ la serie de velas se
+    desplazaba ±1 h y TODA la medición de skill se desgaraba (medido: la
+    skill del LLM saltaba de 69,6 % a 10,0 % con las MISMAS llamadas según
+    el minuto en que corriera la medición)."""
+    import datetime as _dt
+
+    def test_offset_stable_across_the_whole_hour(self):
+        for minute in range(0, 60, 7):
+            now = _dt.datetime(2026, 10, 20, 12, minute, tzinfo=_dt.timezone.utc)
+            # vela formándose: el broker sella floor(hora real) + 3 h
+            forming = _dt.datetime(2026, 10, 20, 15, 0, tzinfo=_dt.timezone.utc)
+            assert detect_utc_offset_hours(forming, now) == 3, (
+                f"el desfase cambió con el minuto {minute}: "
+                f"{detect_utc_offset_hours(forming, now)}"
+            )
+
+    def test_offset_boundary_minutes(self):
+        """Los minutos «de borde» (59 y 01) que rompían la detección."""
+        for minute, expected in ((0, 3), (1, 3), (58, 3), (59, 3)):
+            now = _dt.datetime(2026, 10, 20, 12, minute, tzinfo=_dt.timezone.utc)
+            forming = _dt.datetime(2026, 10, 20, 15, 0, tzinfo=_dt.timezone.utc)
+            assert detect_utc_offset_hours(forming, now) == expected
+
+    def test_honest_feed_gives_zero(self):
+        now = _dt.datetime(2026, 10, 20, 12, 30, tzinfo=_dt.timezone.utc)
+        honest = _dt.datetime(2026, 10, 20, 12, 0, tzinfo=_dt.timezone.utc)
+        assert detect_utc_offset_hours(honest, now) == 0
 
 
 class TestRetrainKeepsBrokerClock:

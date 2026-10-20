@@ -29,12 +29,21 @@ _CONTEMPORANEOUS_H = 36.0
 
 
 def detect_utc_offset_hours(candle_time: datetime, now: datetime | None = None) -> int:
-    """Desfase en horas entre el sello de la vela (interpretado como su propio
-    reloj) y UTC verdadero. 0 cuando no aplica (sin tz o no contemporánea).
+    """Desfase en horas entre el sello de la vela (reloj del broker) y UTC real.
 
-    El sello se asume YA normalizado a UTC por el llamador: si el feed miente
-    (hora broker con "Z"), el desfase detectado es la mentira a corregir; si
-    el feed es honesto (UTC o tz correcta), el desfase es ~0.
+    ARITMÉTICA DE HORAS (fix 2026-10-20, CRÍTICO): el método anterior
+    (punto medio de la vela + `round`) dependía del MINUTO de la hora:
+    `round((midpoint − now)/3600)` daba 2 a las 11:59, 3 a las 12:00 y 4 a
+    las 12:01 ⇒ el desfase fluctuaba ±1 h y TODA la medición de skill se
+    desgaraba (medido: la skill del LLM saltaba de 69,6 % a 10,0 % con las
+    MISMAS llamadas, según el minuto en que corriera la medición).
+
+    Ahora: la vela formándose está sellada en `floor(hora real) + desfase`
+    ⇒ `desfase = sello − floor(hora real)`, en horas enteras. El minuto no
+    entra: el resultado es estable en toda la hora.
+
+    Devuelve 0 cuando el sello no es comparable (sin tz, o demasiado lejos
+    en el tiempo para que la vela sea la formándose).
     """
     if candle_time.tzinfo is None:
         return 0
@@ -43,11 +52,12 @@ def detect_utc_offset_hours(candle_time: datetime, now: datetime | None = None) 
     elif now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
 
-    midpoint = candle_time + timedelta(minutes=30)
-    delta_h = (midpoint - now).total_seconds() / 3600.0
+    # floor a la hora UTC real (la vela formándose cubre la hora en curso)
+    now_hour = now.replace(minute=0, second=0, microsecond=0)
+    delta_h = (candle_time - now_hour).total_seconds() / 3600.0
     if abs(delta_h) > _CONTEMPORANEOUS_H:
         return 0
-    return round(delta_h)
+    return int(round(delta_h))
 
 
 def utc_hour_from_candle(candle_time: datetime, now: datetime | None = None) -> int:
