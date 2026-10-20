@@ -27,6 +27,8 @@ _bg_tasks: set[asyncio.Task] = set()
 
 async def _mcp_health_loop():
     was_connected = None
+    fallos_consecutivos = 0
+    alerta_caida_emitida = False
     while True:
         try:
             async with httpx.AsyncClient(timeout=5.0) as c:
@@ -41,11 +43,52 @@ async def _mcp_health_loop():
             _mcp_status["connected"] = False
             _mcp_status["detail"] = str(exc)
 
+        if connected:
+            fallos_consecutivos = 0
+        else:
+            fallos_consecutivos += 1
+
         if connected != was_connected:
             if connected:
                 logger.warning("[MCP-HEALTH] MT5 CONNECTED — %s", _mcp_status["detail"])
             else:
                 logger.error("[MCP-HEALTH] MT5 DISCONNECTED — %s", _mcp_status["detail"])
+            # T-31.9 (2026-10-20): la caída del servidor MT5 (el terminal que
+            # hospeda el EA y el MCP) era un log invisible para el operador:
+            # el sistema queda en HOLD (fail-safe) y se recupera solo, pero
+            # nadie se enteraba de que la operativa estaba en pausa. Ahora
+            # hay UNA alerta clara (caída) y otra al volver.
+            # En un ARRANQUE en frío con el MT5 ya caído no se avisa al
+            # primer chequeo (puede ser un arranque normal): se avisa tras 3
+            # comprobaciones seguidas sin respuesta (90 s).
+            avisar_caida = (not connected) and (
+                was_connected is True or (was_connected is None and fallos_consecutivos >= 3)
+            )
+            if avisar_caida and not alerta_caida_emitida:
+                alerta_caida_emitida = True
+                try:
+                    from services.alerting import AlertLevel, send_alert
+                    send_alert(
+                        AlertLevel.ERROR, "mcp_health",
+                        "Servidor MT5 SIN RESPUESTA — operativa en pausa por "
+                        "seguridad (HOLD, sin nuevas entradas). Es el terminal "
+                        "que hospeda el EA y el MCP: hay que relanzarlo. El "
+                        "backend sigue vivo y reanuda solo cuando vuelva.",
+                        context={"url": settings.mt5_http_url,
+                                 "detail": str(_mcp_status["detail"])[:200]},
+                    )
+                except Exception as exc:  # noqa: BLE001 — la alerta nunca tumba el bucle
+                    logger.warning("[MCP-HEALTH] no se pudo emitir la alerta: %s", exc)
+            if connected and was_connected is False:
+                try:
+                    from services.alerting import AlertLevel, send_alert
+                    send_alert(
+                        AlertLevel.WARNING, "mcp_health",
+                        "Servidor MT5 CONECTADO de nuevo — la operativa se reanuda "
+                        f"({_mcp_status['detail']})",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[MCP-HEALTH] no se pudo emitir la alerta: %s", exc)
             was_connected = connected
 
         await asyncio.sleep(30)
@@ -87,6 +130,19 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("[RISK-STATE] No se pudo leer equity para el baseline: %s", exc)
         boot_equity = None
+    # T-31.9 (2026-10-20): el desfase del bróker se detecta ANTES de
+    # inicializar el estado de riesgo ⇒ la clave del día de la cuenta es
+    # desde el primer arranque el DÍA DEL BRÓKER (21:00–21:00 UTC con el
+    # desfase de +3 h), no el día civil UTC. Sin esto, el primer arranque
+    # tras un reinicio sembraría el baseline con una clave de día distinta
+    # y el límite diario de pérdida se reiniciaría fuera de sitio.
+    try:
+        from services.timebase import broker_offset_hours
+        off = await broker_offset_hours("EURUSD")
+        logger.info("[TIMEBASE] Desfase del bróquer detectado al arrancar: %+d h", off)
+    except Exception as exc:
+        logger.warning("[TIMEBASE] No se pudo detectar el desfase del bróquer: %s", exc)
+
     try:
         await init_risk_state(boot_equity)
     except RuntimeError as exc:

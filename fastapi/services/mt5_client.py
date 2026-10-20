@@ -95,6 +95,14 @@ async def get_candles_with_offset(symbol: str, timeframe: str, count: int):
         return dt.datetime.fromisoformat(str(t).replace("Z", "+00:00")).timestamp()
 
     offset_h = broker_offset_hours_from_candles(raw)
+    # El desfase detectado se publica en la base de tiempos canónica: los
+    # consumidores SINCRÓNICOS (guardián de riesgo → día del bróquer) lo
+    # necesitan sin poder esperar a una llamada de red.
+    try:
+        from services.timebase import set_broker_offset
+        set_broker_offset(offset_h, source="velas_h1")
+    except Exception:  # noqa: BLE001 — el desfase nunca tumba una operación
+        pass
     candles = sorted(
         (
             {
@@ -141,6 +149,11 @@ def normalize_candles(candles: list) -> list[dict]:
         return int(datetime.fromisoformat(str(t).replace("Z", "+00:00")).timestamp())
 
     offset_h = broker_offset_hours_from_candles(candles)
+    try:
+        from services.timebase import set_broker_offset
+        set_broker_offset(offset_h, source="normalize_candles")
+    except Exception:  # noqa: BLE001 — el desfase nunca tumba una operación
+        pass
     if offset_h:
         logger.warning(
             "[MT5] Sello de velas con desfase broker→UTC de %+d h → normalizado a UTC real",

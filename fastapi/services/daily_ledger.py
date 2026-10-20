@@ -53,15 +53,38 @@ async def build_daily_entry(symbol: str = "EURUSD") -> dict:
         equity = None
 
     # trades del día + descomposición dirección correcta/incorrecta
+    #
+    # T-31.9 (2026-10-20): `exit_time` viene en el RELOJ DEL BRÓKER (medido:
+    # un deal cerrado a las 17:25 del bróquer = 14:25 UTC). El corte del día
+    # se hacía contra la medianoche UTC sin convertir ⇒ la línea del día
+    # incluía hasta 3 h del día anterior y excluía las 3 primeras del
+    # actual. Aquí se convierte la marca al UTC real y se corta por el día
+    # UTC (declarado en la línea: `day_basis`), que es el día del informe.
+    try:
+        from services.timebase import broker_offset_hours, utc_day_bounds
+        # detección propia (endpoint de precio del servidor): el registro
+        # NO depende de que otro módulo haya refrescado la caché.
+        broker_off = await broker_offset_hours(symbol)
+        day_start = utc_day_bounds(now)[0]
+    except Exception:  # noqa: BLE001
+        try:
+            from services.timebase import current_broker_offset, utc_day_bounds
+            broker_off = current_broker_offset()
+            day_start = utc_day_bounds(now)[0]
+        except Exception:  # noqa: BLE001
+            broker_off = 0
+            day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     trades = await pool.fetch(
         """
         SELECT entry_time, exit_time, direction, pnl, exit_reason
         FROM trade_outcomes
-        WHERE symbol = $1 AND exit_time >= $2
+        WHERE symbol = $1
+          AND (exit_time - make_interval(hours => $3::int)) >= $2
         ORDER BY exit_time
         """,
         symbol,
-        now.replace(hour=0, minute=0, second=0, microsecond=0),
+        day_start,
+        broker_off,
     )
     correct = wrong = 0
     pnl_correct = pnl_wrong = 0.0
@@ -111,6 +134,11 @@ async def build_daily_entry(symbol: str = "EURUSD") -> dict:
     return {
         "ts": now.isoformat(),
         "symbol": symbol,
+        # T-31.9: el día del informe es el día UTC real y las marcas de los
+        # deals vienen del reloj del bróquer ⇒ se declara el desfase usado
+        # para convertirlas (auditable, sin ambigüedad).
+        "day_basis": "utc",
+        "broker_offset_h": broker_off,
         "equity_eur": equity,
         "trades_today": len(trades),
         "pnl_today_eur": round(sum(float(t["pnl"]) for t in trades), 2),

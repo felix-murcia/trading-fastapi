@@ -2234,6 +2234,13 @@ async def trade_filled_webhook(req: TradeFilledRequest, _: None = Depends(verify
     """
     Webhook que el MT5 EA llama cuando una orden se cierra.
     Registra el trade y dispara auto-retrain si corresponde.
+
+    DOMINIO DE LAS MARCAS (T-31.9, 2026-10-20): `entry_time` y `exit_time`
+    llegan del EA en el **reloj del BRÓKER** (medido: el `mt5_time` del EA va
+    +3 h respecto al `created_at` de la auditoría, que es UTC real). Se
+    guardan TAL CUAL (la marca en bruto, sin(false) convertir) y quien las
+    agrupe por día o las compare con velas debe convertirlas primero
+    (`services.timebase.broker_stamp_to_utc` / `to_utc`).
     """
     from services.auto_retrain import _parse_timestamp
     entry_ts = _parse_timestamp(req.entry_time)

@@ -2690,3 +2690,33 @@ Tras el informe de viabilidad, **ejecutadas** las dos acciones (orden de Félix:
   *Por qué:* el edge es **fino** (ratio 1,23:1) y **no está validado fuera de muestra** (el holdout del bundle vivo da −0,53 €/operación); una operación puede perder −22,30 € (4,4 % del capital) y hubo una racha de 11 pérdidas con un drawdown del 30,2 % (154,75 €) sobre 504 €. **Bajar el tamaño NO mejora el ratio** (el drawdown % es una propiedad de la secuencia, no del tamaño: medido, 57,7 % en todos los escenarios) ⇒ lo que se protege es el **capital en euros**. Reversible en un segundo al validarse la evidencia.
   *Medido y descartado:* el riesgo adaptativo (½ cuando el acierto propio reciente < 50 %) NO reduce el drawdown % (se activaría en el 18 % de las operaciones, justo en los tramos malos, pero el ratio no cambia) ⇒ se descarta por ahora; y el filtro de "si no hay tendencia, no entres" **destruye el sistema** (−304 € sobre las 187 operaciones reales: bloquearía el 85 % y perdería +451,65 € de aciertos para evitar −147,55 € de fallos) ⇒ **el sistema NO es un sistema de tendencia** (acertó el 62 % la semana pasada), y por eso mi alarma de "el edge se apagaba" era una alarma falsa construida sobre la vara equivocada.
 - **Suite: 1126 passed + 2 xfailed.**
+
+### Evidencia 2026-10-20 (T-31.9 · ALINEACIÓN TEMPORAL — auditoría completa de relojes)
+
+Orden de Félix: *«revisa que todos los timeframes estén alineados (EA, sistema, aplicación, MT5, broker, etc). Es fundamental que todas las franjas horarias y UTCs estén alineados. Es lo más básico y fundamental; si eso no está bien no estamos haciendo nada»*.
+
+**Medido (no supuesto) — sonda en vivo contra el feed real:**
+
+| Reloj / franja | Desfase vs UTC real | Veredicto |
+|---|---|---|
+| Host (NTP, referencia) | — | referencia |
+| Contenedor (backend) | **+0,00 s** | ✓ alineado |
+| Postgres (`now() AT TIME ZONE UTC`) | **+0,08 s** | ✓ alineado |
+| Servidor MT5 (bróquer) | **+3,00 h** | reloj del bróquer (cambiará a +2 h el 25-10) |
+| EA (`mt5_time` − `created_at`) | **+3,00 h** (mediana de 200 ciclos) | ✓ coherente con el bróquer |
+| Desfase por el reloj del servidor **vs** por la vela en formación | **+3 h / +3 h** | ✓ coinciden (dos vías independientes) |
+| Rejilla H1 (minutos de todas las velas) | **0** | ✓ en punto de hora |
+| Vela más reciente | **16:00 UTC** = la hora en curso | ✓ es la vela en formación |
+| **Etiqueta de sesión que ve el LLM** | **16 (Nueva York)** = hora UTC real | ✓ |
+| Instantes de sondeo del EA | :00/:05/…/:55 del **UTC real** | ✓ (el desfase son horas enteras ⇒ las dos rejillas coinciden) |
+| H4 / D1 | 21:00, 01:00, 05:00… / 21:00 UTC | rejilla del **bróquer** (su día abre a las 21:00 UTC) |
+
+**Defectos encontrados y corregidos (2):**
+1. **El día del riesgo no era el día de la cuenta.** El límite diario de pérdida se reiniciaba a la medianoche **UTC**, 3 h antes de que terminara el día del bróquer (el día del extracto). Ahora la clave del día de la cuenta es el **día del bróquer** (`services/timebase.broker_today`; `risk_guardian._utc_today`, `risk_state_store`). Con el cambio de horario del 25-10 el desfase se recalcula solo (22:00–22:00 UTC).
+2. **El registro diario agrupaba marcas de dos dominios.** `exit_time` viene en el reloj del bróquer y se cortaba contra la medianoche UTC sin convertir ⇒ la línea del día se comía hasta 3 h del día anterior. Ahora convierte al UTC real antes de agrupar y **declara el dominio** en la línea (`day_basis: "utc"`, `broker_offset_h: 3`).
+
+**Lo que ya estaba bien (verificado, no supuesto):** la etiqueta de sesión, la rejilla horaria, el desfase detectado por dos vías, la medición canónica (`services/measurement` + `qwen_authority` + `ledger` + `cross_audit`: convierten los dos lados), y el emparejamiento del retrain (velas y outcomes **en el mismo reloj del bróquer** ⇒ el reward del PPO no se contamina).
+
+**Red de regresión:** `fastapi/tests/test_timebase_alignment.py` — 25 pruebas que fijan: desfase entero e independiente del minuto, coincidencia de las dos vías, día del bróquer (con +3 h y con el +2 h del 25-10), rollover a la medianoche del bróquer, corte del registro, etiqueta de sesión (incluido con el feed retrasado), rejillas H1/H4/D1 y **prohibición estructural de dejar un desfase fijo a mano en el código**. Suite completa: **1151 passed + 2 xfailed**.
+
+**Incidente y resistencia (20-10, 16:36–16:47):** el servidor MT5 (el terminal que hospeda el EA y el MCP) dejó de responder (500 y luego puerto cerrado). Comportamiento medido del backend: **`/predict` devolvió HOLD en 3,0 s** (fail-safe: sin entradas nuevas), el estado de riesgo quedó intacto (día de la cuenta `2026-10-20`, baseline 476,10 €) y el sistema **se recuperó solo** cuando el terminal volvió (16:47), con los ciclos del EA rep resumes a las 16:45 y 16:50. Dos mejoras de robustez nacidas de ese incidente: (1) la caída del MT5 **ahora avisa** con un mensaje claro («operativa en pausa por seguridad… hay que relanzar el terminal») en vez de quedar en un log invisible; (2) la auditoría cruzada **distingue "el MT5 está caído" de "hay discrepancias"** (`verdict: "SIN DATOS (servidor MT5 caído)"`, 0 discrepancias) en vez de reportar 5-6 errores con una sola causa raíz. Durante la caída se detectó además un **bug propio** (el check de latencia usaba un `pool` inexistente ⇒ siempre "error"): corregido y verificado (`latencia_ciclos: ok`).

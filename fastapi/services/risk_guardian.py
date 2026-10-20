@@ -33,7 +33,23 @@ logger = logging.getLogger(__name__)
 
 
 def _utc_today() -> date:
-    return datetime.now(timezone.utc).date()
+    """DÍA DE LA CUENTA = día del BRÓKER (T-31.9, 2026-10-20).
+
+    Antes se usaba el día civil UTC. Medido: el día del bróquer (y el del
+    extracto de cuenta) empieza a las 21:00 UTC con el desfase actual de
+    +3 h ⇒ el límite de pérdida diaria se reiniciaba 3 h ANTES de que
+    terminara el día del bróquer (y tras el cambio de horario del 25-10,
+    4 h). El estado de cuenta y su extracto miden el día del bróquer ⇒ el
+    corte diario debe seguirlo.
+
+    Degradación: si el desfase aún no se ha detectado (MCP caído al
+    arrancar), cae al día UTC (comportamiento histórico) — nunca rompe.
+    """
+    try:
+        from services.timebase import broker_today
+        return broker_today()
+    except Exception:  # noqa: BLE001
+        return datetime.now(timezone.utc).date()
 
 
 @dataclass

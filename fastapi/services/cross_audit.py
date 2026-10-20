@@ -34,10 +34,33 @@ TOL_PSI = 0.05             # 0,05 de PSI
 TOL_ACC = 0.01             # 1 punto de acierto del benchmark
 
 
+async def _mt5_alive() -> bool:
+    """¿Contesta el servidor MT5? (1 llamada corta, sin estados)."""
+    try:
+        import httpx
+        from config import settings
+        async with httpx.AsyncClient(timeout=5.0) as c:
+            r = await c.get(f"{settings.mt5_http_url}/api/v1/account/info")
+            return r.status_code == 200
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _status_error(mt5_alive: bool) -> str:
+    """Estado de un check que falló: sin datos del MT5 o error real."""
+    return "error" if mt5_alive else "sin_datos_mt5"
+
+
 async def run_cross_audit(symbol: str = "EURUSD") -> dict:
     """Recomputa y compara. Devuelve el veredicto (nunca lanza)."""
     checks: list = []
     ts = dt.datetime.now(dt.timezone.utc).isoformat()
+
+    # T-31.9 (2026-10-20): si el servidor MT5 no responde, los checks que
+    # dependen de él no se pueden recalcular. Se distingue de una
+    # discrepancia real (que sería un fallo del SISTEMA) ⇒ estado
+    # "sin_datos_mt5" (la causa raíz se declara una vez, no seis).
+    mt5_alive = await _mt5_alive()
 
     # ── 1) skill/autoridad del LLM (recomputada desde cero) ────────────────
     try:
@@ -62,7 +85,8 @@ async def run_cross_audit(symbol: str = "EURUSD") -> dict:
                 "n_recomputed": recomputed.get("n"), "n_published": published.get("n"),
             })
     except Exception as exc:  # noqa: BLE001
-        checks.append({"check": "llm_skill", "status": "error", "error": f"{type(exc).__name__}: {exc}"})
+        checks.append({"check": "llm_skill", "status": _status_error(mt5_alive),
+                       "error": f"{type(exc).__name__}: {exc}"})
 
     # ── 2) track record vivo del sistema ───────────────────────────────────
     try:
@@ -112,7 +136,7 @@ async def run_cross_audit(symbol: str = "EURUSD") -> dict:
         else:
             checks.append({"check": "drift_psi", "status": "sin_datos"})
     except Exception as exc:  # noqa: BLE001
-        checks.append({"check": "drift_psi", "status": "error", "error": str(exc)})
+        checks.append({"check": "drift_psi", "status": _status_error(mt5_alive), "error": str(exc)})
 
     # ── 4) benchmark (muestra de la serie viva, con la definición canónica) ─
     try:
@@ -158,7 +182,7 @@ async def run_cross_audit(symbol: str = "EURUSD") -> dict:
         else:
             checks.append({"check": "benchmark_sma200", "status": "sin_datos"})
     except Exception as exc:  # noqa: BLE001
-        checks.append({"check": "benchmark_sma200", "status": "error", "error": str(exc)})
+        checks.append({"check": "benchmark_sma200", "status": _status_error(mt5_alive), "error": str(exc)})
 
     # ── 5) EDGE VIVO del par (G2/mapa de edge) ──────────────────────────
     # Orden Félix 2026-10-20: «cada par tiene su propia idiosincrasia» ⇒ el
@@ -171,7 +195,8 @@ async def run_cross_audit(symbol: str = "EURUSD") -> dict:
         emap = await _edge_decay_map()
         for sym, v in (emap or {}).items():
             if "error" in v:
-                checks.append({"check": f"edge_vivo_{sym}", "status": "error",
+                checks.append({"check": f"edge_vivo_{sym}",
+                               "status": _status_error(mt5_alive),
                                "error": v["error"]})
                 continue
             w = v.get("windows", {})
@@ -199,6 +224,8 @@ async def run_cross_audit(symbol: str = "EURUSD") -> dict:
     # Lo que sí hay que vigilar es la COLA: si el p95 se acerca al
     # presupuesto del EA, el ciclo se pierde (no se pierde la decisión).
     try:
+        from db.connection import get_pool
+        pool = get_pool()
         lat = await pool.fetch(
             """
             SELECT (data->'data'->>'latency_ms')::float AS l
@@ -225,6 +252,29 @@ async def run_cross_audit(symbol: str = "EURUSD") -> dict:
         checks.append({"check": "latencia_ciclos", "status": "error", "error": str(exc)})
 
     discrepancias = [c for c in checks if c.get("status") in ("discrepancia", "error")]
+
+    # T-31.9 (2026-10-20): si el servidor MT5 está caído, TODOS los checks
+    # que dependen de él fallan por la MISMA causa ⇒ no son seis fallos del
+    # sistema, sino uno solo (y el mensaje de alerta decía "6 discrepancias"
+    # sin decir por qué). Se declara la causa raíz y se separa: el veredicto
+    # es "SIN DATOS (MT5 CAÍDO)", no "DISCREPANCIA".
+    mt5_caido = [c for c in checks if c.get("status") == "sin_datos_mt5"]
+    if mt5_caido and not discrepancias:
+        veredicto = {
+            "generated_at": ts,
+            "checks": checks,
+            "n_discrepancias": 0,
+            "verdict": "SIN DATOS (servidor MT5 caído — el sistema está en "
+                       "HOLD por seguridad; no es una discrepancia)",
+            "caja_negra": "servidor MT5 sin respuesta",
+        }
+        logger.warning(
+            "[CROSS-AUDIT] SIN DATOS: el servidor MT5 no responde ⇒ %d check(s) "
+            "dependientes no se pueden recalcular (no son discrepancias).",
+            len(mt5_caido),
+        )
+        return veredicto
+
     veredicto = {
         "generated_at": ts,
         "checks": checks,

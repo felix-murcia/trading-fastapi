@@ -17,6 +17,14 @@ from services import cross_audit
 
 
 class TestCrossAudit:
+    @pytest.fixture(autouse=True)
+    def _mt5_alive(self):
+        """El escenario por defecto es "el servidor MT5 responde" ⇒ los
+        checks no dependen de que el MCP esté vivo en el entorno de pruebas
+        (determinismo). El escenario "MT5 caído" tiene su propio test."""
+        with patch.object(cross_audit, "_mt5_alive", AsyncMock(return_value=True)):
+            yield
+
     @pytest.mark.asyncio
     async def test_reports_all_four_checks(self):
         with patch.object(cross_audit, "_cross_audit_loop", new=AsyncMock()):
@@ -25,6 +33,30 @@ class TestCrossAudit:
         assert {"llm_skill", "live_track_record", "drift_psi", "benchmark_sma200"} <= names
         assert v["verdict"] in ("COHERENTE", "DISCREPANCIA")
         assert "generated_at" in v
+
+    @pytest.mark.asyncio
+    async def test_mt5_caido_no_es_discrepancia(self):
+        """T-31.9: con el servidor MT5 caído, los checks que dependen de él
+        se declaran "sin_datos_mt5" y el veredicto NO es "DISCREPANCIA"
+        (serían 5-6 fallos con una sola causa raíz: el servidor caído)."""
+        pool = AsyncMock()
+        pool.fetch = AsyncMock(return_value=[])
+        with patch.object(cross_audit, "_mt5_alive", AsyncMock(return_value=False)), \
+             patch("services.ledger._live_track_record", AsyncMock(return_value={
+                 "trades": 3, "pnl_eur": 5.0, "expectancy_eur": 1.6})), \
+             patch("services.ledger._edge_decay_map", AsyncMock(return_value={})), \
+             patch("db.connection.get_pool", return_value=pool):
+            v = await cross_audit.run_cross_audit("EURUSD")
+        # los checks que SÍ necesitan las velas del bróker se declaran
+        # "sin_datos_mt5" (no "error"): la causa raíz se declara una vez.
+        for c in v["checks"]:
+            if c["check"] in ("drift_psi", "benchmark_sma200"):
+                assert c["status"] == "sin_datos_mt5", c
+            if c["check"] == "llm_skill":
+                assert c["status"] != "error", c
+        assert v["verdict"].startswith("SIN DATOS")
+        assert v["n_discrepancias"] == 0
+        assert "MT5" in v["verdict"]
 
     @pytest.mark.asyncio
     async def test_skill_discrepancy_is_flagged(self):

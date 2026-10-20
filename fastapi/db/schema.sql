@@ -59,6 +59,14 @@ CREATE TABLE IF NOT EXISTS risk_pair_state (
 );
 
 -- Trade outcomes para auto-retrain y métricas
+--
+-- DOMINIO DE LAS MARCAS (T-31.9, 2026-10-20): `entry_time` y `exit_time`
+-- se guardan en el RELOJ DEL BRÓKER (el EA reporta TimeCurrent / el tiempo
+-- del deal; medido +3 h respecto al UTC real, +2 h tras el cambio de
+-- horario del 25-10-2026). Se guarda la marca EN BRUTO (sin false
+-- convertir) ⇒ quien agrupe por día o las compare con velas debe
+-- convertirla antes (services.timebase). `created_at` sí es UTC real
+-- (NOW() de Postgres).
 CREATE TABLE IF NOT EXISTS trade_outcomes (
     id           BIGSERIAL PRIMARY KEY,
     symbol       TEXT NOT NULL,

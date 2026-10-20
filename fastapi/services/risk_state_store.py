@@ -52,7 +52,15 @@ async def init_risk_state(current_equity: float | None) -> None:
     Los guardianes deben estar YA creados (lifespan los crea antes de llamar).
     """
     pool = get_pool()
-    today = datetime.now(timezone.utc).date()
+    # T-31.9 (2026-10-20): la clave del día es el DÍA DEL BRÓKER (el día del
+    # extracto de cuenta), no el día civil UTC — ver risk_guardian._utc_today.
+    # Así el corte diario del riesgo y el del bróquer coinciden (antes el
+    # límite diario se reiniciaba 3 h antes de que acabara el día del bróker).
+    try:
+        from services.timebase import broker_today
+        today = broker_today()
+    except Exception:  # noqa: BLE001 — degrada al día UTC, nunca rompe
+        today = datetime.now(timezone.utc).date()
     row = await pool.fetchrow(
         "SELECT day, daily_start_equity, peak_equity FROM risk_account_state WHERE id = 1"
     )
