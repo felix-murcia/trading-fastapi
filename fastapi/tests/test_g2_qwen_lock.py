@@ -254,7 +254,13 @@ class TestQwenQueueMetric:
         await asyncio.sleep(0.06)
         qwen_client.QWEN_LOCK.release()
 
-        with caplog.at_level(logging.WARNING, logger="services.qwen_client"):
+        # BUG CORREGIDO (2026-10-20): la llamada HTTP va MOCKEADA. Antes este
+        # test pegaba al LLM REAL (100.90.16.33:8080): tardaba 22-27 s, gastaba
+        # el modelo y FALLABA siempre que el LLM no estuviera (CI, red caída,
+        # LLM ocupado) ⇒ la suite no era hermética. Su hermano
+        # `test_queue_wait_logged` ya mockeaba; aquí faltaba.
+        with caplog.at_level(logging.WARNING, logger="services.qwen_client"), \
+             patch("httpx.AsyncClient", client):
             result = await task
         assert result["ok"] is True
         assert any(

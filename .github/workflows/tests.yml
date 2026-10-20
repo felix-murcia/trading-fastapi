@@ -1,0 +1,33 @@
+name: tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    name: suite (pytest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: fastapi/requirements.txt
+
+      - name: Instalar dependencias
+        run: pip install -r fastapi/requirements.txt
+
+      # La suite es HERMÉTICA: sin .env, sin Postgres y sin MT5 (todo
+      # mockeado en tests/conftest.py). Verificado en un contenedor limpio
+      # el 2026-10-20: 1152 passed + 2 xfailed en 52 s.
+      - name: Suite completa
+        working-directory: fastapi
+        run: pytest tests/ -q

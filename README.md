@@ -2,6 +2,27 @@
 
 Sistema de trading automatizado que conecta Expert Advisors (MQL5) con MetaTrader 5 a través de FastAPI, utilizando **Machine Learning (PPO)** y **LLM (Qwen)** para decisiones de trading.
 
+![Tests](https://github.com/felix-murcia/trading-fastapi/actions/workflows/tests.yml/badge.svg)
+![Stars](https://img.shields.io/github/stars/felix-murcia/trading-fastapi?style=social)
+![Forks](https://img.shields.io/github/forks/felix-murcia/trading-fastapi?style=social)
+![Issues](https://img.shields.io/github/issues/felix-murcia/trading-fastapi)
+![Contributors](https://img.shields.io/github/contributors/felix-murcia/trading-fastapi)
+![Last commit](https://img.shields.io/github/last-commit/felix-murcia/trading-fastapi)
+
+![Python](https://img.shields.io/badge/python-3.12-blue?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/fastapi-0.115.5-009688?logo=fastapi&logoColor=white)
+![Pydantic](https://img.shields.io/badge/pydantic-2.10.3-920FA2?logo=pydantic&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/postgresql-16-4169E1?logo=postgresql&logoColor=white)
+![Docker](https://img.shields.io/badge/docker-2496ED?logo=docker&logoColor=white)
+![PyTorch](https://img.shields.io/badge/pytorch-2.3.0-EE4C2C?logo=pytorch&logoColor=white)
+![Gymnasium](https://img.shields.io/badge/gymnasium-0.29.1-3C3E3C)
+![Stable-Baselines3](https://img.shields.io/badge/stable--baselines3-2.3.2-3C3E3C)
+![MetaTrader 5](https://img.shields.io/badge/MetaTrader%205-37A162)
+![Qwen](https://img.shields.io/badge/Qwen3-8B-775DD6?logo=qwen&logoColor=white)
+
+> **Estado verificado (2026-10-20):** suite **1152 tests + 2 xfailed**, ejecutada en un contenedor limpio **sin `.env`, sin PostgreSQL y sin MT5** (todo mockeado) ⇒ el badge de CI refleja una suite hermética, no un entorno de desarrollo.
+> **Aviso:** este sistema opera dinero real. Las cifras de rendimiento que se publican en este README son **medidas**, no promesas: cada una lleva su `n`, su intervalo de confianza y su fecha. Sin muestra madura, no hay afirmación (ver «Registro de evidencia» más abajo).
+
 ## Fase 1 — Observable Contract (Webhook)
 - `TradeFilledRequest` extendido con `deal_ticket` y `position_id` (observable deal tracking).
 - El EA debe registrar siempre: cierre detectado, deal de apertura, payload enviado, HTTP recibido, confirmación DB.
