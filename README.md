@@ -21,6 +21,7 @@ Sistema de trading automatizado que conecta Expert Advisors (MQL5) con MetaTrade
 ![Qwen](https://img.shields.io/badge/Qwen3-8B-775DD6?logo=qwen&logoColor=white)
 
 > **Estado verificado (2026-10-20):** suite **1152 tests + 2 xfailed**, ejecutada en un contenedor limpio **sin `.env`, sin PostgreSQL y sin MT5** (todo mockeado) ⇒ el badge de CI refleja una suite hermética, no un entorno de desarrollo.
+> **Evidencia del badge de CI:** run `39462949463` (2026-10-20 17:05 UTC, commit `b242760`) ⇒ `1152 passed, 2 xfailed in 35.37s` — verde real, comprobado en GitHub Actions, no una etiqueta puesta a mano.
 > **Aviso:** este sistema opera dinero real. Las cifras de rendimiento que se publican en este README son **medidas**, no promesas: cada una lleva su `n`, su intervalo de confianza y su fecha. Sin muestra madura, no hay afirmación (ver «Registro de evidencia» más abajo).
 
 ## Fase 1 — Observable Contract (Webhook)
