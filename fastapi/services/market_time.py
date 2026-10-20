@@ -52,9 +52,22 @@ def detect_utc_offset_hours(candle_time: datetime, now: datetime | None = None) 
     elif now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
 
-    # floor a la hora UTC real (la vela formándose cubre la hora en curso)
+    # ARITMÉTICA DE HORAS (fix 2026-10-20, CRÍTICO): el método anterior
+    # (punto medio de la vela + `round`) dependía del MINUTO de la hora:
+    # `round((midpoint − now)/3600)` daba 2 a las 11:59, 3 a las 12:00 y 4 a
+    # las 12:01 ⇒ el desfase fluctuaba ±1 h y TODA la medición de skill se
+    # desgaraba (medido: la skill del LLM saltaba de 69,6 % a 10,0 % con las
+    # MISMAS llamadas, según el minuto en que corriera la medición).
+    #
+    # Ahora se floorizan LOS DOS (el sello de la vela y el instante real) a
+    # la hora ⇒ el resultado NO depende del minuto, y funciona tanto con el
+    # feed real (el sello de la vela formándose es floor(hora real) + desfase)
+    # como con sellos que no caen exactamente en la hora.
     now_hour = now.replace(minute=0, second=0, microsecond=0)
-    delta_h = (candle_time - now_hour).total_seconds() / 3600.0
+    stamp_hour = candle_time.astimezone(timezone.utc).replace(
+        minute=0, second=0, microsecond=0
+    )
+    delta_h = (stamp_hour - now_hour).total_seconds() / 3600.0
     if abs(delta_h) > _CONTEMPORANEOUS_H:
         return 0
     return int(round(delta_h))

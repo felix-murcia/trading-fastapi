@@ -1849,6 +1849,25 @@ async def force_retrain_endpoint(
     return {"status": result["status"], "filled_count": state.filled_count, "in_progress": state.retrain_in_progress}
 
 
+@router.get("/ledger")
+async def ledger_endpoint(symbol: Optional[str] = Query(default=None)):
+    """LEDGER DE FIABILIDAD (L4) — el estado del mundo con la vara correcta.
+
+    Por cada fuente: métricas de TRADING OOS (la vara que decide), track
+    record vivo, skill de clasificación (diagnóstico) con n y CI, y su
+    ADMISIÓN con el motivo. Sin token: es un informe de estado, no un
+    disparador (no muta nada).
+
+    Orden Félix 2026-10-19/20: «lo no medido no tiene poder» y «nada que
+    quede al azar» ⇒ aquí se ve, con números, qué sabe el sistema de cada
+    fuente y quién tiene derecho a decidir.
+    """
+    from services.ledger import build_ledger
+
+    sym = (symbol or _TRAINING_SYMBOL).upper()
+    return await build_ledger(sym)
+
+
 @router.post("/retrain/promote-candidate")
 async def promote_candidate_endpoint(
     exp_id: int = Query(...),

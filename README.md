@@ -2617,3 +2617,15 @@ Relación **INVERSA**: con un gate armado ≥0.7 esa semana se habrían bloquead
   | Regla de estructura (E1b) | −5,450 | −0,226 € | 96 | 3,45 % | no es tradable |
 
 - **Estado del sistema:** sano, bundle vivo `4cd9abb6`, equity ~502,7 €, +21,80 € hoy (3 trades) y una posición abierta con +5,81 €. La autoridad del veto está **REVOCADA por falta de muestra madura** (n=0 evaluable, no por mala skill) ⇒ el veto direccional está inerte hasta que la evidencia del LLM madure.
+
+### Evidencia 2026-10-20 (L4 · LEDGER de fiabilidad + corrección de cifras + el límite统计ístico del gate)
+
+- **LEDGER publicado** (`GET /api/v1/ai/ledger`, `services/ledger.py`): por cada fuente, las **métricas de trading OOS** (la vara que decide), el **track record vivo**, la skill de clasificación (diagnóstico, con n y CI) y su **admisión con motivo**. Con la **regla de admisión pre-registrada**: un challenger necesita expectancy OOS > la del sistema vigente (**+1,81 €/trade**), maxDD ≤ 10 %, ops ≤ 40 por holdout y n ≥ 30 trades. El ledger **no muta nada** (es un informe de estado).
+- **Corrección de cifras (error mío, verificado contra logs y mtimes):** había cruzado exp39 y exp40. La verdad:
+  | Experimento | Holdout OOS | Expectancy | Trades | DD | Estado |
+  |---|---|---|---|---|---|
+  | **exp39 (v1) — el bundle VIVO** | **−1,863** | **−0,527 €** | 16 | 4,51 % | promovido (batió al bundle viejo: −39,857 / 137 ops / DD 42,9 %) |
+  | exp40 (v1, imagen vieja) | +1,965 | +0,895 € | 30 | 5,60 % | rechazado (1/4 folds) |
+  | exp41 (v3_edge) | −19,651 | −2,203 € | 100 | 24,96 % | rechazado |
+- **El edge del sistema, con la vara correcta (track record vivo, 2024→2026):** **186 trades · +336,31 € · expectancy +1,81 €/trade · win 51,1 %** (últimos 20: +2,73 €; últimos 80: +1,82 €; oct-2026: +1,52 €) ⇒ **el edge es real, estable y VIVO — y es de SISTEMA (dirección + momento + mecánica SL/TP + regla 3 € + churn + filtro de régimen), no del modelo**: el PPO no tiene edge de *dirección clasificada* (7-50 %) pero el sistema completo tiene +1,8 €/trade con 50 % de acierto y RR 1:2.
+- **LÍMITE REAL DEL GATE (a corregir/decidir):** el holdout congelado son 2 978 barras ⇒ 16-30 trades por candidato ⇒ **el walk-forward NO tiene potencia estadística para discriminar** (los tres candidatos están dentro del ruido). La evidencia que sí discrimina es el **track record vivo acumulado**. ⇒ De ahí la regla de admisión: un challenger se admite con **≥30 trades de evidencia viva** (o holdout ampliado), no con 16.
