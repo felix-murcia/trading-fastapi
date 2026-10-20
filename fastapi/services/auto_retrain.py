@@ -78,7 +78,11 @@ class RetrainConfig:
     # 500 a 30000 — con 481 velas los pliegues eran de 19 barras y el gate
     # decidía sobre ruido (promoción de las 03:14 del 30 sep).
     # ClassVar: atributo de CLASE (RetrainConfig se usa sin instanciar).
-    lookback_by_symbol: ClassVar[dict] = {"GBPUSD": 30000, "EURUSD": 30000}
+    lookback_by_symbol: ClassVar[dict] = {"GBPUSD": 30000, "EURUSD": 30000,
+                                          # G3 · U-1 (2026-10-20): USDCHF
+                                          # canario — el MCP tiene 30 000 H1
+                                          # (2021-12-23 → hoy, verificado).
+                                          "USDCHF": 30000}
     retrain_window_size: int = 20         # Window size del entorno
     initial_balance: float = 1000.0
     commission: float = 0.0              # comisión bróker €/lot/lado — O-2 (2026-10-01):

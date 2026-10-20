@@ -2781,3 +2781,32 @@ Al preguntar qué par implementar, se midió el mapa de edge de los 7 candidatos
 **Y el dato de Cordura que faltaba (por fin medido bien):** el **edge del sistema vivo NO viene de estas reglas triviales** ⇒ el acierto del 53 % y el PnL de +343,98 € son del **PPO + las reglas de negocio**, no de la «estructura». Por eso el filtro «si no hay tendencia, no entres» destruye el sistema (−304 €) y por eso el «decay del edge» no era una alarma.
 
 **Tests:** `tests/test_measurement_horizon.py` (nuevo, 6) fija el horizonte real (los tests son **discriminantes**: con la regla antigua dan −1 donde la correcta da +1 ⇒ fallan) y `tests/test_timebase_alignment.py` (+5) fija que ninguna serie vieja (H4/D1) pueda envenenar la caché del desfase ni descuadrar el día de la cuenta. Suite: **1163 passed + 2 xfailed**.
+
+---
+
+## 2026-10-20 (G3) · USDCHF COMO TERCER MUNDO — U-1 y U-2 (canario registrado + experimento pre-registrado)
+
+**Orden de Félix:** *«sí arranca USDCHF pero con cabeza. Es decir, antes de ponerte a implementar a lo loco, crea las tareas bien definidas en el backlog. Sigue las reglas de implementación del AGENTS.md»*.
+**Registro de tareas:** `doc/backlog-g3-usdchf-2026-10-20.md` (local) · enlazado desde `doc/backlog-auditoria-2026-10-02.md`.
+
+### U-1 · USDCHF registrado como canario APAGADO (sin lógica de trading nueva)
+- `config.pairs` += `{"symbol": "USDCHF", "enabled": False, "daily_loss_pct": 2.0, "equity_allocation_pct": 20}`.
+- `RetrainConfig.lookback_by_symbol["USDCHF"] = 30000` (el MCP tiene 30 000 H1: 2021-12-23 → hoy, verificado, 7 s de fetch).
+- **Listar NO habilita** (invariante G2-4). **Cero cambios en EURUSD** (A3): su bundle, su riesgo y su equity quedan intactos.
+- **Tests** (`tests/test_g3_usdchf_canary.py`, nuevo, 5): (1) USDCHF listado con `enabled=false` y sus límites; (2) EURUSD sigue habilitado y GBPUSD sigue apagado; (3) una petición de USDCHF ⇒ **HOLD con `pair_disabled` y sin tocar MT5 ni noticias** (fail-closed por worlds); (4) lookback = 30 000; (5) **no hay bundle de USDCHF** ⇒ aunque se habilite, no puede operar. Suite: **1168 passed + 2 xfailed**.
+
+### U-2 · EXPERIMENTO PRE-REGISTRADO (un solo retrain; los umbrales no se tocan)
+| Parámetro | Valor | Por qué |
+|---|---|---|
+| Símbolo | **USDCHF** | el único de los 7 con skill real medido: momentum 24 h **+7,1 pp** (n=481, IC 95 % [+2,6,+11,4], p=0,001 con 20 000 barajados) |
+| Lookback | 30 000 H1 (2021-12-23 → hoy) | historia suficiente en el MCP |
+| Reward | **v1** (la del bundle vivo) | el `v3_edge` puro se RECHAZÓ el 20-10 (dirección 50 %, −2,20 €/trade, maxDD 25 %, 6× más operaciones) ⇒ comparar USDCHF con la misma reward que EURUSD |
+| Gate | el **canario absoluto** ya existente (Sharpe ≥ 1,0 en ≥4 folds + ≥200 aperturas) | **sin tocar umbrales** (R2 del backlog) |
+| Corridas | **UNA** | repetir retrains hasta aprobar = múltiple testing: prohibido (R1) |
+
+**Criterio de aceptación (fijado ANTES de correr):**
+- **A1** — el gate canario absoluto promotes (umbrales intactos).
+- **A2** — `direction_accuracy` del **holdout > la base del holdout de USDCHF** (base calculada con la misma función canónica corregida), **n ≥ 30** e **IC 95 % del skill por encima de 0**. Es una condición **documental** (bloquea la *activación* del canario; **no** modifica el gate: el gate decide la promoción, A2 decide la activación).
+- **A3** — cero cambios en EURUSD.
+
+**Paradas:** si el gate rechaza ⇒ fin, se publica el rechazo y **no** se reintenta con otros hiperparámetros sin orden nueva. Si el gate pasa pero A2 no ⇒ el bundle queda promovido (el gate manda) y el **canario NO se enciende** hasta que Félix lo ordene.

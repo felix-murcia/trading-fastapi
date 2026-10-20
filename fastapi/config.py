@@ -88,6 +88,17 @@ class Settings(BaseSettings):
         {"symbol": "EURUSD", "enabled": True},
         {"symbol": "GBPUSD", "enabled": False,
          "daily_loss_pct": 2.0, "equity_allocation_pct": 20},
+        # G3 · U-1 (2026-10-20, orden Félix «sí arranca USDCHF pero con
+        # cabeza»): USDCHF queda LISTADO como canario APAGADO. Motivo medido
+        # (definición canónica corregida, skill = exactitud − SU PROPIA BASE):
+        # es el ÚNICO par de los 7 con skill real — momentum 24 h +7,1 pp
+        # (n=481, IC 95 % [+2,6,+11,4], p=0,001 con 20 000 barajados); su
+        # mecánica encaja con la cuenta (ATR H1 11,0 pips, spread 1,8 % del
+        # ATR) y es una apuesta distinta (−0,69 de correlación con EURUSD).
+        # Registrar NO habilita: el canario exige un bundle que pase el
+        # gate + la condición documental A2 (doc/backlog-g3-usdchf-2026-10-20.md).
+        {"symbol": "USDCHF", "enabled": False,
+         "daily_loss_pct": 2.0, "equity_allocation_pct": 20},
     ]
 
     # ─── P3-3: bloqueo por drawdown de cuenta (canario = 15%) ───────────────────
