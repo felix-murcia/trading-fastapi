@@ -192,6 +192,38 @@ async def run_cross_audit(symbol: str = "EURUSD") -> dict:
     except Exception as exc:  # noqa: BLE001
         checks.append({"check": "edge_vivo", "status": "error", "error": str(exc)})
 
+    # ── 6) LATENCIA de los ciclos (C3) ───────────────────────────────────
+    # El segundo cerebro (LLM) consume ~40 s de un presupuesto de 60 s del
+    # EA. Su valor está medido (bloquea entradas PEORES que la media: 40 % y
+    # 33 % de acierto frente al 50 % del sistema) ⇒ NO se le saca del bucle.
+    # Lo que sí hay que vigilar es la COLA: si el p95 se acerca al
+    # presupuesto del EA, el ciclo se pierde (no se pierde la decisión).
+    try:
+        lat = await pool.fetch(
+            """
+            SELECT (data->'data'->>'latency_ms')::float AS l
+            FROM audit_log
+            WHERE event='ai_predict_cycle' AND data->'data'->>'symbol'=$1
+              AND created_at > now() - interval '3 days'
+              AND (data->'data'->>'latency_ms') IS NOT NULL
+            """, symbol)
+        vals = sorted(float(r["l"]) for r in lat)
+        if vals:
+            p50 = vals[len(vals) // 2] / 1000
+            p95 = vals[int(len(vals) * 0.95)] / 1000
+            checks.append({
+                "check": "latencia_ciclos", "status": "ok" if p95 < 52 else "latencia_al_limite",
+                "p50_s": round(p50, 1), "p95_s": round(p95, 1),
+                "presupuesto_ea_s": 60,
+                "note": "el segundo cerebro consume ~40 s del ciclo; su veto "
+                        "aporta (bloquea entradas por debajo de la media), "
+                        "pero la cola se acerca al presupuesto del EA ⇒ si el p95 "
+                        "supera 52 s hay que actuar (modelo más rápido o "
+                        "prompt más corto), no al revés",
+            })
+    except Exception as exc:  # noqa: BLE001
+        checks.append({"check": "latencia_ciclos", "status": "error", "error": str(exc)})
+
     discrepancias = [c for c in checks if c.get("status") in ("discrepancia", "error")]
     veredicto = {
         "generated_at": ts,

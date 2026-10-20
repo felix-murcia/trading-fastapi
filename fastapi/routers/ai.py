@@ -21,7 +21,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from config import settings
 from core.container import build_registry_from_settings
 from core.pair import PairRegistry, default_model_path
-from core.rules import MIN_WIN_EUR
+from core.rules import MIN_ENTRY_REWARD_EUR, MIN_WIN_EUR
 from db.connection import get_pool
 from ml.trading_env_v2 import (
     CHURN_BARS,
@@ -1430,15 +1430,15 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             cycle_id, final_decision, req.position,
         )
         final_decision = "HOLD"
-    elif reward_eur is not None and reward_eur < MIN_WIN_EUR and final_decision in ("BUY", "SELL"):
+    elif reward_eur is not None and reward_eur < MIN_ENTRY_REWARD_EUR and final_decision in ("BUY", "SELL"):
         # Opción A: mecánico (la regla 3€ ya lo decide) → va ANTES del
         # juicio de re-entrada y de los inferidos de Qwen, detrás de los
         # mecánicos superiores (time-stop/position, vía cadena + _veto_reason).
         reward_below_min = True
         logger.warning(
-            "[%s] VETO RECOMPENSA ║ TP %.1f pips × %.3f lot = %.2f€ < MIN_WIN_EUR=%.2f → HOLD "
+            "[%s] VETO RECOMPENSA ║ TP %.1f pips × %.3f lot = %.2f€ < minimo de entrada=%.2f → HOLD "
             "(imposible de ganar: el TP sella por debajo de la regla 3€)",
-            cycle_id, tp_pips_final, final_lots, reward_eur, MIN_WIN_EUR,
+            cycle_id, tp_pips_final, final_lots, reward_eur, MIN_ENTRY_REWARD_EUR,
         )
         final_decision = "HOLD"
     elif reentry_window and reentry_ok is False and final_decision in ("BUY", "SELL"):

@@ -21,6 +21,19 @@ class Settings(BaseSettings):
     # cuenta — corta el apalancamiento del factor USD compartido entre pares
     # correlacionados (EURUSD/GBPUSD ρ≈0.7-0.9). 0 = desactivado.
     max_total_same_dir_positions: int = 0
+    # C1 (orden Félix 2026-10-20, informe de viabilidad): el riesgo por
+    # operación se puede reducir con la env PPO_RISK_PCT (el default del
+    # código conserva el valor histórico 0.03). Motivo (medido):
+    #   · el edge es FINO (ratio 1,23:1) y NO está validado fuera de
+    #     muestra (el holdout del bundle vivo da −0,53 €/operación);
+    #   · una operación puede perder −22,30 € (4,4 % del capital) y hubo
+    #     una racha de 11 pérdidas seguidas y un drawdown del 30,2 %
+    #     (154,75 €) sobre una cuenta de 504 €;
+    #   · bajar el tamaño NO mejora el ratio (el drawdown % es una propiedad
+    #     de la secuencia de operaciones, no del tamaño) ⇒ lo que se
+    #     protege con esto es el CAPITAL en euros, no el ratio.
+    # Al validarse la evidencia (150 operaciones fuera de muestra con
+    # p<0,05 por tramo), se devuelve PPO_RISK_PCT a 0.03.
     ppo_risk_pct: float = 0.03        # P2-2: tope de riesgo por trade del PPO (fracción del equity)
     order_max_age_hours: int = 48
     simple_pipeline_enabled: bool = True
