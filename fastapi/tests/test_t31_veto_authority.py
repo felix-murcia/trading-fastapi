@@ -21,7 +21,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi.testclient import TestClient
 
 from main import app
-from services import qwen_authority, qwen_client
+from services import qwen_authority
+
+# Ventana PASADA: las velas del fixture deben estar CERRADAS (la medición
+# usa sólo velas cerradas) y su horizonte +24 h debe resolver dentro de la serie.
+import time as _time
+_T0 = int(_time.time()) - 220 * 3600
+
+from services import qwen_client
 from services.qwen_client import QwenHealthState
 from tests.test_qwen_semantics import _mock_ppo_model
 
@@ -127,13 +134,13 @@ class TestAuthorityMeasurement:
         monkeypatch.setattr(qwen_authority, "_STATE", {})
         fake_pool = MagicMock()
         fake_pool.fetch = AsyncMock(return_value=[
-            {"mt5_time": 1792430600.0, "llm_bias": "BULLISH", "bias_prob": 0.85},
+            {"mt5_time": _T0 + 1800, "llm_bias": "BULLISH", "bias_prob": 0.85},
         ])
-        # Serie H1 EN ALZA (60 velas desde una hora exacta) → la dirección
-        # realizada a +24 h es UP ⇒ la llamada BULLISH ACIERTA (1 hit, 1 n).
+        # Serie H1 EN ALZA (200 velas) → la dirección realizada a +24 h es UP
+        # ⇒ la llamada BULLISH ACIERTA (1 hit, 1 n).
         candles = [
-            {"time": 1792428800 + i * 3600, "close": 1.1000 + i * 0.0001}
-            for i in range(60)
+            {"time": _T0 + i * 3600, "close": 1.1000 + i * 0.0001}
+            for i in range(200)
         ]
         with patch("db.connection.get_pool", return_value=fake_pool), \
              patch("services.mt5_client.get_candles", AsyncMock(return_value=candles)):
@@ -149,12 +156,12 @@ class TestAuthorityMeasurement:
         CONCEDIDA: el juez recupera el veto automáticamente."""
         monkeypatch.setattr(qwen_authority, "_STATE", {})
         candles = [
-            {"time": 1792428800 + i * 3600, "close": 1.1000 + i * 0.0001}
+            {"time": _T0 + i * 3600, "close": 1.1000 + i * 0.0001}
             for i in range(200)
         ]
         rows = [
             {
-                "mt5_time": 1792428800 + 1800 + k * 3600,
+                "mt5_time": _T0 + 1800 + k * 3600,
                 "llm_bias": "BULLISH",
                 "bias_prob": 0.85,
             }
@@ -176,11 +183,11 @@ class TestAuthorityMeasurement:
         (es la medida que responde «¿conf 0,75 acierta más que 0,60?»)."""
         monkeypatch.setattr(qwen_authority, "_STATE", {})
         candles = [
-            {"time": 1792428800 + i * 3600, "close": 1.1000 + i * 0.0001}
+            {"time": _T0 + i * 3600, "close": 1.1000 + i * 0.0001}
             for i in range(200)
         ]
         rows = [
-            {"mt5_time": 1792428800 + 1800 + k * 3600,
+            {"mt5_time": _T0 + 1800 + k * 3600,
              "llm_bias": "BULLISH", "bias_prob": 0.75}
             for k in range(35)
         ]
@@ -203,7 +210,7 @@ class TestAuthorityMeasurement:
                    AsyncMock(side_effect=RuntimeError("MCP caído"))), \
              patch("db.connection.get_pool", return_value=MagicMock(
                  fetch=AsyncMock(return_value=[
-                     {"mt5_time": 1792430000.0, "llm_bias": "BULLISH", "bias_prob": 0.85},
+                     {"mt5_time": _T0 + 1800, "llm_bias": "BULLISH", "bias_prob": 0.85},
                  ]))):
             data = await qwen_authority.get_authority("EURUSD")
         assert data["granted"] is False
@@ -214,3 +221,53 @@ class TestAuthorityMeasurement:
         """Alta convicción = |prob-0.5| >= 0.2 ⇔ los umbrales 0.7/0.3 del veto."""
         assert abs((0.5 + qwen_authority.QWEN_AUTHORITY_MIN_CONVICTION) - 0.7) < 1e-9
         assert abs((0.5 - qwen_authority.QWEN_AUTHORITY_MIN_CONVICTION) - 0.3) < 1e-9
+
+
+class TestAuthoritySignificance:
+    """T-31 (fix 2026-10-20): «skill DEMOSTRADA» = se distingue del azar.
+
+    Un 56,5 % sobre 46 llamadas NO es evidencia (límite inferior de Wilson
+    ≈42 %): un veto que bloquea con una moneda al aire es exactamente el
+    fallo que T-31 vino a matar (el veto anterior acertaba el 15 %)."""
+
+    def test_wilson_lower_bound_known_values(self):
+        # 46/46 aciertos ≈ 100 % → límite inferior alto
+        lo_hi = qwen_authority._wilson_lower_bound(46, 46)
+        assert lo_hi is not None and lo_hi > 0.88
+        # 26/46 ≈ 56,5 % → límite inferior ~42 % (indistinguible del azar)
+        lo_mid = qwen_authority._wilson_lower_bound(26, 46)
+        assert lo_mid is not None and 0.38 < lo_mid < 0.47
+        # 0 aciertos → límite inferior 0
+        assert qwen_authority._wilson_lower_bound(0, 46) == 0.0
+
+    def test_significance_required_by_default(self):
+        assert qwen_authority.QWEN_AUTHORITY_REQUIRE_SIGNIFICANCE is True
+
+    @pytest.mark.asyncio
+    async def test_coin_flip_skill_does_not_grant_authority(self, monkeypatch):
+        """56,5 % sobre 46 llamadas (indistinguible del azar) → SIN autoridad."""
+        monkeypatch.setattr(qwen_authority, "_STATE", {})
+        candles = [
+            {"time": _T0 + i * 3600, "close": 1.1000 + i * 0.0001}
+            for i in range(200)
+        ]
+        # 20 llamadas BULLISH que ACIERTAN (sube) y 20 que FALLAN (baja):
+        rows = []
+        for k in range(20):
+            rows.append({"mt5_time": _T0 + 1800 + k * 3600,
+                         "llm_bias": "BULLISH", "bias_prob": 0.85})
+        # 20 más con el sesgo opuesto en un tramo que BAJA (fallan)
+        for k in range(20):
+            rows.append({"mt5_time": _T0 + 1800 + (30 + k) * 3600,
+                         "llm_bias": "BEARISH", "bias_prob": 0.85})
+        fake_pool = MagicMock()
+        fake_pool.fetch = AsyncMock(return_value=rows)
+        with patch("db.connection.get_pool", return_value=fake_pool), \
+             patch("services.mt5_client.get_candles", AsyncMock(return_value=candles)):
+            data = await qwen_authority._measure("EURUSD")
+        assert data["n"] >= 30
+        assert data["granted"] is False, (
+            f"una skill indistinguible del azar NO concede autoridad: {data['reason']}"
+        )
+        assert "azar" in data["reason"] or "no demostrada" in data["reason"]
+        assert data["wilson_lower"] is not None

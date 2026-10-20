@@ -1652,6 +1652,9 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
                 "granted": bool(_auth.get("granted")),
                 "n": _auth.get("n"),
                 "acc": _auth.get("acc"),
+                # Límite inferior de Wilson: la skill es "demostrada" sólo si
+                # se distingue del azar (T-31, fix 2026-10-20).
+                "wilson_lower": _auth.get("wilson_lower"),
                 "reason": _auth.get("reason"),
                 # Curva de calibración por bucket de bias_prob (T-31): es la
                 # medida que responde «¿conf 0,75 acierta más que 0,60?».

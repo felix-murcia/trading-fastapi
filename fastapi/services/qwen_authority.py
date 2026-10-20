@@ -43,6 +43,7 @@ import bisect
 import datetime as dt
 import logging
 import os
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,19 @@ logger = logging.getLogger(__name__)
 # por ignorancia (no por confianza en el juez).
 QWEN_AUTHORITY_MIN_ACC = float(os.getenv("QWEN_AUTHORITY_MIN_ACC", "0.55"))
 QWEN_AUTHORITY_MIN_SAMPLES = int(os.getenv("QWEN_AUTHORITY_MIN_SAMPLES", "30"))
+# "Skill DEMOSTRADA" (fix 2026-10-20): no basta con no ser peor que el azar —
+# el límite inferior del intervalo de Wilson (95 %) debe estar POR ENCIMA del
+# 50 % (azar). Motivo (medido el 20-10): con 46 llamadas y 56,5 % de acierto
+# la skill es estadísticamente INDISTINGUIBLE del azar (límite inferior
+# ≈ 42 %) ⇒ un veto que puede bloquear la única fuente de señal con una
+# moneda al aire es exactamente el fallo que T-31 vino a matar (el veto
+# anterior acertaba el 15 %). Con este criterio la autoridad sólo se concede
+# con evidencia que DISTINGA del azar, y se revoca sola cuando deja de
+# distinguirlo.
+QWEN_AUTHORITY_REQUIRE_SIGNIFICANCE = (
+    os.getenv("QWEN_AUTHORITY_REQUIRE_SIGNIFICANCE", "true").lower() not in ("false", "0", "no")
+)
+QWEN_AUTHORITY_Z = float(os.getenv("QWEN_AUTHORITY_Z", "1.96"))
 # Ventana de medición (días) y cadencia de refresco (s).
 QWEN_AUTHORITY_WINDOW_DAYS = int(os.getenv("QWEN_AUTHORITY_WINDOW_DAYS", "14"))
 QWEN_AUTHORITY_TTL_S = int(os.getenv("QWEN_AUTHORITY_TTL_S", "1800"))
@@ -110,9 +124,17 @@ async def _measure(symbol: str) -> dict:
         return result
 
     raw = await get_candles(symbol, "H1", 600)
-    pairs = sorted((_to_epoch(b), float(b["close"])) for b in raw)
+    # Sólo velas H1 CERRADAS (fix 2026-10-20): la vela en formación lleva el
+    # precio ACTUAL como "close" y.tickea. Como cierre terminal del horizonte
+    # +24 h la usaba para ~12 ciclos (los de la hora en curso) ⇒ la skill
+    # medida oscilaba entre 87 % y 54 % sin que cambiara el modelo (medido:
+    # la autoridad concedía/concedía/concedía y luego la misma muestra daba
+    # 54 %). Con velas cerradas, el terminal es un cierre REAL.
+    now_epoch = dt.datetime.now(dt.timezone.utc).timestamp()
+    closed = [c for c in raw if float(c["time"]) + 3600 <= now_epoch]
+    pairs = sorted((_to_epoch(c), float(c["close"])) for c in closed)
     if not pairs:
-        result["reason"] = "sin velas H1"
+        result["reason"] = "sin velas H1 cerradas"
         return result
     bar_ep = [p[0] for p in pairs]
     bar_close = [p[1] for p in pairs]
@@ -161,9 +183,11 @@ async def _measure(symbol: str) -> dict:
         b["hits"] += hit
 
     acc = (hits / n) if n else None
+    wilson_lo = _wilson_lower_bound(hits, n) if n else None
     result["n"] = n
     result["hits"] = hits
     result["acc"] = acc
+    result["wilson_lower"] = wilson_lo
     result["calibration"] = {
         f"{p:.2f}": {"n": b["n"], "hits": b["hits"],
                      "acc": (b["hits"] / b["n"]) if b["n"] else None}
@@ -171,12 +195,41 @@ async def _measure(symbol: str) -> dict:
     }
     if n < QWEN_AUTHORITY_MIN_SAMPLES:
         result["reason"] = f"muestra insuficiente ({n} < {QWEN_AUTHORITY_MIN_SAMPLES})"
-    elif acc is not None and acc >= QWEN_AUTHORITY_MIN_ACC:
-        result["granted"] = True
-        result["reason"] = f"skill demostrada ({acc*100:.1f}% sobre {n} llamadas)"
+    elif acc is not None and acc < QWEN_AUTHORITY_MIN_ACC:
+        result["reason"] = (
+            f"skill no demostrada ({acc*100:.1f}% < {QWEN_AUTHORITY_MIN_ACC*100:.0f}% sobre {n})"
+        )
+    elif (
+        QWEN_AUTHORITY_REQUIRE_SIGNIFICANCE
+        and wilson_lo is not None
+        and wilson_lo <= 0.50
+    ):
+        result["reason"] = (
+            f"skill indistinguible del azar (acc {acc*100:.1f}%, límite inferior "
+            f"Wilson 95% {wilson_lo*100:.1f}% ≤ 50% sobre {n} llamadas)"
+        )
     else:
-        result["reason"] = f"skill no demostrada ({acc*100:.1f}% < {QWEN_AUTHORITY_MIN_ACC*100:.0f}% sobre {n})"
+        result["granted"] = True
+        result["reason"] = (
+            f"skill demostrada ({acc*100:.1f}% sobre {n} llamadas; "
+            f"límite inferior {wilson_lo*100:.1f}%)"
+        )
     return result
+
+
+def _wilson_lower_bound(hits: int, n: int, z: float = QWEN_AUTHORITY_Z) -> Optional[float]:
+    """Límite inferior del intervalo de Wilson al 95 % (proporción de aciertos).
+
+    Es la forma robusta de exigir "mejor que el azar" con muestra pequeña:
+    un 56 % sobre 46 llamadas NO es evidencia de nada (límite inferior ≈42 %).
+    """
+    if not n:
+        return None
+    p = hits / n
+    denom = 1 + z * z / n
+    centre = p + z * z / (2 * n)
+    margin = z * ((p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5)
+    return max(0.0, (centre - margin) / denom)
 
 
 async def get_authority(symbol: str) -> dict:
@@ -208,6 +261,12 @@ async def get_authority(symbol: str) -> dict:
         "[QWEN-AUTH] %s → autoridad=%s (%s)",
         symbol, "CONCEDIDA" if data["granted"] else "REVOCADA", data["reason"],
     )
+    if data.get("wilson_lower") is not None:
+        logger.info(
+            "[QWEN-AUTH] %s skill: %d/%d = %.1f%% (límite inferior Wilson 95%%: %.1f%%)",
+            symbol, data["hits"], data["n"], (data["acc"] or 0) * 100,
+            data["wilson_lower"] * 100,
+        )
     cal = data.get("calibration") or {}
     if cal:
         parts = []
