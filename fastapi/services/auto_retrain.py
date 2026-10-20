@@ -106,8 +106,17 @@ class RetrainConfig:
     real_outcome_weight: float = 0.3      # Peso del feedback real vs sintético (0=ignorar, 1=dominante)
     min_validation_openings: int = 20     # P0 G-1: masa mínima de aperturas OOS (1 dejaba promover con 8)
     walk_forward_folds: int = 4           # P1-1: ≥4 pliegues OOS (exigencia de auditoría)
-    walk_forward_train_frac: float = 0.70
-    walk_forward_holdout_frac: float = 0.10  # holdout congelado: reporta, nunca decide
+    # T-31.9 / P3 (orden Félix 2026-10-20, «amplío el holdout»): con el
+    # holdout al 10 % (2 978 barras) el gate daba 16-30 TRADES por candidato ⇒
+    # menos potencia que el ruido ⇒ NO discriminaba (exp39 −0,53 €/trade,
+    # exp40 +0,90 €/trade: indistinguibles). Con train 0,60 / holdout 0,20 los
+    # folds conservan su tamaño (1 481 barras) y el holdout pasa a 5 967 ⇒
+    # 32-60 trades por candidato (n≥30 alcanzable). El default sigue siendo
+    # el congelado (0,70/0,10) para no invalidar la comparabilidad de los
+    # experimentos previos; se activa con la env WALK_FORWARD_TRAIN_FRAC /
+    # WALK_FORWARD_HOLDOUT_FRAC.
+    walk_forward_train_frac: float = float(os.getenv("WALK_FORWARD_TRAIN_FRAC", "0.70"))
+    walk_forward_holdout_frac: float = float(os.getenv("WALK_FORWARD_HOLDOUT_FRAC", "0.10"))
     walk_forward_min_fold_bars: int = 10  # pliegue más corto evaluable (si no, aborta)
 
     @classmethod

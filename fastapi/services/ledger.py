@@ -235,6 +235,24 @@ async def build_ledger(symbol: str = "EURUSD") -> dict:
         "script": "fastapi/scripts/benchmark_canonico.py",
     }
 
+    # ── 5) el REPLAY del LLM como decisor (P4): su expectancy con la
+    # mecánica real — la vara de admisión. Sólo lectura.
+    try:
+        from services.llm_replay import replay_llm_as_decider
+        replay = await replay_llm_as_decider(symbol)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[LEDGER] replay del LLM no disponible: %s", exc)
+        replay = {"error": f"{type(exc).__name__}: {exc}"}
+    ledger["sources"]["llm"]["replay_as_decider"] = replay
+
+    # ── 6) verificación: la auditoría cruzada (P2) — el veredicto de la
+    # última recomputación independiente (si existe).
+    ledger["verification"] = {
+        "source": "services.cross_audit (recomputación independiente)",
+        "note": "se publica en GET /api/v1/ai/cross-audit y se recalcula "
+                "cada 30 min; una discrepancia se avisa por alerting",
+    }
+
     ledger["summary"] = {
         "admitted_sources": [
             k for k, v in ledger["sources"].items() if v.get("admitted")

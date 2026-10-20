@@ -1849,6 +1849,21 @@ async def force_retrain_endpoint(
     return {"status": result["status"], "filled_count": state.filled_count, "in_progress": state.retrain_in_progress}
 
 
+@router.get("/cross-audit")
+async def cross_audit_endpoint(symbol: Optional[str] = Query(default=None)):
+    """AUDITORÍA CRUZADA (P2) — recomputa INDEPENDIENTEMENTE los números
+    publicados y compara. Sólo lectura: no muta el trading.
+
+    Es la red de seguridad del requisito «fiabilidad absoluta»: el 20-10 tres
+    mediciones de las MISMAS llamadas dieron 87 %, 69,6 % y 10 % por fallos
+    del MEDIDOR. Con esta comprobación, un error así se ve en minutos.
+    """
+    from services.cross_audit import run_cross_audit
+
+    sym = (symbol or _TRAINING_SYMBOL).upper()
+    return await run_cross_audit(sym)
+
+
 @router.get("/ledger")
 async def ledger_endpoint(symbol: Optional[str] = Query(default=None)):
     """LEDGER DE FIABILIDAD (L4) — el estado del mundo con la vara correcta.

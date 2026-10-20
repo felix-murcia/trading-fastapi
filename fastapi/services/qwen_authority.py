@@ -282,6 +282,8 @@ def peek(symbol: str) -> dict | None:
 
 async def refresh_loop(symbol: str, interval_s: int = 900) -> None:
     """Refresco periódico de la autoridad en segundo plano — el TTL también la refresca."""
+    # Retraso inicial: la primera medición no debe competir con el arranque.
+    await asyncio.sleep(90)
     while True:
         try:
             await get_authority(symbol)

@@ -116,6 +116,17 @@ async def lifespan(app: FastAPI):
     from services.qwen_authority import refresh_loop as _qwen_auth_refresh
     for _ctx in _build_registry().enabled():
         _bg_tasks.add(asyncio.create_task(_qwen_auth_refresh(_ctx.config.symbol)))
+    # P2 (orden Félix 2026-10-20): auditoría cruzada — recomputa
+    # INDEPENDIENTEMENTE los números publicados y avisa si discrepan. Es lo
+    # que habría detectado en minutos los 4 fallos de medición del 20-10
+    # (un error del MEDIDOR, no del modelo).
+    from services.cross_audit import _cross_audit_loop
+    _bg_tasks.add(asyncio.create_task(_cross_audit_loop()))
+    # P4 (orden Félix 2026-10-20): replay del LLM como decisor con la
+    # MECÁNICA REAL (SL/TP, sizing, spread, regla 3 €, churn) → su
+    # expectancy, que es la vara de admisión. Sólo lectura.
+    from services.llm_replay import _llm_replay_loop
+    _bg_tasks.add(asyncio.create_task(_llm_replay_loop()))
     yield
     for _task in _bg_tasks:
         _task.cancel()
