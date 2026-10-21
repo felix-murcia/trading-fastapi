@@ -37,6 +37,21 @@ habilita.
 Criterio de dirección (congelado, T-24 §7 / T-30): coincidencia de
 dirección PPO↔LLM. Aquí se mide la skill del LLM aislado (su sesgo frente al
 mercado realizado a +24 h), que es la habilidad que el veto invoca.
+
+T-31.10 (2026-10-21) — LA BASE, NO EL 50 %
+------------------------------------------
+El 21-10 la autoridad se concedió sola con «79,7 % sobre 59 llamadas;
+límite inferior 67,7 %». Era un ARTEFACTO: en esas mismas 59 ventanas el
+mercado subió el 81,4 % de las veces y el juez dijo BULLISH el 88,1 % ⇒
+acertar 79,7 % es IR PEOR que decir siempre BULLISH (81,4 %). Skill real:
+−1,7 pp (IC Wilson −13,6 pp). El juez no tenía skill; tenía la deriva del
+mercado y un sesgo fijo.
+
+Por eso la comparación es contra la BASE de la ventana (la mejor
+predicción constante, services.measurement.base_rate), no contra el 50 %.
+Es la misma vara que ya usan el ledger y la auditoría cruzada (L1). El
+umbral de exactitud congelado (MIN_ACC) se conserva como SUELO, pero no
+basta: el límite inferior de Wilson tiene que quedar por encima de la base.
 """
 import asyncio
 import bisect
@@ -162,6 +177,7 @@ async def _measure(symbol: str) -> dict:
 
     n = 0
     hits = 0
+    dirs: list = []
     buckets: dict = {}
     for r in rows:
         bias = r["llm_bias"]
@@ -173,6 +189,7 @@ async def _measure(symbol: str) -> dict:
         if rd is None:
             continue
         n += 1
+        dirs.append(1 if rd == "UP" else -1)
         hit = (bias == "BULLISH" and rd == "UP") or (bias == "BEARISH" and rd == "DOWN")
         hits += hit
         # Curva de calibración: acierto por bucket de probabilidad declarada.
@@ -181,33 +198,40 @@ async def _measure(symbol: str) -> dict:
         b["n"] += 1
         b["hits"] += hit
 
-    acc = (hits / n) if n else None
-    # Veredicto con la MISMA lógica del módulo canónico (L1) — una sola
-    # definición de "skill demostrada" en todo el sistema.
-    from services.measurement import skill_of
-    _sk = skill_of(hits, n)
+    # T-31.10: skill contra SU PROPIA BASE (la deriva del mercado), no contra
+    # el 50 %. Una fuente que dice siempre lo mismo en un mercado que sube
+    # acierta la base sin tener ninguna habilidad.
+    from services.measurement import skill_vs_base
+    _sk = skill_vs_base(hits, n, dirs)
     result["n"] = n
     result["hits"] = hits
     result["acc"] = _sk["acc"]
-    result["wilson_lower"] = _sk["wilson_lower"]
+    result["base"] = _sk.get("base")
+    result["skill_pp"] = _sk.get("skill_pp")
+    result["skill_lo_pp"] = _sk.get("skill_lo_pp")
+    result["wilson_lower"] = _sk.get("wilson_lo")
     result["calibration"] = {
         f"{p:.2f}": {"n": b["n"], "hits": b["hits"],
                      "acc": (b["hits"] / b["n"]) if b["n"] else None}
         for p, b in sorted(buckets.items())
     }
-    if QWEN_AUTHORITY_REQUIRE_SIGNIFICANCE:
+    if n < QWEN_AUTHORITY_MIN_SAMPLES:
+        result["granted"] = False
+        result["reason"] = f"muestra insuficiente ({n} < {QWEN_AUTHORITY_MIN_SAMPLES})"
+    elif (_sk["acc"] or 0.0) < QWEN_AUTHORITY_MIN_ACC:
+        result["granted"] = False
+        result["reason"] = (
+            f"skill no demostrada ({(_sk['acc'] or 0)*100:.1f}% < "
+            f"{QWEN_AUTHORITY_MIN_ACC*100:.0f}%)"
+        )
+    elif QWEN_AUTHORITY_REQUIRE_SIGNIFICANCE:
         result["granted"] = _sk["granted"]
         result["reason"] = _sk["reason"]
     else:
         # Vía legada (sin exigencia de significancia) — se conserva por
         # compatibilidad; el criterio vivo es el de L1.
-        if n < QWEN_AUTHORITY_MIN_SAMPLES:
-            result["reason"] = f"muestra insuficiente ({n} < {QWEN_AUTHORITY_MIN_SAMPLES})"
-        elif _sk["acc"] is not None and _sk["acc"] >= QWEN_AUTHORITY_MIN_ACC:
-            result["granted"] = True
-            result["reason"] = f"skill demostrada ({_sk['acc']*100:.1f}% sobre {n} llamadas)"
-        else:
-            result["reason"] = f"skill no demostrada ({_sk['acc']*100:.1f}% sobre {n})"
+        result["granted"] = True
+        result["reason"] = f"skill demostrada ({(_sk['acc'] or 0)*100:.1f}% sobre {n} llamadas)"
     return result
 
 
@@ -257,8 +281,10 @@ async def get_authority(symbol: str) -> dict:
     )
     if data.get("wilson_lower") is not None:
         logger.info(
-            "[QWEN-AUTH] %s skill: %d/%d = %.1f%% (límite inferior Wilson 95%%: %.1f%%)",
+            "[QWEN-AUTH] %s skill: %d/%d = %.1f%% vs base %.1f%% → %+.1f pp "
+            "(límite inferior Wilson 95%%: %.1f%%)",
             symbol, data["hits"], data["n"], (data["acc"] or 0) * 100,
+            (data.get("base") or 0) * 100, data.get("skill_pp") or 0.0,
             data["wilson_lower"] * 100,
         )
     cal = data.get("calibration") or {}

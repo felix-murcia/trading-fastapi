@@ -41,6 +41,17 @@ class TestAppendOnly:
                     "history", "bundle_sha", "llm_authority"):
             assert key in src, f"falta {key} en la línea del registro"
 
+    def test_authority_is_measured_not_read_from_a_stale_cache(self):
+        """T-31.10: la línea publica la MEDICIÓN (n, base, skill, IC), no un
+        `peek()` que tras un reinicio deja `granted: null` (ambigüedad)."""
+        from services.daily_ledger import build_daily_entry
+        import inspect
+        src = inspect.getsource(build_daily_entry)
+        assert "get_authority" in src
+        assert "qwen_authority.peek" not in src
+        for key in ("base", "skill_pp", "wilson_lower", "measured_at"):
+            assert key in src, f"falta {key} en la autoridad publicada"
+
 
 class TestLedgerPath:
     def test_path_is_inside_the_repo(self):

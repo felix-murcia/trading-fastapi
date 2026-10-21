@@ -2956,3 +2956,116 @@ Y en producción, con 1 USDCHF + 1 EURUSD abiertos, el ciclo de 10:00 salió **H
 Cerré la **duplicada** (ticket 58986766379, la de 09:45) por la vía del bróker a 0,82563 ⇒ **+0,54 €** (sin coste) y el EA la registró como cierre (`USDCHF · LONG · 0,54 € · ea`) ⇒ el estado quedó **1 posición por par**, que es la política. (La regla de negocio de 3 € la contabiliza como pérdida: +0,54 < 3 ⇒ correcto por contrato.)
 
 **Tests:** `tests/test_g3_one_position_per_pair.py` (nuevo, 7): el tope es 1, el guardián lo aplica, con 1 posición la segunda se rechaza, el EA cuenta por magic (y el patrón frágil ya no está), el EA avisa si hay más de una, y la versión del EA es 13.9. Actualizados los que codificaban el tope viejo (5) y la versión 13.8. Suite: **1200 passed + 2 xfailed**.
+
+---
+
+## 2026-10-21 (T-31.10) · LA AUTORIDAD DEL JUEZ SE MIDIÓ CONTRA EL 50 %, NO CONTRA EL MERCADO
+
+**Qué pasó (silencioso, dentro del registro):** la línea del ledger de las 09:57 publicó
+`llm_authority: {"granted": true, "n": 59, "acc": 0.7966, "reason": "skill demostrada
+(79.7% sobre 59 llamadas; límite inferior 67.7%)"}`. Es decir: el veto direccional de Qwen
+recuperaba poder para revertir señales con una exactitud del **79,7 %**.
+
+**La auditoría (independiente, misma función canónica `canonical_direction`):**
+
+| | |
+|---|---|
+| Llamadas de alta convicción evaluables | **59** (de 87 con sesgo) |
+| Sesgo declarado | **52/59 = 88,1 % BULLISH** |
+| Acierto bruto | **47/59 = 79,7 %** |
+| **Base de esas mismas 59 ventanas** | **81,4 %** (el mercado subió el 81 % de las veces) |
+| Predictor constante BULLISH | habría acertado **81,4 %** |
+| **Skill real (acierto − base)** | **−1,7 pp** (IC Wilson 95 %: **−13,6 pp**) |
+
+Un juez que dice BULLISH el 88 % del tiempo en un mercado que sube el 81 % del tiempo
+**no tiene skill: tiene la deriva del mercado y un sesgo fijo**. El 79,7 % no era un
+acierto; era la base menos 1,7 puntos.
+
+**Causa raíz:** `services/qwen_authority._measure` usaba `skill_of`, que contrasta contra el
+**50 %** (moneda al aire). El módulo canónico `services/measurement.py` dice desde el 20-10
+que *skill = exactitud − base*; el ledger (`services/ledger.py`) y la auditoría cruzada
+(`services/cross_audit.py`) ya usaban `skill_vs_base`. **Sólo el guardián del veto usaba la
+vara equivocada** ⇒ concedía autoridad por la deriva. Es el mismo error que T-31.9 corrigió
+en el mapa de edge, pero quedaba una puerta abierta.
+
+**Fix (quirúrgico):**
+- `_measure` acumula las direcciones realizadas de las llamadas evaluadas y llama a
+  `skill_vs_base` (no a `skill_of`).
+- Se conservan los umbrales congelados como **suelo** (`MIN_ACC=0,55`, `MIN_SAMPLES=30`);
+  el veredicto exige además que el límite inferior de Wilson quede **por encima de la base**.
+- La línea del ledger publica la medición completa: `n`, `acc`, `base`, `skill_pp`,
+  `wilson_lower`, `measured_at` y `reason` (antes publicaba `null` si la caché estaba fría).
+- El ledger ahora **mide** (`get_authority`) en vez de leer `peek()`: tras un reinicio no
+  puede volver a escribir `granted: null` (ambigüedad entre «revocado» y «sin medir»).
+
+**Verificación en vivo (contenedor reconstruido, 10:48:38 UTC):**
+```
+[QWEN-AUTH] EURUSD → autoridad=REVOCADA (skill -1.7 pp vs base 81.4 % (IC no por encima de 0))
+[QWEN-AUTH] EURUSD skill: 47/59 = 79.7% vs base 81.4% → -1.7 pp (límite inferior Wilson 95%: 67.7%)
+[QWEN-AUTH] USDCHF → autoridad=REVOCADA (muestra insuficiente (0 < 30))
+```
+Calibración publicada en el mismo log: `0,75 → 28/36 = 78 %`, `0,85 → 18/20 = 90 %`,
+`0,25 → 0/1`, `0,73 → 0/1`. Los buckets altos aciertan **lo que sube el mercado**, no más.
+
+**Impacto:** el veto direccional del LLM queda **INERTE** (revocado con evidencia). Los
+vetoes mecánicos siguen intactos: posición, calidad, ranging, sizing, riesgo, news,
+time-stop y re-entrada. No se toca la señal, ni el tamaño, ni el bundle. La autoridad se
+revisa sola cada 30 min: si el juez alguna vez supera su base con IC > 0, la recupera sin
+intervención.
+
+**Tests:** `tests/test_t31_veto_authority.py` (+2 de regresión: mercado en tendencia con
+100 % de acierto bruto ⇒ **sin autoridad**; el desfase del bróker se aplica de verdad) y
+`tests/test_daily_ledger.py` (+1: la autoridad se mide y publica base/skill/IC, no `peek`).
+Suite completa: **1202 passed + 2 xfailed** (2026-10-21).
+
+---
+
+## 2026-10-21 (C1) · BAJAR EL RIESGO A LA MITAD NO CUMPLE EL CRITERIO — el DD no es lineal con el tamaño
+
+**La orden (informe de viabilidad, C1):** bajar el riesgo por operación hasta que el
+drawdown máximo histórico baje de **15 %** sin que el PnL por operación caiga más de un
+**20 %** (hoy +1,76 €/op).
+
+**Lo que se midió (189 operaciones reales de EURUSD, no una simulación de la estrategia):**
+se escala el tamaño de cada operación por un factor `k` (mismos entries, mismos exits) y se
+reconstruye la curva. El DD real publicado es **30,2 %** (511,88 € → 357,13 € = 154,75 €)
+sobre un capital inicial de 175,57 €; el PnL del pico es 336,31 €. Con esos datos:
+
+```
+DD%(k) = k × 154,75 / (175,57 + k × 336,31)        media(k) = 1,76 € × k
+```
+
+| k | DD reconstruido | media €/op | % de la media | ¿DD ≤15 %? | ¿media ≥80 %? |
+|---|---|---|---|---|---|
+| 1,00 | 30,23 % | 1,757 | 100,0 % | ✘ | ✔ |
+| 0,80 | 27,84 % | 1,406 | 80,0 % | ✘ | ✔ (justo) |
+| 0,50 | **22,51 %** | 0,879 | 50,0 % | ✘ | ✘ |
+| 0,2525 | **15,00 %** | 0,444 | 25,2 % | ✔ | ✘ |
+
+**Dos hechos que rompen la intuición «bajar la mitad ⇒ DD a la mitad»:**
+1. **Bajar el 50 % no lleva el DD al 15 %: lo lleva al 22,5 %.** Al reducir también las
+   ganancias, el pico de equity baja y el DD porcentual no se reduce proporcionalmente.
+   Para llegar al 15 % haría falta un `k ≈ 0,25` (cuatro veces menos), no la mitad.
+2. **En ese punto se pierde el 74,8 % de la media por operación**, muy por encima del 20 %
+   permitido. No existe ningún `k` uniforme que cumpla las dos condiciones a la vez.
+
+**Políticas no uniformes sobre la secuencia realizada** (por si acaso la regla lineal no
+era la buena): halving cuando el DD realizado supera 5 % u 8 % ⇒ DD 9,2 %, pero media
+53-57 % (falla); halving tras 3 pérdidas seguidas ⇒ media 89,6 %, pero DD 15,57 % (no
+mejora); tras 4 ⇒ media 97,1 %, DD 15,49 % (no mejora). **Ninguna cumple ambas.**
+
+**Deuda de medición declarada (importante):** el 30,2 % es el DD *mark-to-market* (incluye
+PnL flotante) y **no tiene serie almacenada** que lo reproduzca; el reconstruido sólo con
+cierres da **15,49 %** (pico 289,20 € → valle 244,42 € en el punto de máximo DD), porque
+mientras una posición está abierta el DD realizado no ve el flotante. El ledger guarda
+equity cada hora y puede perder el valle intra-hora. Mientras no se guarde la curva de
+equity, el número conservador (y el que manda para riesgo) es el **30,2 %**.
+
+**Decisión:** **C1 se rechaza con evidencia; no se toca el tamaño.** El cuello de botella
+es el edge y la muestra (96 % de las operaciones en sep-oct 2026, un solo régimen), no el
+sizing. El riesgo se mantiene y se vigila; la alternativa de bajar a la mitad no alcanza
+el objetivo de DD y cuesta la mitad de la media.
+
+**Tests:** ninguno (decisión de política, sin cambio de código). Evidencia reproducible:
+`trade_outcomes` (189 filas, `ORDER BY exit_time`) y el informe
+`fastapi/ops/2026-10-20-informe-viabilidad.md` §2.1.

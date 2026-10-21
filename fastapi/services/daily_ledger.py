@@ -121,15 +121,23 @@ async def build_daily_entry(symbol: str = "EURUSD") -> dict:
     authority = None
     try:
         from services import qwen_authority
-        a = qwen_authority.peek(symbol) or {}
+        # T-31.10: MEDIR, no leer la caché. Tras un reinicio `peek()` devuelve
+        # None y la línea del registro publicaba `granted: null` (ambigüedad:
+        # ¿revocado o sin medir?). `get_authority` mide y cachea; si la
+        # medición falla devuelve un veredicto explícito, nunca un hueco.
+        a = await qwen_authority.get_authority(symbol)
         authority = {
             "granted": a.get("granted"),
             "n": a.get("n"),
             "acc": a.get("acc"),
+            "base": a.get("base"),
+            "skill_pp": a.get("skill_pp"),
+            "wilson_lower": a.get("wilson_lower"),
+            "measured_at": a.get("measured_at"),
             "reason": a.get("reason"),
         }
-    except Exception:  # noqa: BLE001
-        authority = None
+    except Exception as exc:  # noqa: BLE001
+        authority = {"granted": None, "reason": f"medición falló: {type(exc).__name__}"}
 
     return {
         "ts": now.isoformat(),

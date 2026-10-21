@@ -31,8 +31,46 @@ _T0 = int(_time.time()) - 220 * 3600
 from services import qwen_client
 from services.qwen_client import QwenHealthState
 from tests.test_qwen_semantics import _mock_ppo_model
+from services.measurement import canonical_direction
 
 ACTION_SELL = [-0.80, 0.18, 0.15, 0.15]
+
+
+def _zigzag_candles(n: int = 220):
+    """Serie H1 que sube 24 h y baja 24 h ⇒ base ≈ 50 %, no 100 %.
+
+    T-31.10: con una serie monótona la base es 100 % y un juez BULLISH
+    «acierta» el 100 % sin skill. Para probar que la autoridad se concede
+    por SKILL hace falta un mercado con dos direcciones.
+    """
+    out = []
+    for i in range(n):
+        phase = i % 48
+        amp = phase if phase <= 24 else 48 - phase
+        out.append({"time": _T0 + i * 3600, "close": 1.1000 + amp * 0.0001})
+    return out
+
+
+def _rows_that_hit(candles, n_calls: int = 40, offset_h: int = 0):
+    """Llamadas de alta convicción cuyo sesgo ACIERTA la dirección a +24 h."""
+    bt = [c["time"] for c in candles]
+    bc = [c["close"] for c in candles]
+    now = _T0 + 10 ** 6  # todo el fixture está en el pasado y cerrado
+    rows = []
+    for k in range(0, 120):
+        t0 = _T0 + 1800 + k * 3600
+        d = canonical_direction(bt, bc, t0 - offset_h * 3600, now)
+        if d is None:
+            continue  # ventana plana en el zigzag: no evaluable
+        rows.append({
+            "mt5_time": t0,
+            "llm_bias": "BULLISH" if d > 0 else "BEARISH",
+            "bias_prob": 0.85,
+        })
+        if len(rows) == n_calls:
+            break
+    assert len(rows) == n_calls
+    return rows
 
 
 def _qwen_json(bias="BULLISH", bias_prob=0.85):
@@ -153,19 +191,40 @@ class TestAuthorityMeasurement:
 
     @pytest.mark.asyncio
     async def test_skill_demonstrated_grants_authority(self, monkeypatch):
-        """40 llamadas de alta convicción acertando al 100 % → autoridad
-        CONCEDIDA: el juez recupera el veto automáticamente."""
+        """40 llamadas de alta convicción acertando SIEMPRE en un mercado de
+        dos direcciones (base 50 %) → autoridad CONCEDIDA."""
+        monkeypatch.setattr(qwen_authority, "_STATE", {})
+        candles = _zigzag_candles()
+        rows = _rows_that_hit(candles, 40)
+        fake_pool = MagicMock()
+        fake_pool.fetch = AsyncMock(return_value=rows)
+        with patch("db.connection.get_pool", return_value=fake_pool), \
+             patch("services.mt5_client.get_candles_with_offset",
+                  AsyncMock(return_value=(candles, 0))):
+            data = await qwen_authority._measure("EURUSD")
+        assert data["n"] >= 30
+        assert data["acc"] == 1.0
+        assert data["base"] < 0.75, "la base debe ser de dos direcciones, no deriva"
+        assert data["granted"] is True, data["reason"]
+        assert "skill" in data["reason"]
+
+    @pytest.mark.asyncio
+    async def test_trending_market_does_not_grant_authority(self, monkeypatch):
+        """REGRESIÓN T-31.10 (artefacto real del 21-10): un juez que dice
+        siempre BULLISH en un mercado que sube el 100 % de las ventanas
+        acierta el 100 % y NO tiene skill (0 pp sobre su base) → SIN veto.
+
+        Producción: 47/59 = 79,7 % con base 81,4 % y 88 % de sesgos BULLISH
+        ⇒ «autoridad concedida» comparando contra el 50 %; skill real −1,7 pp.
+        """
         monkeypatch.setattr(qwen_authority, "_STATE", {})
         candles = [
             {"time": _T0 + i * 3600, "close": 1.1000 + i * 0.0001}
             for i in range(200)
         ]
         rows = [
-            {
-                "mt5_time": _T0 + 1800 + k * 3600,
-                "llm_bias": "BULLISH",
-                "bias_prob": 0.85,
-            }
+            {"mt5_time": _T0 + 1800 + k * 3600,
+             "llm_bias": "BULLISH", "bias_prob": 0.85}
             for k in range(40)
         ]
         fake_pool = MagicMock()
@@ -176,8 +235,13 @@ class TestAuthorityMeasurement:
             data = await qwen_authority._measure("EURUSD")
         assert data["n"] >= 30
         assert data["acc"] == 1.0
-        assert data["granted"] is True
-        assert "skill demostrada" in data["reason"]
+        assert data["base"] == 1.0
+        assert data["skill_pp"] == 0.0
+        assert data["granted"] is False, (
+            "acertar la deriva del mercado no es skill: "
+            f"{data['reason']}"
+        )
+        assert "base" in data["reason"]
 
     @pytest.mark.asyncio
     async def test_calibration_buckets_are_reported(self, monkeypatch):
@@ -239,29 +303,31 @@ class TestAuthorityMeasurement:
         usarse como base, y el resultado debe cambiar respecto a no aplicarlo.
         """
         monkeypatch.setattr(qwen_authority, "_STATE", {})
-        # Serie en ALZA, sellada en el reloj del BROKER (como el MCP).
-        candles = [
-            {"time": _T0 + i * 3600, "close": 1.1000 + i * 0.0001}
-            for i in range(200)
-        ]
-        rows = [
-            {"mt5_time": _T0 + 1800 + k * 3600, "llm_bias": "BULLISH", "bias_prob": 0.85}
-            for k in range(40)
-        ]
+        # Serie en zigzag (dos direcciones) para que la base no sea 100 %.
+        candles = _zigzag_candles()
+        # Sesgos elegidos con el desfase REAL a 0 h: si la medición ignora el
+        # desfase del bróker, acierta 40/40; si lo aplica, la muestra cambia.
+        rows = _rows_that_hit(candles, 40, offset_h=0)
         fake_pool = MagicMock()
         fake_pool.fetch = AsyncMock(return_value=rows)
-        with patch("db.connection.get_pool", return_value=fake_pool), \
-             patch("services.mt5_client.get_candles_with_offset",
-                   AsyncMock(return_value=(candles, 3))):   # desfase de 3 h
-            data = await qwen_authority._measure("EURUSD")
-        # Con desfase 3 h la base se desplaza 3 h ⇒ el ciclo cae 3 velas más
-        # atrás ⇒ el acierto cambia (la serie es monótona, el signo no, pero
-        # la MUESTRA cambia). Lo que se verifica aquí es que la medición NO
-        # falla y que el resultado es estable y con la muestra esperada.
-        assert data["n"] >= 30
-        assert data["granted"] is True
-        assert data["acc"] is not None
-        assert data["wilson_lower"] is not None
+
+        async def _run(offset_h):
+            with patch("db.connection.get_pool", return_value=fake_pool), \
+                 patch("services.mt5_client.get_candles_with_offset",
+                       AsyncMock(return_value=(candles, offset_h))):
+                return await qwen_authority._measure("EURUSD")
+
+        sin_desfase = await _run(0)
+        con_desfase = await _run(3)
+        assert sin_desfase["hits"] == 40, "el fixture debe acertar con offset 0"
+        assert con_desfase["n"] >= 30
+        # El desfase SE APLICA: la base del terminal se desplaza 3 velas y la
+        # muestra deja de ser perfecta (33/40 en el fixture, no 40/40).
+        assert con_desfase["hits"] != sin_desfase["hits"], (
+            "la marca del bróker no se está alineando: misma medición con y sin desfase"
+        )
+        assert con_desfase["acc"] is not None
+        assert con_desfase["wilson_lower"] is not None
 
 
 class TestAuthoritySignificance:
@@ -288,19 +354,28 @@ class TestAuthoritySignificance:
     async def test_coin_flip_skill_does_not_grant_authority(self, monkeypatch):
         """56,5 % sobre 46 llamadas (indistinguible del azar) → SIN autoridad."""
         monkeypatch.setattr(qwen_authority, "_STATE", {})
-        candles = [
-            {"time": _T0 + i * 3600, "close": 1.1000 + i * 0.0001}
-            for i in range(200)
-        ]
-        # 20 llamadas BULLISH que ACIERTAN (sube) y 20 que FALLAN (baja):
+        candles = _zigzag_candles()
+        # 20 llamadas BULLISH que ACIERTAN y 20 BULLISH que FALLAN: la
+        # exactitud es 50 %, la base ~50 % ⇒ skill ≈ 0 pp ⇒ sin autoridad.
+        bt = [c["time"] for c in candles]
+        bc = [c["close"] for c in candles]
+        now = _T0 + 10 ** 6
+        up, down = [], []
+        for k in range(80):
+            t0 = _T0 + 1800 + k * 3600
+            d = canonical_direction(bt, bc, t0, now)
+            if d is None:
+                continue
+            (up if d > 0 else down).append(t0)
         rows = []
-        for k in range(20):
-            rows.append({"mt5_time": _T0 + 1800 + k * 3600,
-                         "llm_bias": "BULLISH", "bias_prob": 0.85})
-        # 20 más con el sesgo opuesto en un tramo que BAJA (fallan)
-        for k in range(20):
-            rows.append({"mt5_time": _T0 + 1800 + (30 + k) * 3600,
-                         "llm_bias": "BEARISH", "bias_prob": 0.85})
+        for t0 in up[:10]:
+            rows.append({"mt5_time": t0, "llm_bias": "BULLISH", "bias_prob": 0.85})
+        for t0 in down[:10]:
+            # acierta en las bajadas
+            rows.append({"mt5_time": t0, "llm_bias": "BEARISH", "bias_prob": 0.85})
+        # y otras 20 que fallan (BULLISH en bajadas)
+        for t0 in down[10:30]:
+            rows.append({"mt5_time": t0, "llm_bias": "BULLISH", "bias_prob": 0.85})
         fake_pool = MagicMock()
         fake_pool.fetch = AsyncMock(return_value=rows)
         with patch("db.connection.get_pool", return_value=fake_pool), \
@@ -311,5 +386,5 @@ class TestAuthoritySignificance:
         assert data["granted"] is False, (
             f"una skill indistinguible del azar NO concede autoridad: {data['reason']}"
         )
-        assert "azar" in data["reason"] or "no demostrada" in data["reason"]
+        assert "base" in data["reason"] or "no demostrada" in data["reason"]
         assert data["wilson_lower"] is not None
