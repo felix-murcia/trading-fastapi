@@ -3085,9 +3085,14 @@ el objetivo de DD y cuesta la mitad de la media.
 **Origen:** el 21-10 el backend decidía `CLOSE` por `time_stop` sobre la posición
 EURUSD de **0,02** lotes y el EA respondía `hold`: su guard de cierre exigía
 `totalEAVolume >= 0,03`. La posición quedaba atrapada. Además, la posición USDCHF
-`58986641010` (magic **90002**, confirmado por Félix) no la contaba el EA del gráfico
-(`position=0` con posición viva); el backend ya bloqueaba el duplicado por conteo MT5,
-pero la brecha no era visible en el payload.
+`58986641010` no la contaba el EA del gráfico (`position=0` con posición viva); el
+backend ya bloqueaba el duplicado por conteo MT5, pero la brecha no era visible en el
+payload. **Corrección en vivo (13:39):** el audit de v14.0 demostró que el **EA** tiene
+magic **90002** y la posición es **ajena** (`ea_my_positions=0`,
+`ea_foreign_positions=1`). Es decir, el magic de la posición **no** es 90002: es
+heredada del EA v13.9 (probablemente el default **90001**; el script
+`mql5/ListPositionsMagic.mq5` lo confirma en MT5). La frase anterior «magic 90002
+confirmado» se refería al magic del EA, no al de la posición.
 
 **Cambios (sólo MQL5 + traza del backend):**
 
@@ -3101,14 +3106,59 @@ pero la brecha no era visible en el payload.
    TODAS las posiciones del símbolo en MT5 y aplicando el tope por par = 1.
 3. **Versión:** `#property version "14.0"` y `EA_VERSION "14.0"`.
 
-**Estado:** código y tests listos; **pendiente de que Félix recompile e instale el EA
-v14.0** en los gráficos (el binario v13.9 sigue ejecutándose hasta entonces). El
-time-stop de EURUSD no se ejecutará hasta esa instalación.
+**Estado (2026-10-21 13:38–13:40): instalado y verificado en vivo.** El time-stop de
+EURUSD cerró la posición de **0,02** a las 11:38:47 UTC (`order_filled` 70;
+`trade_outcomes` 279; **+0,77 €**; balance 502,31 → 503,06). El guard 0,01 funciona.
+El EA reporta `ea_magic=90001`, `my=1`, `foreign=0` en EURUSD y `ea_magic=90002`,
+`my=0`, `foreign=1` en USDCHF. La posición USDCHF `58986641010` es **ajena** al EA
+v14.0 (magic ≠ 90002): el EA no la gestiona; el backend la ve y bloquea el duplicado.
+Queda pendiente decidir si se cierra o se adopta (ver abajo).
 
 **Tests:** `test_g3_one_position_per_pair.py` (+2: guard 0,01 y recuento de magic
 ajeno), `test_ea_poll_offset.py`, `test_ea_close_outbox.py`, `test_orders_prepare.py`
 y `test_e2e_ai_predict.py` (+1: auditoría del diagnóstico) — **54 passed** en los
 ficheros afectados. La suite completa se corre antes del commit final.
+
+### Qué significa el HOLD de USDCHF (13:39:48)
+
+El ciclo `USDCHF_1792593540000` terminó en **HOLD** con este audit:
+
+| Campo | Valor | Lectura |
+|---|---|---|
+| `ppo_direction` | **BUY** | El PPO proponía comprar |
+| `llm_bias` | **BEARISH** | Qwen veía el mercado bajista |
+| `quality_score` | 8,0 | **Ya no veta** (Opción B) |
+| `regime` | RANGING | **Ya no veta** (Opción B) |
+| `reentry_ok` | **false** | El filtro de re-entrada bloqueó |
+| `reentry_window` | true | Está dentro de la ventana de 2 velas |
+| `qwen_degraded` | false | Qwen respondió; no es fail-closed |
+| `veto_reason` | **reentry_veto** | La razón primaria del HOLD |
+
+No es un fallo: es la cadena nueva. `quality` y `regime` se retiraron porque no
+demostraron skill; el único control de Qwen que se queda es `reentry_ok`, y fue el que
+bloqueó. Además, la posición USDCHF ajena mantiene el conteo del backend en 1, así que
+tampoco habría entrado una segunda posición. El EA respondió `action=hold`, coherente.
+
+### Cómo identificar la posición ajena (script read-only)
+
+`mql5/ListPositionsMagic.mq5` imprime ticket, símbolo, **magic**, volumen y tipo de cada
+posición. No abre, no cierra, no modifica nada. Compilar en MetaEditor y ejecutar en
+cualquier gráfico; la salida va a la pestaña **Expertos**.
+
+Con ese dato, la decisión es de Félix:
+
+1. **Cerrar la posición ajena** (manual o dejar que toque SL/TP) y dejar que el EA
+   v14.0 (magic 90002) abra una nueva USDCHF que **sí** gestiona. Es la opción limpia:
+   preserva la separación 90001 (EURUSD) / 90002 (USDCHF). Mientras la ajena exista, la
+   canario USDCHF no abre y el time-stop/reentry no la cubren.
+2. **Adoptarla** poniendo el `MagicNumber` del EA USDCHF al magic de la posición
+   (probablemente 90001). El EA la gestionaría, pero se pierde la separación de magics;
+   no se recomienda sin actualizar la convención y el audit.
+3. **Esperar al SL/TP**: la posición está protegida, pero la canario queda en pausa y
+   sin time-stop. Es la opción si no se quiere realizar el flotante actual (−6,70 €).
+
+**No se toca el EA para “adoptar” automáticamente posiciones ajenas:** su contrato es
+su magic. Mezclar mundos fue justo el problema que P2-4 cerró.
 
 ---
 
