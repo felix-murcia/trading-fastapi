@@ -174,6 +174,75 @@ class TestPrepareEndpoint:
         assert data["rejection_reason"].startswith("volume_out_of_range")
 
 
+class TestUsdExposureGuard:
+    """2026-10-21: la orden nueva no puede contradecir la pata USD de una
+    posición abierta (EURUSD BUY corto USD vs USDCHF BUY largo USD)."""
+
+    _USDCHF_BUY = {
+        "symbol": "USDCHF",
+        "type": "buy",
+        "volume": 0.05,
+        "price": 0.82536,
+        "sl": 0.82372,
+        "ticket": 58986641010,
+    }
+
+    def test_opposite_usd_blocks(self, monkeypatch):
+        monkeypatch.setattr(order_manager.settings, "usd_exposure_guard", True)
+        response, pool = _prepare(
+            _order(type="BUY"),
+            positions={"open": [self._USDCHF_BUY]},
+        )
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["approved"] is False
+        assert data["rejection_reason"].startswith("USD_EXPOSURE_CONFLICT")
+        assert "USDCHF" in data["rejection_reason"]
+        # El guard corre antes del Risk Guardian: no se consulta ni se inserta.
+        pool.risk_check.assert_not_called()
+        pool.fetchval.assert_not_called()
+        audit = [c.args for c in pool.execute.await_args_list if len(c.args) >= 4]
+        assert any(
+            args[2] == "order_rejected" and "usd_exposure_conflict" in args[3]
+            for args in audit
+        )
+
+    def test_same_usd_allows(self, monkeypatch):
+        monkeypatch.setattr(order_manager.settings, "usd_exposure_guard", True)
+        response, pool = _prepare(
+            _order(type="BUY"),
+            positions={"open": [{
+                "symbol": "GBPUSD", "type": "buy", "volume": 0.05,
+                "price": 1.27, "sl": 1.265, "ticket": 11,
+            }]},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["approved"] is True
+        pool.risk_check.assert_called_once()
+
+    def test_sell_vs_usdchf_buy_allows(self, monkeypatch):
+        # EURUSD SELL = largo USD; USDCHF BUY = largo USD: alineados.
+        monkeypatch.setattr(order_manager.settings, "usd_exposure_guard", True)
+        response, pool = _prepare(
+            _order(type="SELL", entry=1.08500, sl=1.09000, tp=1.07500),
+            positions={"open": [self._USDCHF_BUY]},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["approved"] is True
+        pool.risk_check.assert_called_once()
+
+    def test_guard_off_preserves_behavior(self, monkeypatch):
+        monkeypatch.setattr(order_manager.settings, "usd_exposure_guard", False)
+        response, pool = _prepare(
+            _order(type="BUY"),
+            positions={"open": [self._USDCHF_BUY]},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["approved"] is True
+        pool.risk_check.assert_called_once()
+
+
+
 class TestEAGateContract:
     """La fuente MQL5 debe demostrar que TODA orden pasa por el gate."""
 

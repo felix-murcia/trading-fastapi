@@ -3114,6 +3114,13 @@ El EA reporta `ea_magic=90001`, `my=1`, `foreign=0` en EURUSD y `ea_magic=90002`
 v14.0 (magic ≠ 90002): el EA no la gestiona; el backend la ve y bloquea el duplicado.
 Queda pendiente decidir si se cierra o se adopta (ver abajo).
 
+**Actualización (2026-10-21 12:12:27 UTC):** la posición ajena se cerró por **SL** a
+0,82372 ⇒ **−8,86 €** (`deal_ticket` 58592599823; `trade_outcomes` 280;
+`exit_reason=sl`, `sl_hit=true`). El historial de deals confirma **magic 90001** (el EA
+de USDCHF es 90002). La decisión «cerrar/adoptar» queda resuelta por el SL; el EA v14.0
+ya no tiene una posición ajena en USDCHF. El incidente de exposición USD (EURUSD BUY +
+USDCHF BUY) y el guard nuevo se documentan al final del README.
+
 **Tests:** `test_g3_one_position_per_pair.py` (+2: guard 0,01 y recuento de magic
 ajeno), `test_ea_poll_offset.py`, `test_ea_close_outbox.py`, `test_orders_prepare.py`
 y `test_e2e_ai_predict.py` (+1: auditoría del diagnóstico) — **54 passed** en los
@@ -3371,3 +3378,76 @@ estable con esta muestra».
   los vetos retirados, el ledger por símbolo y la curva de equity.
 - **No se toca:** tamaño de posición (C1), señal del PPO (C2), umbral de confianza
   (`MIN_ENTRY_CONFIDENCE=0.0`) ni el bundle activo.
+
+---
+
+## 2026-10-21 · GUARD DE EXPOSICIÓN USD — dos posiciones opuestas en el dólar (incidente y fix)
+
+**Incidente (detectado por Félix):** durante la mañana quedaron abiertas a la vez
+`EURUSD BUY 0,05` (ticket `58988851197`, 1,12322) y `USDCHF BUY 0,05` (ticket
+`58986641010`, 0,82536). Ambas son `BUY`, pero **no van en la misma dirección del
+dólar**: EURUSD BUY es **corto USD** (~5.616 USD) y USDCHF BUY es **largo USD**
+(5.000 USD). El neto era −616 USD; las patas USD se anulaban en ~94 %, la cuenta
+pagaba dos spreads y quedaba expuesta al cruce EUR/CHF. Una subía cuando la otra
+bajaba.
+
+**Resolución real (no la del guard):** la USDCHF se cerró por **SL** a 0,82372 el
+**2026-10-21 12:12:27 UTC** (15:12:27 en el reloj del bróker): **−8,86 €**,
+`deal_ticket` **58592599823**, `trade_outcomes` **280**, `exit_reason=sl`,
+`sl_hit=true`. El historial de deals confirma su **magic 90001**; el EA de USDCHF es
+**90002**, así que la posición era ajena al EA v14.0 (`foreign_positions=1`). No la
+cerró la auditoría: la cerró el SL del bróker. Balance **494,20 €**; equity **494,73 €**.
+La EURUSD `58988851197` sigue abierta (BUY 0,05, +0,53 €, SL 1,12198, TP 1,12531);
+Félix decidió dejarla gestionada. El PPO actual dice SELL, pero el EA la mantiene por
+`position_veto`: es una posición gestionada, no una segunda pata.
+
+**Causa raíz (el error de diseño):**
+
+1. `MAX_TOTAL_SAME_DIR_POSITIONS=4` cuenta **BUY/SELL**, no el signo del dólar.
+   EURUSD BUY y USDCHF BUY son ambos `BUY` ⇒ `same_dir_open=2 < 4` ⇒ permitido.
+   El guard se diseñó para EURUSD/GBPUSD (ambos BUY = ambos cortos USD), pero en los
+   pares con **USD como base** (USDCHF, USDJPY, USDCAD…) un BUY es **largo USD**.
+2. `MAX_TOTAL_RISK_PCT=0.09` sólo suma el riesgo 1R (~14,4 €, 2,9 % del equity);
+   **no mide correlación ni el signo del dólar**.
+3. La USDCHF era **ajena al EA v14.0** (magic 90001 vs 90002). El backend bloqueaba
+   nuevas entradas en USDCHF por el conteo MT5, pero **no** la pata EURUSD: cada par
+   decide solo y no existía una vista de exposición USD de la cuenta.
+4. `orders` 71 (USDCHF) quedó `filled`; `orders` 73 (EURUSD) sigue `pending` porque
+   el EA no reporta la apertura y se marca `filled` al cierre. No es la causa; el
+   Risk Guardian usa las posiciones de MT5, no el estado de `orders`.
+
+**Fix (capa de riesgo, no de señal):** `fastapi/services/usd_exposure.py`:
+
+- `usd_sign(symbol, type)`: `+1` largo USD, `−1` corto USD, `None` sin pata USD.
+  Quote=USD (EURUSD, GBPUSD, AUDUSD, NZDUSD, XAUUSD): BUY `−1` / SELL `+1`.
+  Base=USD (USDCHF, USDJPY, USDCAD, USDCNH, USDSEK): BUY `+1` / SELL `−1`.
+- `usd_conflict(symbol, type, open_positions)`: devuelve el conflicto si la orden
+  nueva va en sentido USD **contrario** a **cualquier** posición abierta de otro
+  símbolo. Incluye las posiciones **ajenas** (el riesgo es de la cuenta, no del
+  magic). El mismo símbolo se salta: ahí manda `position_veto` / el tope por par.
+- `order_manager.prepare` lo evalúa **antes del Risk Guardian** y rechaza con
+  `USD_EXPOSURE_CONFLICT: <símbolo> <tipo> (ticket <id>)`; audita `order_rejected`
+  con `reason=usd_exposure_conflict` y el conflicto completo.
+- `USD_EXPOSURE_GUARD=1` en `.env` (default del código `False`: los tests y otros
+  entornos no cambian). No toca dirección, tamaño, bundle ni time-stop.
+
+**Qué habría pasado con el guard:** la EURUSD BUY de las 11:45 habría sido rechazada
+mientras la USDCHF BUY (larga USD) seguía abierta. Tras el SL de las 12:12, la EURUSD
+BUY podría abrirse si la señal seguía vigente. El coste es no añadir la pata opuesta;
+el beneficio es que la cuenta no paga dos spreads por una exposición que se anula.
+El guard **no cierra** posiciones: sólo rechaza la orden nueva.
+
+**Tests (42 nuevos):** `test_usd_exposure.py` (38: 27 de mapping + 11 de conflicto) y
+`test_orders_prepare.py` (4 de integración: opuesto bloquea antes del Risk Guardian
+sin insertar orden; mismo signo permite; EURUSD SELL + USDCHF BUY permite; guard off
+conserva el comportamiento). **Suite: 1264 passed + 2 xfailed** (antes 1222).
+Evidencia de despliegue: `docker compose up -d --build fastapi`; `/health` OK;
+`docker exec trading-fastapi python -c "from config import settings;
+print(settings.usd_exposure_guard)"` → `True`; `usd_conflict` en vivo con la EURUSD
+abierta y una USDCHF BUY hipotética → conflicto `USDCHF/BUY`.
+
+El `trade_outcomes` 280 es la fuente del −8,86 €; la última línea del `daily_ledger`
+(11:57) es anterior al cierre; la siguiente línea USDCHF mostrará **0/2** y el
+histórico **−8,32 €**. El track record vivo EURUSD (`/api/v1/ai/ledger`) sigue
+190 trades / 77 wins / 113 losses / +341,81 €; el canario USDCHF es una línea aparte.
+

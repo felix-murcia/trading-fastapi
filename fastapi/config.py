@@ -21,6 +21,13 @@ class Settings(BaseSettings):
     # cuenta — corta el apalancamiento del factor USD compartido entre pares
     # correlacionados (EURUSD/GBPUSD ρ≈0.7-0.9). 0 = desactivado.
     max_total_same_dir_positions: int = 0
+    # 2026-10-21 (incidente EURUSD/USDCHF): guard de exposición USD. Si True,
+    # rechaza una orden nueva cuyo signo USD sea contrario al de cualquier
+    # posición abierta (incluidas las de otro magic/estrategia). Default
+    # False para no cambiar entornos ni tests; el .env vivo lo activa con
+    # USD_EXPOSURE_GUARD=1. No es una señal: no toca dirección, tamaño ni
+    # bundle.
+    usd_exposure_guard: bool = False
     # C1 (orden Félix 2026-10-20, informe de viabilidad): el riesgo por
     # operación se puede reducir con la env PPO_RISK_PCT (el default del
     # código conserva el valor histórico 0.03). Motivo (medido):

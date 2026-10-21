@@ -26,6 +26,7 @@ from services.order_validator import (
     check_duplicate,
     OrderValidationError,
 )
+from services.usd_exposure import usd_conflict
 
 
 async def _audit(cycle_id: str, event: str, data: dict) -> None:
@@ -184,6 +185,26 @@ async def prepare(req: OrderPrepareRequest) -> OrderPrepareResponse:
             p for p in positions_data.get("open", [])
             if isinstance(p, dict)
         ]
+        # 2026-10-21 (incidente EURUSD BUY + USDCHF BUY): el tope
+        # `max_total_same_dir_positions` cuenta BUY/SELL, no el signo del
+        # dólar. EURUSD BUY es corto USD; USDCHF BUY es largo USD; se veían
+        # como "misma dirección" y pasaban. Este guard rechaza la orden nueva
+        # si su pata USD contradice cualquier posición abierta, incluidas las
+        # de otro magic. Es una capa de RIESGO, no una señal.
+        if settings.usd_exposure_guard:
+            conflict = usd_conflict(req.symbol, req.type, open_all)
+            if conflict:
+                await _audit(req.cycle_id, "order_rejected", {
+                    "reason": "usd_exposure_conflict",
+                    "symbol": req.symbol,
+                    "type": req.type,
+                    **conflict,
+                })
+                return _reject(
+                    "USD_EXPOSURE_CONFLICT: "
+                    f"{conflict['conflict_symbol']} {conflict['conflict_type']} "
+                    f"(ticket {conflict.get('conflict_ticket')})"
+                )
         open_count = sum(1 for p in open_all if p.get("symbol") == req.symbol)
         # P2-4: exposición AGREGADA de la cuenta (todas las estrategias y
         # pares) — un límite que ninguna estrategia puede rebasar sola.
