@@ -92,3 +92,39 @@ class TestLedgerEndpoint:
         body = r.json()
         assert "sources" in body and "method" in body
         assert "sistema_vivo" in body["sources"]
+
+
+class _TrackRecordPool:
+    def __init__(self):
+        self.query = None
+        self.args = None
+
+    async def fetch(self, query, *args):
+        self.query = query
+        self.args = args
+        return [{
+            "n": 3, "pnl": 4.77, "expectancy": 1.59,
+            "wins": 1, "losses": 2,
+            "first_entry": None, "last_exit": None,
+        }]
+
+
+class TestLiveTrackRecordWinRule:
+    """El track record vivo también clasifica con la regla de 3 €.
+
+    Un +0,54 € o +0,77 € es una pérdida; antes la SQL usaba `pnl > 0` y
+    inflaba el win rate del ledger de fiabilidad.
+    """
+
+    @pytest.mark.asyncio
+    async def test_uses_win_threshold_and_publishes_it(self):
+        pool = _TrackRecordPool()
+        with patch("db.connection.get_pool", lambda: pool):
+            tr = await ledger_mod._live_track_record("EURUSD")
+        assert tr["wins"] == 1
+        assert tr["losses"] == 2
+        assert tr["win_rate"] == 0.3333
+        assert tr["win_threshold_eur"] == 3.0
+        assert "pnl >= $2" in pool.query
+        assert "pnl < $2" in pool.query
+        assert pool.args[1] == 3.0

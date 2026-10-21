@@ -8,9 +8,11 @@ Contrato:
   (`trade_outcomes`) sin creerle a nadie.
 """
 import asyncio
+import datetime as dt
 import json
 import os
 import tempfile
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -94,3 +96,100 @@ class TestPerSymbol:
         monkeypatch.setattr(daily_ledger, "record_now", fake)
         out = asyncio.run(daily_ledger.record_all(["EURUSD", "USDCHF"]))
         assert [e["symbol"] for e in out] == ["USDCHF"]
+
+
+class _FakePool:
+    """Pool mínimo: registra la SQL y devuelve filas controladas."""
+
+    def __init__(self, trades, hist):
+        self.trades = trades
+        self.hist = hist
+        self.fetch_query = None
+        self.fetch_args = None
+        self.fetchrow_query = None
+        self.fetchrow_args = None
+
+    async def fetch(self, query, *args):
+        self.fetch_query = query
+        self.fetch_args = args
+        return self.trades
+
+    async def fetchrow(self, query, *args):
+        self.fetchrow_query = query
+        self.fetchrow_args = args
+        return self.hist
+
+
+class _FakeResponse:
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return {"equity": 500.0}
+
+
+class _FakeHttpxClient:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def get(self, *args, **kwargs):
+        return _FakeResponse()
+
+
+class TestWinClassification:
+    """AGENTS.md: un cierre < 3 € es PÉRDIDA, aunque sea positivo.
+
+    Antes `today_wins`/`history.wins` usaban `pnl > 0`: el cierre USDCHF
+    +0,54 € y el EURUSD +0,77 € aparecían como ganancias. Ahora la línea
+    declara `win_threshold_eur` y la SQL usa el mismo umbral.
+    """
+
+    def _entry(self, trades, hist):
+        pool = _FakePool(trades, hist)
+        with patch("db.connection.get_pool", lambda: pool), \
+             patch("httpx.AsyncClient", _FakeHttpxClient), \
+             patch("services.timebase.broker_offset_hours",
+                   AsyncMock(return_value=3)), \
+             patch("services.timebase.utc_day_bounds",
+                   lambda now: (now, now)), \
+             patch("core.pair.default_model_path",
+                   side_effect=FileNotFoundError), \
+             patch("services.qwen_authority.get_authority",
+                   AsyncMock(return_value={
+                       "granted": False, "n": 0, "acc": None, "base": None,
+                       "skill_pp": None, "wilson_lower": None,
+                       "measured_at": None, "reason": "sin muestra",
+                   })):
+            entry = asyncio.run(daily_ledger.build_daily_entry("EURUSD"))
+        return entry, pool
+
+    def test_sub_3eur_positives_count_as_losses(self):
+        entry, pool = self._entry(
+            [{"pnl": 0.77}, {"pnl": 5.0}, {"pnl": -1.0}],
+            {"n": 3, "pnl": 4.77, "wins": 1, "losses": 2},
+        )
+        assert entry["today_wins"] == 1
+        assert entry["today_losses"] == 2
+        assert entry["today_pnl_from_winners_eur"] == 5.0
+        assert entry["today_pnl_from_losers_eur"] == -0.23
+        assert entry["history"]["wins"] == 1
+        assert entry["history"]["losses"] == 2
+        assert entry["win_threshold_eur"] == 3.0
+        assert "pnl >= $2" in pool.fetchrow_query
+        assert "pnl < $2" in pool.fetchrow_query
+        assert pool.fetchrow_args[1] == 3.0
+
+    def test_close_at_3eur_is_a_win(self):
+        entry, _ = self._entry(
+            [{"pnl": 3.0}],
+            {"n": 1, "pnl": 3.0, "wins": 1, "losses": 0},
+        )
+        assert entry["today_wins"] == 1
+        assert entry["today_losses"] == 0
+        assert entry["today_pnl_from_winners_eur"] == 3.0

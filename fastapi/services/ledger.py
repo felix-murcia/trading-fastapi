@@ -26,6 +26,7 @@ import logging
 import os
 from typing import Optional
 
+from core.rules import MIN_WIN_EUR
 from services import qwen_authority
 
 logger = logging.getLogger(__name__)
@@ -54,11 +55,11 @@ async def _live_track_record(symbol: str = "EURUSD") -> dict:
             SELECT count(*) n,
                    COALESCE(sum(pnl),0) pnl,
                    COALESCE(avg(pnl),0) expectancy,
-                   count(*) FILTER (WHERE pnl > 0) wins,
-                   count(*) FILTER (WHERE pnl <= 0) losses,
+                   count(*) FILTER (WHERE pnl >= $2) wins,
+                   count(*) FILTER (WHERE pnl < $2) losses,
                    min(entry_time) first_entry, max(exit_time) last_exit
             FROM trade_outcomes WHERE symbol = $1
-            """, symbol,
+            """, symbol, MIN_WIN_EUR,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[LEDGER] no se pudo leer el track record vivo: %s", exc)
@@ -73,6 +74,7 @@ async def _live_track_record(symbol: str = "EURUSD") -> dict:
         "expectancy_eur": round(float(r["expectancy"] or 0), 2),
         "wins": int(r["wins"] or 0),
         "losses": int(r["losses"] or 0),
+        "win_threshold_eur": MIN_WIN_EUR,
         "win_rate": round((int(r["wins"] or 0) / n), 4) if n else None,
         "first_entry": r["first_entry"].isoformat() if r["first_entry"] else None,
         "last_exit": r["last_exit"].isoformat() if r["last_exit"] else None,

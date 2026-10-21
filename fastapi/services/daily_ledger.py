@@ -27,6 +27,8 @@ import os
 import time
 from typing import Optional
 
+from core.rules import MIN_WIN_EUR, is_winning_close
+
 LEDGER_PATH = os.environ.get(
     "DAILY_LEDGER_PATH",
     os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ops", "daily_ledger.jsonl"),
@@ -89,20 +91,25 @@ async def build_daily_entry(symbol: str = "EURUSD") -> dict:
     correct = wrong = 0
     pnl_correct = pnl_wrong = 0.0
     for t in trades:
-        correct += 1 if float(t["pnl"]) > 0 else 0
-        if float(t["pnl"]) > 0:
-            pnl_correct += float(t["pnl"])
+        pnl = float(t["pnl"])
+        # Convención AGENTS.md / core.rules: un cierre < 3 € es PÉRDIDA,
+        # aunque sea positivo. Antes se contaba `pnl > 0` y un +0,54 € o
+        # +0,77 € contaminaba el win rate y la descomposición del PnL.
+        if is_winning_close(pnl):
+            correct += 1
+            pnl_correct += pnl
         else:
-            pnl_wrong += float(t["pnl"])
+            wrong += 1
+            pnl_wrong += pnl
 
     # histórico completo (la referencia de confianza)
     hist = await pool.fetchrow(
         """
         SELECT count(*) n, COALESCE(sum(pnl),0) pnl,
-               count(*) FILTER (WHERE pnl > 0) wins,
-               count(*) FILTER (WHERE pnl <= 0) losses
+               count(*) FILTER (WHERE pnl >= $2) wins,
+               count(*) FILTER (WHERE pnl < $2) losses
         FROM trade_outcomes WHERE symbol = $1
-        """, symbol,
+        """, symbol, MIN_WIN_EUR,
     )
 
     # estado del bundle
@@ -147,6 +154,10 @@ async def build_daily_entry(symbol: str = "EURUSD") -> dict:
         # para convertirlas (auditable, sin ambigüedad).
         "day_basis": "utc",
         "broker_offset_h": broker_off,
+        # Regla de clasificación declarada en la propia línea: un cierre
+        # sólo es WIN si pnl >= 3 € (AGENTS.md). Así el lector no tiene que
+        # adivinar por qué un +0,77 € aparece como pérdida.
+        "win_threshold_eur": MIN_WIN_EUR,
         "equity_eur": equity,
         # El equity/balance son de la CUENTA; las operaciones y el PnL de
         # `trades_today` son del SÍMBOLO de la línea. Se declara para que nadie

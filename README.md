@@ -3160,6 +3160,55 @@ Con ese dato, la decisión es de Félix:
 **No se toca el EA para “adoptar” automáticamente posiciones ajenas:** su contrato es
 su magic. Mezclar mundos fue justo el problema que P2-4 cerró.
 
+### El cierre de EURUSD fue automático (time_stop), no manual — y la regla de 3 €
+
+Félix preguntó si el cierre de EURUSD lo había hecho yo. **No.** No se envió ninguna
+orden de cierre desde la auditoría; sólo se ejecutaron consultas de lectura. El cierre
+lo ejecutó el **EA v14.0** porque el backend decidió `CLOSE` por `time_stop`:
+
+- `ai_predict_cycle` 11:38:47 UTC: `decision=CLOSE`, `veto=time_stop`.
+- `ea_decision` 11:38:47.426 UTC: `action=close`, `received_decision=CLOSE`.
+- `order_filled` 11:38:47 UTC: orden DB **70**; `trade_outcomes` **279** (+0,77 €).
+
+**La regla de 3 € no prohíbe el cierre; clasifica.** Un cierre de +0,77 € es una
+**PÉRDIDA** (`core.rules.is_winning_close`: `pnl >= 3,0` ⇒ WIN; `pnl < 3,0` ⇒ LOSS).
+El Journal de Qwen ya lo etiquetaba así, pero dos consultas del registro usaban
+`pnl > 0` y lo contaban como WIN:
+
+| Punto | Antes | Ahora |
+|---|---|---|
+| `services/daily_ledger.py` (today + history) | `pnl > 0` | `is_winning_close` / `pnl >= $2` con `MIN_WIN_EUR` |
+| `services/ledger.py` (track record vivo) | `pnl > 0` | `pnl >= $2` con `MIN_WIN_EUR` |
+| `services/trade_journal.py` | ya correcto | sin cambio |
+| `/v1/smc/analytics` | ya correcto | sin cambio |
+| `ml/trading_env_v2.py` | ya correcto | sin cambio |
+
+La línea nueva del registro (11:57 UTC) lo demuestra:
+
+- **EURUSD:** `today_wins=0`, `today_losses=1`, `today_pnl_from_losers_eur=0.77`;
+  histórico **77 wins / 113 losses** (190 trades; **40,5 %**), PnL +341,81 €.
+- **USDCHF:** `today_wins=0`, `today_losses=1`, `today_pnl_from_losers_eur=0.54`;
+  histórico **0 wins / 1 loss**.
+- `win_threshold_eur: 3.0` queda declarado en la propia línea.
+
+**Lo que esto significa (sin edulcorar):** el win rate real del sistema es **40,5 %**,
+no el 50,8 % que publicaban las líneas 11:21/11:26. **20 cierres positivos <3 €**
+(19 históricos + el +0,77 € de hoy) se estaban contando como victorias. El PnL total
+no cambia (+341,81 €) y la media por operación tampoco (1,80 €/trade); cambia el
+recuento de aciertos. Las líneas 11:21 y 11:26 **no se reescriben** (append-only):
+quedan como histórico pre-corrección, y la primera línea con la regla aplicada es la
+de las 11:57. El `trade_outcomes` conserva el PnL real de cada cierre; lo que se
+corrige es su clasificación.
+
+**Si lo que se quiere es que el time-stop NO cierre un positivo <3 €** (dejarlo correr
+a TP/SL), es una política distinta y hay que decidirla aparte: la regla de AGENTS.md
+es de **clasificación**, no de bloqueo de salida. El time-stop es una salida mecánica
+por tiempo; puede realizar +0,77 € y eso cuenta como pérdida, no como acierto.
+
+**Tests:** `test_daily_ledger.py` (+2: +0,77/+5,00/−1,00 ⇒ 1 win/2 losses; +3,00 ⇒
+win) y `test_t31_ledger.py` (+1: track record con umbral 3 € y SQL `$2`). **Suite
+completa: 1222 passed + 2 xfailed.**
+
 ---
 
 ## 2026-10-21 (CORRECCIÓN T-31.10) · EL HORIZONTE DE +24 h NO ESTABA MADURO — y los otros dos controles de Qwen
