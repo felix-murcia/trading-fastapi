@@ -144,3 +144,43 @@ no protege. Con (3), ambos desaparecen.
 - Buffer: `SPREAD_BUFFER_PIPS = 0.0`.
 - Suelo de lote: `min_lock_eur` a 0 (desactiva el mínimo y el veto).
 - La paridad train↔serve NO se revierte: es la corrección del defecto.
+
+---
+
+## 8. Variante B — "el techo más cercano QUE PAGA" (PRE-REGISTRADA, NO IMPLEMENTADA)
+
+**Observación en vivo (2026-10-21, 19:35 UTC):** con el TP en el techo más
+cercano, su valor en € varía mucho (1,78 € … 8,12 €). Cuando no llega al
+mínimo de clasificación (3 €) el gate de recompensa **descarta la entrada** —
+pero el **SL (el suelo más cercano) sigue siendo válido**: el siguiente techo
+más lejos pagaría. Frecuencia medida: 1 de 8 propuestas bloqueadas (12,5 %) en
+6 h ⇒ no es una avalancha, pero son operaciones válidas que se pierden.
+
+**Variante B:** el TP = el techo confirmado más cercano **cuyo valor en € (al
+lote elegido) sea ≥ 3 €**; si no hay ninguno, no hay trade (el gate lo
+bloquea igual). El SL y el LOTE **no cambian** ⇒ riesgo neutro por operación
+(sólo cambia el TP).
+
+**Medición** (`scripts/measure_ceiling_that_pays.py`, mismo motor, 29 981
+velas H1 × 2 pares, 2 ventanas disjuntas, horizonte 12 velas):
+
+| | señales que pasan | TP | P(TP) | P(SL) | E[R] | t |
+|---|---|---|---|---|---|---|
+| EURUSD TREN · A (actual) | 67,9 % | 17,1 p | 35 % | 52 % | −0,021 | 4,0 h |
+| EURUSD TREN · **B** | **84,6 % (+16,7 pp)** | 18,2 p | 35 % | 49 % | −0,019 | 4,4 h |
+| EURUSD TEST · A / **B** | 69,7 % / **86,2 % (+16,5 pp)** | 15,5 / 16,8 p | 37 % / 36 % | 52 % / 50 % | −0,015 / −0,015 | 3,7 / 4,1 h |
+| USDCHF TREN · A / **B** | 78,2 % / **84,2 % (+6,0 pp)** | 15,9 / 16,4 p | 38 % / 37 % | 47 % / 46 % | −0,008 / −0,008 | 4,3 / 4,5 h |
+| USDCHF TEST · A / **B** | 79,9 % / **85,5 % (+5,6 pp)** | 14,4 / 14,8 p | 39 % / 38 % | 45 % / 44 % | −0,013 / −0,011 | 4,7 / 4,9 h |
+
+⇒ B recupera **6-17 pp de señales** con la **misma expectativa por operación**
+y +0,3-0,4 h de tiempo. Riesgo neutro (mismo SL, mismo lote).
+
+**Decisión: NO se implementa todavía.** Motivo (protocolo): la geometría G3-2
+acaba de cambiar y **todavía no hay ni un retrain que evalúe el mundo real**;
+encadenar un segundo cambio de geometría antes de medir el primero repite
+exactamente el bucle que Félix ha señalado. Orden: (1) que el sistema opere y
+recoja operaciones con la geometría G3-2; (2) un retrain pre-registrado
+(ahora sí evaluará el mundo que corre); (3) con ese veredicto, decidir B.
+
+**Reversión de B (si se implementa):** `MIN_WIN_EUR` a 0 en la selección de
+techo ⇒ el TP vuelve al techo más cercano.
