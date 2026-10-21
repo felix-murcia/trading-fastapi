@@ -295,9 +295,16 @@ def get_risk_guardian(symbol: str = LEGACY_SYMBOL) -> RiskGuardian:
     guardian = _GUARDIANS.get(symbol)
     if guardian is None:
         # P3-3: el límite diario sale del spec del par en PAIRS (canario=2%).
+        # G3 (2026-10-21): el tope por par sale del config (1 = la
+        # política de una operación por par). Antes era 5 (el default de
+        # RiskState) ⇒ el backend NO aplicaba la política y depended del
+        # recuento del EA (frágil en hedging:.PositionSelect elige UNA
+        # posición y el filtro por magic puede fallar ⇒ el veto no
+        # disparaba y se abría una segunda operación).
         guardian = RiskGuardian(
             daily_loss_pct=_daily_loss_pct_for(symbol),
             account=_ACCOUNT,
+            max_positions=int(settings.max_positions_per_pair),
         )
         _GUARDIANS[symbol] = guardian
         logger.warning(

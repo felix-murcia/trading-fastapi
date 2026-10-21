@@ -2924,3 +2924,35 @@ El backend está listo y contesta; el EA es quien pregunta. En MT5:
 3. dejar correr: el EA sondeará `/predict` con `symbol=USDCHF` cada 5 min y el backend le devolverá la decisión de la regla.
 
 **No hay cambios en MQL5** ⇒ no hay bump de versión del EA (el `MagicNumber` ya es un input).
+
+---
+
+## 2026-10-21 (G3 · U-9) · UNA OPERACIÓN A LA VEZ POR PAR — el backend ahora la aplica (y el EA la contaba mal)
+
+**Orden de Félix:** *«ATENCIÓN: el sistema ha abierto una segunda operación en USDCHF — eso contradice la política de una operación a la vez por par de divisas»*.
+
+### Confirmado y medido
+- 09:35:52 se abrió la **#1** (USDCHF BUY 0,05 @ 0,82536). 09:45:38 se abrió la **#2** (BUY 0,05 @ 0,82553) ⇒ **dos posiciones del mismo contrato, con la misma señal**.
+- El audit del ciclo de 09:45 lo delata: `"position": 0` ⇒ **el EA contaba 0 posiciones con una viva** ⇒ el veto de posición (que viaja en su payload) no podía disparar.
+
+### Dos huecos (ninguno era del "modelo")
+1. **El backend NO aplicaba la política**: el tope de posiciones por par era **5** (`RiskState.max_positions`) ⇒ con 1 posición abierta, el guardián **autorizaba** la segunda. La política dependía **sólo** del recuento del EA.
+2. **El recuento del EA es frágil en hedging**: `PositionSelect(Symbol())` + filtro por magic ⇒ `PositionSelect` elige **una sola** posición (la de menor ticket) ⇒ si ésa no es la de esa instancia, `currentPos` queda en 0.
+
+### El fix: la autoridad es el BACKEND (el conteo del MT5, que sí es correcto)
+- `config.max_positions_per_pair = 1` (la política) ⇒ el guardián de cada par lo aplica contra el conteo **real** de MT5.
+- **EA v13.9** (bump de versión): cuenta **todas** las posiciones del símbolo con **su** magic (bucle sobre `PositionsTotal()`) y **avisa** si encuentra más de una.
+- El default del código lo deja en 1 ⇒ la política es del sistema, no de una instancia.
+
+**Verificado en vivo (contenedor):**
+```
+0 posiciones de USDCHF abiertas ⇒ puede abrir: True
+1 posición abierta              ⇒ puede abrir: False  MAX_POSITIONS 1 reached
+2 posiciones abiertas           ⇒ puede abrir: False  MAX_POSITIONS 1 reached
+```
+Y en producción, con 1 USDCHF + 1 EURUSD abiertos, el ciclo de 10:00 salió **HOLD** (`reentry_veto`) ⇒ no se preparó ninguna segunda orden.
+
+### La brecha heredada, corregida
+Cerré la **duplicada** (ticket 58986766379, la de 09:45) por la vía del bróker a 0,82563 ⇒ **+0,54 €** (sin coste) y el EA la registró como cierre (`USDCHF · LONG · 0,54 € · ea`) ⇒ el estado quedó **1 posición por par**, que es la política. (La regla de negocio de 3 € la contabiliza como pérdida: +0,54 < 3 ⇒ correcto por contrato.)
+
+**Tests:** `tests/test_g3_one_position_per_pair.py` (nuevo, 7): el tope es 1, el guardián lo aplica, con 1 posición la segunda se rechaza, el EA cuenta por magic (y el patrón frágil ya no está), el EA avisa si hay más de una, y la versión del EA es 13.9. Actualizados los que codificaban el tope viejo (5) y la versión 13.8. Suite: **1200 passed + 2 xfailed**.

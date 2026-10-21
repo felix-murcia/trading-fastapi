@@ -6,10 +6,10 @@ Terminal de Ejecución y Telemetría para Cerebro Autónomo (FastAPI + PPO v3).
 - Rol del Servidor: Decisión direccional, dimensionamiento de lotes, SL, TP y gestión de riesgo.
 */
 #property copyright "AI Quant Terminal"
-#property version   "13.8"
+#property version   "13.9"
 #property strict
 
-#define EA_VERSION "13.8"
+#define EA_VERSION "13.9"
 
 #include <Trade\Trade.mqh>
 
@@ -321,10 +321,29 @@ void OnTick()
    double currentTP  = 0.0;
    int stepsInTrade  = 0;
 
-   if(PositionSelect(Symbol()))
+   // G3 (2026-10-21, orden Félix «el sistema ha abierto una segunda
+   // operación en USDCHF — contradice la política de una operación a la vez
+   // por par»): ANTES se usaba `PositionSelect(Symbol())` + filtro por magic.
+   // En una cuenta en modo HEDGING, `PositionSelect` elige UNA sola
+   // posición (la de menor ticket) ⇒ si ésa no es la de este EA (otra
+   // instancia, una operación manual o un cierre reciente), el recuento
+   // `currentPos` quedaba en 0 CON una posición abierta ⇒ el veto de
+   // posición (que viaja en este payload) no disparaba y el backend abría
+   // una SEGUNDA operación del mismo par. Ahora se CUENTAN todas las
+   // posiciones del símbolo con MI magic (y, si hay más de una —brecha
+   // heredada—, se reporta la más reciente y la cuenta queda visible).
+   int myPositions = 0;
+   ulong newestTicket = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
-      if(PositionGetInteger(POSITION_MAGIC) == MagicNumber)
+      ulong tk = PositionGetTicket(i);
+      if(tk == 0) continue;
+      if(PositionGetString(POSITION_SYMBOL) != Symbol()) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
+      myPositions++;
+      if(tk > newestTicket)
         {
+         newestTicket = tk;
          long posType = PositionGetInteger(POSITION_TYPE);
          currentPos = (posType == POSITION_TYPE_BUY) ? 1 : 2;
          entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
@@ -335,6 +354,10 @@ void OnTick()
             stepsInTrade = (int)((TimeCurrent() - pTime) / PeriodSeconds(PERIOD_M5));
         }
      }
+   if(myPositions > 1)
+      PrintFormat("[AI Terminal] %s: %d posiciones abiertas con MI magic (debería ser 1) — "
+                  "la política de una por par está violada; el backend también la "
+                  "aplica (tope por par = 1)", Symbol(), myPositions);
 
      // Construcción del payload extendido
      double mt5_now = (double)TimeCurrent();

@@ -77,9 +77,9 @@ class TestPollOffsetGate:
 
 
 class TestVersionBump:
-    def test_version_13_8_in_property_and_define(self):
-        """Bump obligatorio en cada cambio MQL5 (v13.7 → v13.8, rename
+    def test_version_13_9_in_property_and_define(self):
+        """Bump obligatorio en cada cambio MQL5 (v13.7 → v13.9, rename
         genérico AI_Quant_Terminal.mq5 — orden Félix 2026-10-18)."""
         src = _ea_source()
-        assert re.search(r'#property\s+version\s+"13\.8"', src)
-        assert re.search(r'#define\s+EA_VERSION\s+"13\.8"', src)
+        assert re.search(r'#property\s+version\s+"13\.9"', src)
+        assert re.search(r'#define\s+EA_VERSION\s+"13\.9"', src)

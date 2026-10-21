@@ -69,6 +69,13 @@ class Settings(BaseSettings):
     # pre-registrado report-only (audits/t30-pre-registration §4).
     higher_tf_features: bool = False
 
+    # G3 (2026-10-21): tope de posiciones ABIERTAS por par. 1 = la política
+    # (una operación a la vez por par de divisas). El guardián de riesgo lo
+    # aplica contra el conteo REAL del MT5 ⇒ el backend es la autoridad,
+    # no la telemetría del EA. Antes era 5 (la política no la aplicaba
+    # nadie). 0 = sin tope por par (desactivado).
+    max_positions_per_pair: int = 1
+
     # G3 (2026-10-20, orden Félix «arranca USDCHF»): único canario del
     # contrato del CANDIDATO con el bloque de TENDENCIA (que desde G3 incluye
     # `lag_return_24`, el momentum de 24 h — la señal con skill medido en
@@ -121,6 +128,17 @@ class Settings(BaseSettings):
          "decision_source": "momentum24",
          "daily_loss_pct": 2.0, "equity_allocation_pct": 20},
     ]
+    # G3 (2026-10-21, orden Félix «el sistema ha abierto una segunda
+    # operación en USDCHF — eso contradice la política de una operación a
+    # la vez por par»): el tope de posiciones por par es **1** (la política),
+    # no 5. Antes el backend NO la aplicaba (el tope por par era 5) y la
+    # política dependía del recuento del EA, que es frágil: el EA cuenta
+    # con `PositionSelect(Symbol())` (UNA posición) y luego compara el
+    # magic ⇒ en una cuenta en modo hedging, si el ticket más bajo del
+    # símbolo no es el suyo, `currentPos` queda en 0 ⇒ el veto de posición
+    # (que viaja en el payload del EA) no dispara y se abre una segunda.
+    # Ahora la autoridad es el BACKEND (el conteo del MT5, que sí es
+    # correcto) y el EA además cuenta bien (v13.9).
 
     # ─── P3-3: bloqueo por drawdown de cuenta (canario = 15%) ───────────────────
     # None (default) = solo alerta al 10% DD (comportamiento histórico).
