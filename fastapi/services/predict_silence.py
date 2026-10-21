@@ -131,7 +131,11 @@ async def _predict_silence_loop() -> None:
         try:
             # G2-6/B4: la edad se mide POR MUNDO (con dos mundos, el ciclo
             # vivo de GBPUSD enmascaraba la muerte del EA de EURUSD).
-            symbols = [ctx.config.symbol for ctx in _enabled_pairs()]
+            # BUG (G2-6, 2026-10-20, commit 62ea660): `_enabled_pairs` es
+            # async y se llamaba SIN await ⇒ el watchdog llevaba 12 h
+            # caído con «'coroutine' object is not iterable» ⇒ no
+            # vigilaba NINGÚN mundo (ni EURUSD ni GBPUSD ni USDCHF).
+            symbols = [ctx.config.symbol for ctx in await _enabled_pairs()]
             for sym in symbols:
                 age_s = await check_silence(symbol=sym)
                 if age_s is not None:
