@@ -104,7 +104,17 @@ logger = logging.getLogger(__name__)
 QWEN_URL = getattr(settings, "qwen_url", "http://100.90.16.33:8080/v1/chat/completions")
 
 QUALITY_THRESHOLD = 5.0
-RANGING_VETO = True
+
+# 2026-10-21 (Opción B, Félix): los vetos de CALIDAD y RÉGIMEN de Qwen se
+# RETIRAN de la decisión. Medido contra la base (30 d, EURUSD, +24 h):
+#   · quality < 5: n=1 propuesta ⇒ no evaluable; el umbral era inerte.
+#   · RANGING vs no-RANGING: -69,2 pp vs -53,8 pp de skill (diferencia
+#     -8,1 pp, p=0,51) ⇒ el régimen no discrimina.
+#   · la condición exacta del veto RANGING (calidad<5 o eff<0,35): n=7,
+#     0 aciertos, pero n<30 ⇒ insuficiente para dar autoridad.
+# `QUALITY_THRESHOLD` se conserva para la capa SHADOW (deliberación C3), que
+# no decide. El veto de re-entrada (`reentry_ok`) SÍ se queda: bloqueó 53
+# propuestas con 9,4 % de acierto vs base 90,6 % (p=0,0003).
 
 # holding_norm + time-stop — conversión de unidades (Félix 2026-10-08): el EA
 # mide la edad de la posición en pasos M5 ((TimeCurrent−pTime)/
@@ -341,18 +351,16 @@ def _veto_reason(
         return "reward_below_min"
     # P1 / H6 → R1 (Félix 2026-10-09): re-entrada juzgada por el CEREBRO
     # (`reentry_veto`) — sustituyó al veto duro `churn_cooldown` (constante
-    # «grabada a fuego»). Sigue declarado ANTES de los inferidos de Qwen
-    # (ranging/quality/bias): es la razón más específica del ciclo (contexto
-    # de cierre) y con final=HOLD + RANGING el ranging_veto de abajo se lo
-    # atribuiría indebidamente. Mutuamente excluyente con position_veto
-    # (position==0) y con sizing (la cadena ya revirtió a HOLD →
-    # sizing_below_min no se activa).
+    # «grabada a fuego»). Se declara ANTES del veto de sesgo: es la razón más
+    # específica del ciclo (contexto de cierre). Mutuamente excluyente con
+    # position_veto (position==0) y con sizing (la cadena ya revirtió a HOLD
+    # → sizing_below_min no se activa).
     if reentry_rejected:
         return "reentry_veto"
     # P0 / H1: gate de confianza de entrada (umbral operado por el operador).
-    # Va ANTES de los inferidos de Qwen (ranging/quality/bias): es un veto
-    # EXPLÍCITO y trazable, no una interpretación de régimen. Detrás de los
-    # mecánicos (time-stop/position/reentry) por la misma regla de prioridad.
+    # Va ANTES del veto de sesgo: es un veto EXPLÍCITO y trazable, no una
+    # interpretación de régimen. Detrás de los mecánicos
+    # (time-stop/position/reentry) por la misma regla de prioridad.
     if low_confidence:
         return "low_confidence"
     # T-31 (2026-10-20): el veto de QUÓRUM (mercado lateral sin consenso)
@@ -360,10 +368,10 @@ def _veto_reason(
     # "unknown_veto" o se atribuía a un motivo de Qwen que no había actuado.
     if quorum_rejected:
         return "quorum_veto"
-    if final == "HOLD" and qwen.get("regime") == "RANGING":
-        return "ranging_veto"
-    if final == "HOLD" and qwen.get("quality", 10) < QUALITY_THRESHOLD:
-        return "quality_veto"
+    # 2026-10-21 (Opción B): fail-closed de degradación — el cerebro no
+    # respondió; no se abre nada. No es el score de calidad (retirado).
+    if not qwen.get("ok", True):
+        return "qwen_degraded"
     # El veto de SESGO sólo se declara si REALMENTE revirtió la decisión.
     # Antes se infería del mero hecho de que el sesgo se opusiera ⇒ un HOLD
     # bloqueado por el quórum o por la falta de autoridad del LLM se
@@ -763,6 +771,13 @@ class PredictRequest(BaseModel):
     tp_price: float = 0.0
     steps_in_trade: int = 0
     mt5_time: float | None = None  # epoch desde MT5; si falta, se usa time.time() como fallback
+    # v14.0 (2026-10-21): diagnóstico del desfase de magic. El EA cuenta sólo
+    # SU magic; `foreign_positions` cuenta las del símbolo con otro magic.
+    # El backend NO decide con estos campos: cuenta MT5 por su cuenta. Sirven
+    # para que el caso «position=0 con posición viva» quede visible.
+    magic: int | None = None
+    my_positions: int = 0
+    foreign_positions: int = 0
 
 
 class PredictResponse(BaseModel):
@@ -824,6 +839,17 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         return PredictResponse(cycle_id=cycle_id, ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
     pip_size = PIP_SIZE[sym]
 
+    # v14.0 (2026-10-21): diagnóstico del desfase de magic. Si el EA reporta
+    # `position=0` pero hay posiciones del símbolo con OTRO magic, el ciclo
+    # NO está plano: el EA no las cuenta (su contrato es su magic). El backend
+    # ya bloquea duplicados por conteo MT5; esto sólo hace visible la brecha.
+    if (req.foreign_positions or 0) > 0 and env_position == 0:
+        logger.warning(
+            "[%s] EA-COUNT ║ %d posición(es) de %s con OTRO magic (EA magic=%s); "
+            "el EA reporta position=0 — el backend las ve en MT5 y bloquea el duplicado",
+            cycle_id, req.foreign_positions, sym, req.magic,
+        )
+
     # P2-3: blackout de noticias de alto impacto — mismo mecanismo que el SMC
     # (simple_pipeline → news_filter.is_news_blackout): ventana ±news_blackout_minutes
     # alrededor de un evento High/Medium de la divisa → sin órdenes (ni entrada
@@ -844,6 +870,10 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
                 "symbol": req.symbol,
                 "timeframe": req.timeframe,
                 "position": req.position,
+                # v14.0: recuentos del EA + su magic (diagnóstico del desfase).
+                "ea_magic": req.magic,
+                "ea_my_positions": req.my_positions,
+                "ea_foreign_positions": req.foreign_positions,
                 "decision": "HOLD",
                 "ml_prob": 0.5,
                 "effective_prob": 0.5,
@@ -1529,13 +1559,16 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             cycle_id, qwen["effective_prob"], settings.min_entry_confidence,
         )
         final_decision = "HOLD"
-    elif RANGING_VETO and qwen.get("regime") == "RANGING" and final_decision in ("BUY", "SELL"):
-        if qwen.get("quality", 0) < QUALITY_THRESHOLD or qwen.get("effective_prob", 0) < 0.35:
-            logger.warning("[%s] VETO RANGING ║ Régimen lateral + calidad/prob baja → HOLD", cycle_id)
-            final_decision = "HOLD"
-    elif qwen["quality"] < QUALITY_THRESHOLD and final_decision in ("BUY", "SELL"):
-        logger.warning("[%s] VETO CALIDAD ║ Score %.1f < %.1f → HOLD", cycle_id, qwen["quality"], QUALITY_THRESHOLD)
+    # 2026-10-21 (Opción B): el veto de CALIDAD por score se retiró (no
+    # demostró skill). Se conserva el FAIL-CLOSED de degradación: si el
+    # cerebro no responde (`ok=False`), no se abre nada — es seguridad
+    # mecánica, no un juicio de calidad.
+    elif not qwen.get("ok", True) and final_decision in ("BUY", "SELL"):
+        logger.warning("[%s] VETO QWEN-DEGRADADO ║ cerebro no disponible → HOLD", cycle_id)
         final_decision = "HOLD"
+    # 2026-10-21 (Opción B): los vetos RANGING y CALIDAD se retiraron — no
+    # demostraron skill contra la base (ver constante QUALITY_THRESHOLD y
+    # README). `reentry_ok` sigue mandando arriba.
     bias_veto_fired = False
     if final_decision == "BUY" and qwen["bias"] == "BEARISH" and qwen.get("bias_prob", 0.5) <= 0.3:
         # T-31: el veto direccional sólo tiene autoridad si el juez la ha
@@ -1772,6 +1805,10 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             "symbol": req.symbol,
             "timeframe": req.timeframe,
             "position": req.position,
+            # v14.0: recuentos del EA + su magic (diagnóstico del desfase).
+            "ea_magic": req.magic,
+            "ea_my_positions": req.my_positions,
+            "ea_foreign_positions": req.foreign_positions,
             "decision": final_decision,
             "ml_prob": round(ml_prob, 4),
             "effective_prob": round(qwen["effective_prob"], 4),

@@ -150,3 +150,18 @@ CREATE TABLE IF NOT EXISTS retrain_state (
     value      JSONB       NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Curva de equity mark-to-market (2026-10-21): el DD del 30,2 % del 20-10 era
+-- mark-to-market y no tenía serie almacenada; el reconstruido sólo con cierres
+-- daba 15,49 %. Una foto por minuto permite recalcular el DD con marcas propias.
+CREATE TABLE IF NOT EXISTS equity_snapshots (
+    id       BIGSERIAL PRIMARY KEY,
+    ts       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    equity   NUMERIC(12,2) NOT NULL,
+    balance  NUMERIC(12,2) NOT NULL,
+    floating NUMERIC(12,2) NOT NULL,
+    source   TEXT NOT NULL DEFAULT 'mt5_account_info'
+);
+
+CREATE INDEX IF NOT EXISTS idx_equity_snapshots_ts
+    ON equity_snapshots(ts);

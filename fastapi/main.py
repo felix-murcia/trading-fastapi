@@ -106,6 +106,15 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("[JOURNAL] init_journal_table falló: %s", exc)
 
+    # Curva de equity mark-to-market (2026-10-21): el DD deja de ser una
+    # cifra narrada. La tabla se crea de forma idempotente (schema.sql sólo
+    # corre en un volumen nuevo).
+    try:
+        from services.equity_curve import init_equity_table
+        await init_equity_table()
+    except Exception as exc:
+        logger.warning("[EQUITY] init_equity_table falló: %s", exc)
+
     # P3-1d: UN guardián POR PAR habilitado — se crea ANTES del baseline del
     # día (un par sin guardián = sin protección diaria). Fuera del try: una
     # PAIRS inválida debe impedir el arranque, no dejar guardianes a medias.
@@ -183,6 +192,11 @@ async def lifespan(app: FastAPI):
     # para que "es cierto" se compruebe con el fichero, no con quien narra.
     from services.daily_ledger import _daily_ledger_loop
     _bg_tasks.add(asyncio.create_task(_daily_ledger_loop()))
+    # CURVA DE EQUITY MARK-TO-MARKET (2026-10-21): una foto por minuto con
+    # equity/balance/flotante. Es la serie que permite reproducir el DD real
+    # (el 30,2 % del 20-10 era mark-to-market y no tenía serie). Sólo mide.
+    from services.equity_curve import _equity_curve_loop
+    _bg_tasks.add(asyncio.create_task(_equity_curve_loop()))
     # P4 (orden Félix 2026-10-20): replay del LLM como decisor con la
     # MECÁNICA REAL (SL/TP, sizing, spread, regla 3 €, churn) → su
     # expectancy, que es la vara de admisión. Sólo lectura.

@@ -28,8 +28,13 @@ Definición canónica (la única que se usa):
 
     base_i  = última vela con time <= t0                (la que contiene t0)
     term_i  = ÚLTIMA vela con time <= t0 + H            (determinista)
-    evaluable ⇔ term_i existe y está CERRADA
+    evaluable ⇔ la serie CUBRE t0+H (hay una vela ≥ t0+H)
+                y term_i está CERRADA
     dirección = sign(close[term_i] − close[base_i])
+
+La condición de CUBRIR el horizonte se añadió el 21-10: sin ella, una
+llamada de hace 10 minutos tomaba como terminal la última vela disponible
+y se publicaba como «+24 h» midiendo 10 minutos.
 
 Con ella, cada llamada tiene un resultado FIJO en cuanto su terminal
 cierra ⇒ la medición es estable, reproducible y comparable entre fuentes
@@ -66,6 +71,12 @@ def canonical_direction(
     (terminal ausente o sin cerrar) o movimiento plano.
     """
     if not bar_t:
+        return None
+    # MADUREZ DEL HORIZONTE (fix 2026-10-21): si la serie termina ANTES de
+    # t0+H, el terminal sería la última vela disponible (p. ej. 10 minutos
+    # después de t0) y la medición diría «+24 h» midiendo 10 minutos. Una
+    # llamada sólo es evaluable si la serie CUBRE el horizonte; si no, None.
+    if bar_t[-1] < t0 + horizon_h * 3600:
         return None
     i0 = bisect.bisect_right(bar_t, t0) - 1
     # T-31.9 (2026-10-20) — HORIZONTE REAL: el terminal es la ÚLTIMA vela

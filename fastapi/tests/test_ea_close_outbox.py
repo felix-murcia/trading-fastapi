@@ -58,8 +58,10 @@ class TestCloseOutbox:
         # instancia; EURUSD :00/:05 vs GBPUSD :02/:07).
         # v13.9: rename genérico AI_Quant_Terminal.mq5 (el mismo EA sirve
         # todos los pares — Symbol() en todo; orden Félix 2026-10-18).
-        assert re.search(r'#property\s+version\s+"13\.9"', src), "Falta bump a 13.9"
-        assert re.search(r'#define\s+EA_VERSION\s+"13\.9"', src)
+        # v14.0: guard de CLOSE 0,03 → 0,01 + diagnóstico de magic
+        # (posición USDCHF 58986641010 con magic 90002, 2026-10-21).
+        assert re.search(r'#property\s+version\s+"14\.0"', src), "Falta bump a 14.0"
+        assert re.search(r'#define\s+EA_VERSION\s+"14\.0"', src)
 
     def test_ea_filters_opening_deals_v13_2(self):
         # v13.2: OnTradeTransaction descarta DEAL_ENTRY_IN — el deal de

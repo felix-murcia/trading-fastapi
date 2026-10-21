@@ -100,5 +100,30 @@ class TestEaPositionCounting:
 
     def test_ea_version_was_bumped(self):
         src = MQL5.read_text(encoding="utf-8")
-        assert '#property version   "13.9"' in src
-        assert '#define EA_VERSION "13.9"' in src
+        assert '#property version   "14.0"' in src
+        assert '#define EA_VERSION "14.0"' in src
+
+    def test_ea_counts_foreign_magic_positions(self):
+        """v14.0: el EA reporta las posiciones del símbolo con OTRO magic.
+
+        Caso real (21-10): la posición USDCHF 58986641010 tenía magic 90002;
+        el EA del gráfico reportaba `position=0` con la posición viva. El
+        backend ya bloqueaba el duplicado por conteo MT5, pero la brecha era
+        invisible. Ahora el payload la declara.
+        """
+        src = MQL5.read_text(encoding="utf-8")
+        assert "foreignPositions" in src
+        assert "PositionGetInteger(POSITION_MAGIC) != MagicNumber" in src
+        assert 'foreign_positions\\":%d' in src
+        assert "(int)MagicNumber" in src
+
+    def test_ea_close_guard_uses_broker_minimum(self):
+        """v14.0: el guard de CLOSE baja de 0,03 a 0,01.
+
+        El time-stop de EURUSD (posición de 0,02) quedaba bloqueado por el
+        guard de 0,03: el backend decidía CLOSE y el EA respondía `hold`.
+        """
+        src = MQL5.read_text(encoding="utf-8")
+        assert "#define MIN_CLOSE_VOLUME        0.01" in src
+        assert "totalEAVolume < MIN_CLOSE_VOLUME" in src
+        assert "totalEAVolume < 0.03" not in src

@@ -73,10 +73,11 @@ class TestVetoReasonSizing:
         assert _veto_reason("SELL", "HOLD", {"regime": "TRENDING", "quality": 9.0},
                             sizing_rejected=True) == "sizing_veto"
 
-    def test_default_flag_false_keeps_existing_attribution(self):
+    def test_default_flag_false_does_not_infer_a_veto(self):
+        """2026-10-21: RANGING/calidad ya NO se infieren como veto (Opción B)."""
         qwen = {"regime": "RANGING", "quality": 1.0}
-        assert _veto_reason("BUY", "HOLD", qwen) == "ranging_veto"
-        assert _veto_reason("BUY", "HOLD", qwen, sizing_rejected=False) == "ranging_veto"
+        assert _veto_reason("BUY", "HOLD", qwen) == "unknown_veto"
+        assert _veto_reason("BUY", "HOLD", qwen, sizing_rejected=False) == "unknown_veto"
 
     def test_no_flip_no_veto_even_with_flag(self):
         assert _veto_reason("BUY", "BUY", {"regime": "RANGING"}, sizing_rejected=True) is None

@@ -3013,6 +3013,14 @@ time-stop y re-entrada. No se toca la señal, ni el tamaño, ni el bundle. La au
 revisa sola cada 30 min: si el juez alguna vez supera su base con IC > 0, la recupera sin
 intervención.
 
+> **Nota posterior (2026-10-21, Opción B):** la frase «calidad, ranging» quedó
+> obsoleta. Ambos se midieron contra la base y se retiraron por no demostrar skill;
+> la re-entrada (`reentry_ok`) sí se queda. Además, la cifra de esta sección
+> (47/59, base 81,4 %, −1,7 pp) se midió con un **horizonte truncado** por un bug
+> de `canonical_direction`; la medición corregida es **45/51, base 94,1 %,
+> −5,9 pp** (misma conclusión, evidencia más fuerte). Ver «CORRECCIÓN T-31.10»
+> más abajo.
+
 **Tests:** `tests/test_t31_veto_authority.py` (+2 de regresión: mercado en tendencia con
 100 % de acierto bruto ⇒ **sin autoridad**; el desfase del bróker se aplica de verdad) y
 `tests/test_daily_ledger.py` (+1: la autoridad se mide y publica base/skill/IC, no `peek`).
@@ -3069,3 +3077,173 @@ el objetivo de DD y cuesta la mitad de la media.
 **Tests:** ninguno (decisión de política, sin cambio de código). Evidencia reproducible:
 `trade_outcomes` (189 filas, `ORDER BY exit_time`) y el informe
 `fastapi/ops/2026-10-20-informe-viabilidad.md` §2.1.
+
+---
+
+## EA v14.0 — el time-stop ya puede cerrar y el desfase de magic deja de ser invisible (2026-10-21)
+
+**Origen:** el 21-10 el backend decidía `CLOSE` por `time_stop` sobre la posición
+EURUSD de **0,02** lotes y el EA respondía `hold`: su guard de cierre exigía
+`totalEAVolume >= 0,03`. La posición quedaba atrapada. Además, la posición USDCHF
+`58986641010` (magic **90002**, confirmado por Félix) no la contaba el EA del gráfico
+(`position=0` con posición viva); el backend ya bloqueaba el duplicado por conteo MT5,
+pero la brecha no era visible en el payload.
+
+**Cambios (sólo MQL5 + traza del backend):**
+
+1. **Guard de CLOSE:** `0,03` → `MIN_CLOSE_VOLUME 0,01` (mínimo del bróker). Una
+   posición de 0,02 ya se cierra; con 0,00 no se envía un cierre vacío.
+2. **Diagnóstico de magic:** el EA cuenta las posiciones del símbolo con **su** magic
+   (`my_positions`) y las que tienen **otro** magic (`foreign_positions`), y envía su
+   `magic` en el payload. El backend los audita (`ea_magic`, `ea_my_positions`,
+   `ea_foreign_positions`) y emite `EA-COUNT` cuando llega `position=0` con
+   `foreign_positions>0`. **No cambia ninguna decisión:** el backend sigue contando
+   TODAS las posiciones del símbolo en MT5 y aplicando el tope por par = 1.
+3. **Versión:** `#property version "14.0"` y `EA_VERSION "14.0"`.
+
+**Estado:** código y tests listos; **pendiente de que Félix recompile e instale el EA
+v14.0** en los gráficos (el binario v13.9 sigue ejecutándose hasta entonces). El
+time-stop de EURUSD no se ejecutará hasta esa instalación.
+
+**Tests:** `test_g3_one_position_per_pair.py` (+2: guard 0,01 y recuento de magic
+ajeno), `test_ea_poll_offset.py`, `test_ea_close_outbox.py`, `test_orders_prepare.py`
+y `test_e2e_ai_predict.py` (+1: auditoría del diagnóstico) — **54 passed** en los
+ficheros afectados. La suite completa se corre antes del commit final.
+
+---
+
+## 2026-10-21 (CORRECCIÓN T-31.10) · EL HORIZONTE DE +24 h NO ESTABA MADURO — y los otros dos controles de Qwen
+
+### 1. El bug de medición (primero la vara, después el mercado)
+
+`services/measurement.canonical_direction` definía el terminal como «la última vela
+con `time <= t0+24 h`», pero **no exigía que la serie cubriera ese horizonte**. Si la
+llamada era de hace 10 minutos, la última vela disponible (10 minutos después de `t0`)
+se usaba como terminal y se publicaba como «+24 h». La base y el acierto quedaban
+contaminados. El 21-10 se detectó al auditar los controles de Qwen: la primera muestra
+daba 68 propuestas bloqueadas y, al exigir madurez, quedaban 53 (las 15 restantes no
+tenían 24 h de mercado).
+
+**Fix (quirúrgico):** `canonical_direction` devuelve `None` si
+`bar_t[-1] < t0 + horizon_h*3600` (la serie no cubre el horizonte). La condición de
+«terminal cerrado» se conserva. `qwen_authority._measure` filtra por `created_at`
+(UTC real) en vez de `mt5_time` (reloj del bróker, +3 h) para la ventana de 14 días.
+Tests: `test_measurement_horizon.py` (+2: serie corta ⇒ `None`; serie con hueco pero
+que cubre el horizonte ⇒ dirección correcta).
+
+**Impacto en T-31.10:** la muestra de alta convicción pasa de 59 a **51** llamadas
+maduras. Las 8 que desaparecen son exactamente las que tenían menos de 24 h de
+mercado. La conclusión no cambia; la evidencia es más fuerte:
+
+| | T-31.10 (horizonte truncado) | **Corregido (maduro)** |
+|---|---|---|
+| n | 59 | **51** |
+| Acierto | 47/59 = 79,7 % | **45/51 = 88,2 %** |
+| Base de la muestra | 81,4 % | **94,1 %** |
+| Skill | −1,7 pp | **−5,9 pp** |
+| Wilson 95 % | 67,7 % | **76,6 %** |
+| Autoridad | REVOCADA | **REVOCADA** |
+
+Calibración corregida: `0,75 → 26/30 = 86,7 %`; `0,85 → 18/19 = 94,7 %`;
+`0,80 → 1/1`; `0,25 → 0/1`. El bucket alto acierta **lo que sube el mercado**
+(base 94,1 %), no más. Qwen no tenía skill direccional; tenía la deriva y un sesgo
+fijo. El veto direccional sigue **INERTE**.
+
+La línea del ledger de las 10:53 (47/59) queda como histórica; la línea de las
+11:21 publica la medición corregida (45/51) y es la que manda.
+
+### 2. Opción B: los tres controles restantes, medidos contra la base
+
+Script: `fastapi/scripts/audit_qwen_controls.py` (30 d, EURUSD, +24 h canónico,
+sólo ciclos con Qwen OK y una entrada **propuesta** por el PPO; `n < 30` =
+insuficiente). EURUSD: **158 propuestas maduras**. USDCHF: 0 maduras (canario de
+hoy; no se concluye nada).
+
+| Control | Grupo | n | Acierto | Base | Skill | Comparación |
+|---|---|---|---|---|---|---|
+| **`reentry_ok`** | bloqueado (`false`) | 53 | **9,4 %** | 90,6 % | **−81,1 pp** | **−40,6 pp** vs permitido; p = **0,000276**; IC 95 % [−66,3, −14,8] |
+| | permitido (`true`) | 16 | 50,0 % | 50,0 % | 0,0 pp | n < 30: no se declara skill propio |
+| **`quality`** | `< 5` | 1 | 0,0 % | 100 % | −100 pp | **no evaluable** (n=1) |
+| | `≥ 5` | 157 | 22,9 % | 77,7 % | −54,8 pp | — |
+| **`regime`** | RANGING | 13 | 15,4 % | 84,6 % | −69,2 pp | −8,1 pp vs no-RANGING; p = **0,51** |
+| | no-RANGING | 145 | 23,4 % | 77,2 % | −53,8 pp | sin discriminación |
+| **`eff < 0,35`** | sí | 19 | 5,3 % | — | — | p = 0,052; **n < 30** ⇒ no acreditado |
+
+**Decisiones (aplicadas):**
+- **`reentry_ok`: SE QUEDA.** Es el único control de Qwen con evidencia real: bloquea
+  re-entradas que, en esta muestra, habrían acertado el 9,4 % frente a una base del
+  90,6 %. Bloquearlas es correcto. No se toca.
+- **`quality`: SE RETIRA como veto de decisión.** El umbral `<5` sólo vio **1**
+  propuesta en 30 días; los buckets no son monótonos (5-6: 11,8 %; 7: 24,7 %;
+  8: 33,3 %; 9-10: 20 %). No hay skill que acredite el umbral. Se conserva el
+  **fail-closed de degradación**: si Qwen no responde (`ok=False`), no se abre
+  nada; eso es seguridad mecánica, no un juicio de calidad.
+- **`regime`: SE RETIRA como veto.** RANGING no discrimina (p=0,51); la condición
+  exacta del veto sólo vio 7 propuestas (0 aciertos) — insuficiente para dar
+  autoridad. `QUALITY_THRESHOLD` se conserva sólo para la capa **shadow** de
+  deliberación (C3), que no decide.
+- **`eff < 0,35`: NO se despliega** como regla nueva. El efecto es grande
+  (5,3 % vs 25,2 %) pero n=19 < 30; queda como candidato para un pre-registro
+  futuro, no como control vivo.
+
+**Hallazgo incómodo (no se edulcora):** en las 158 propuestas crudas, el PPO dijo
+**1 BUY y 157 SELL** en un mercado que subió en **123/158 = 77,8 %** de las ventanas
+de +24 h. El acierto crudo del PPO fue **22,9 % vs base 77,7 % (−54,8 pp)**: en esta
+muestra el PPO fue **anti-predictivo**, no sólo «sin edge». El dinero realizado
+(+341,04 € en 189 operaciones; 96/93) no viene del acierto direccional del PPO:
+viene de la relación 1,23:1, de los filtros (sobre todo `reentry_ok`) y de la gestión.
+No se cambia el PPO con esta muestra; se abre **C2** (validación OOS por régimen) con
+esta evidencia. Cualquier afirmación de «edge direccional del PPO» queda retirada
+hasta que C2 la demuestre.
+
+### 3. F2 · Ledger por símbolo, curva de equity y orden zombie
+
+- **Ledger por símbolo:** `daily_ledger.record_all()` escribe una línea por cada par
+  habilitado en `PAIRS` (EURUSD y USDCHF). La línea declara `trades_scope: "symbol"`
+  y `equity_scope: "account"` para que nadie sume dos veces el equity. La operación
+  USDCHF #278 (+0,54 €) ya aparece en la línea USDCHF de las 11:21.
+  **Nota de trazabilidad:** el `bundle_sha` de EURUSD en las líneas de las 11:21 es
+  `null` porque se generaron desde el host de auditoría sin `PPO_OUTPUT_DIR=/app/ml`;
+  el contenedor, ya reconstruido, escribió la línea canónica de las 11:26 con
+  `bundle_sha=4cd9abb6bc94`. En USDCHF el `null` es **por diseño**: su decisión es la
+  regla `momentum24`, no un bundle PPO. El ledger es append-only: no se reescriben
+  las líneas viejas.
+- **Curva de equity:** tabla `equity_snapshots` (equity, balance, flotante, ts UTC) +
+  bucle de 60 s (`services/equity_curve.py`). `get_dd()` recalcula el DD desde el pico
+  con las marcas propias. El **30,2 % del 20-10 sigue sin serie** y se declara no
+  reproducible; a partir de ahora el siguiente DD sí lo será. Tests: 9 nuevos.
+- **Orden zombie #1:** era una orden SMC `placed` desde 2026-09-15 sin posición viva.
+  Se canceló con una fila de auditoría `order_stale_cancelled` (motivo, fecha,
+  `previous_status`). La ventana de 48 h ya impedía que bloqueara duplicados; ahora
+  además el estado es coherente.
+
+### 4. F4 · GBPUSD: pre-registro y decisión
+
+Se congeló **antes de medir** en `fastapi/ops/2026-10-21-pre-registro-gbpusd.md`:
+tres reglas (MOM24, REV24, BRK24), 1 998 velas H1, muestras **no solapadas** cada
+24 velas, coste 1,5 pips, división 70/30, Bonferroni 3 pruebas (z=2,128) y criterio
+de sombra (no de canario). Resultado: `fastapi/ops/2026-10-21-gbpusd-measure.json`.
+
+| Regla | Descubrimiento (n=54) | Validación (n=24) | Veredicto |
+|---|---|---|---|
+| MOM24 | −13,0 pp vs base (IC −26,4) | −12,5 pp; −14,9 pips netos | no pasa |
+| REV24 | −1,9 pp vs base (IC −16,1) | +12,5 pp; +11,9 pips netos | no pasa (descubrimiento negativo; deriva 14,4 pp) |
+| BRK24 | 1 señal, 0 aciertos | 1 señal, 1 acierto | no evaluable (n=2) |
+
+**GBPUSD queda DORMIDO.** Ninguna regla cumple el contrato; no se activa, no se prueba
+en vivo y no se busca una cuarta regla en la misma muestra. La validación tiene n=24
+< 30: el contrato la declara insuficiente, no significativa. No se afirma «GBPUSD no
+tiene edge»; se afirma «ninguna de las tres reglas pre-registradas demuestra un edge
+estable con esta muestra».
+
+### 5. Estado y handoff
+
+- **Suite:** **1219 passed + 2 xfailed** (2026-10-21), incluidos los tests nuevos de
+  horizonte, equity, ledger por símbolo, EA v14.0 y controles de Qwen.
+- **Pendiente de Félix:** recompilar e instalar el **EA v14.0** en MT5. Hasta entonces
+  el binario v13.9 sigue ejecutándose y el time-stop de EURUSD (posición de 0,02) sigue
+  bloqueado por el guard viejo de 0,03. El backend se reconstruye con
+  `docker compose up -d --build fastapi` para desplegar la corrección del horizonte,
+  los vetos retirados, el ledger por símbolo y la curva de equity.
+- **No se toca:** tamaño de posición (C1), señal del PPO (C2), umbral de confianza
+  (`MIN_ENTRY_CONFIDENCE=0.0`) ni el bundle activo.

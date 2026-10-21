@@ -415,6 +415,44 @@ def test_predict_holds_during_news_blackout():
     assert aud["qwen_skipped"] is False
 
 
+def test_predict_records_ea_magic_diagnostic(caplog):
+    """v14.0: el payload del EA trae magic/recuentos y el ciclo los audita.
+
+    Caso real (21-10): la posición USDCHF 58986641010 tenía magic 90002 y el
+    EA del gráfico reportaba `position=0` con la posición viva. El backend
+    decide por conteo MT5, pero el desfase debe quedar visible.
+    """
+    caplog.set_level("WARNING")
+    with patch("main.init_pool", AsyncMock()), \
+         patch("main.close_pool", AsyncMock()), \
+         patch("routers.ai.get_pool", return_value=MagicMock(execute=AsyncMock())), \
+         patch("routers.ai.is_news_blackout", AsyncMock(return_value=(True, "Non-Farm Payrolls"))), \
+         patch("routers.ai.log_to_audit", AsyncMock()) as mock_audit, \
+         patch("httpx.AsyncClient", FakeAsyncClient):
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/ai/predict",
+                json={
+                    "symbol": "EURUSD",
+                    "timeframe": "H1",
+                    "position": 0,
+                    "magic": 90002,
+                    "my_positions": 0,
+                    "foreign_positions": 1,
+                },
+                headers={"x-internal-token": "test-token", "x-cycle-id": "e2e-ea-magic"},
+            )
+
+    assert response.status_code == 200, response.text
+    args, _ = mock_audit.await_args
+    assert args[0] == "ai_predict_cycle"
+    aud = args[1]
+    assert aud["ea_magic"] == 90002
+    assert aud["ea_my_positions"] == 0
+    assert aud["ea_foreign_positions"] == 1
+    assert "EA-COUNT" in caplog.text
+
+
 def test_ea_backend_predict_contract_fields_are_aligned():
     payload = PredictResponse(
         cycle_id="contract-test",
@@ -745,12 +783,13 @@ class TestP1TimeStopAndServeReentry(_ServeHarness):
 
     @pytest.mark.parametrize("bars,expected_veto,expected_ok", [
         (0, "reentry_veto", False),   # 1ª vela: red de emergencia (bars=0)
-        (2, "quality_veto", True),    # vela tardía: pasa el juicio; calidad=0 (fail-closed) bloquea
+        (2, "qwen_degraded", True),   # vela tardía: pasa el juicio; el cerebro no responde → fail-closed
     ])
     def test_degraded_brain_safe_default(self, bars, expected_veto, expected_ok):
         """R1: Qwen degradado → safe default documentado: sólo se bloquea
         la 1ª vela tras el cierre; el resto del HOLD lo garantiza el
-        fail-closed de calidad (quality=0). Nunca silencioso: WARNING
+        fail-closed de degradación (`ok=False`), no el score de calidad
+        (retirado el 21-10 por no demostrar skill). Nunca silencioso: WARNING
         `REENTRY-DEFAULT` en log + `qwen_degraded` en audit."""
         from services.qwen_client import _degraded_unified
 
@@ -774,11 +813,12 @@ class TestP1TimeStopAndServeReentry(_ServeHarness):
         ranging = {"regime": "RANGING", "quality": 9.0, "bias": "NEUTRAL"}
         # La salida por time-stop va por delante de cualquier veto de Qwen
         assert _veto_reason("HOLD", "CLOSE", ranging, time_stop=True) == "time_stop"
-        # El veto de re-entrada va por delante del ranging INFERIDO
-        # (final=HOLD+RANGING): es la razón más específica del ciclo
+        # El veto de re-entrada va por delante del resto: es la razón más
+        # específica del ciclo.
         assert _veto_reason("BUY", "HOLD", ranging, reentry_rejected=True) == "reentry_veto"
-        # Sin flags: el inferido sigue siendo la autoridad (sin regresión)
-        assert _veto_reason("BUY", "HOLD", ranging) == "ranging_veto"
+        # 2026-10-21: el RANGING ya NO se infiere como veto (no demostró
+        # skill contra la base; p=0.51) ⇒ sin flags es un HOLD sin atribución.
+        assert _veto_reason("BUY", "HOLD", ranging) == "unknown_veto"
 
 
 class TestP0EntryConfidenceGate(_ServeHarness):

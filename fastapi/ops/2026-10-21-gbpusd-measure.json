@@ -1,0 +1,219 @@
+{
+  "measured_at": "2026-10-21T11:24:09.690276+00:00",
+  "symbol": "GBPUSD",
+  "pre_registration": "fastapi/ops/2026-10-21-pre-registro-gbpusd.md",
+  "data": {
+    "candles": 1998,
+    "from": "2026-06-26T05:00:00+00:00",
+    "to": "2026-10-21T10:00:00+00:00",
+    "offset_h": 3,
+    "step": 24,
+    "cost_pips": 1.5,
+    "z_bonferroni": 2.128
+  },
+  "rules": {
+    "MOM24": {
+      "samples": 78,
+      "split": {
+        "discovery": 54,
+        "validation": 24
+      },
+      "discovery": {
+        "n": 54,
+        "hits": 24,
+        "acc": 0.4444,
+        "base": 0.5741,
+        "skill_pp": -12.97,
+        "wilson_lo_98_33": 0.3105,
+        "skill_lo_pp": -26.36,
+        "insufficient": false,
+        "skill_vs_base": {
+          "acc": 0.4444,
+          "base": 0.5741,
+          "skill_pp": -12.96,
+          "wilson_lo": 0.32,
+          "skill_lo_pp": -25.41,
+          "n": 54,
+          "granted": false,
+          "reason": "skill -13.0 pp vs base 57.4 % (IC no por encima de 0)"
+        },
+        "net_pips_mean": -1.9,
+        "net_pips_ci95": [
+          -12.81,
+          9.01
+        ],
+        "gross_pips_mean": -0.4,
+        "long": 31,
+        "short": 23
+      },
+      "validation": {
+        "n": 24,
+        "hits": 9,
+        "acc": 0.375,
+        "base": 0.5,
+        "skill_pp": -12.5,
+        "wilson_lo_98_33": 0.2009,
+        "skill_lo_pp": -29.91,
+        "insufficient": true,
+        "skill_vs_base": {
+          "acc": 0.375,
+          "base": 0.5,
+          "skill_pp": -12.5,
+          "wilson_lo": 0.2116,
+          "skill_lo_pp": -28.84,
+          "n": 24,
+          "granted": false,
+          "reason": "skill -12.5 pp vs base 50.0 % (IC no por encima de 0)"
+        },
+        "net_pips_mean": -14.93,
+        "net_pips_ci95": [
+          -31.4,
+          1.53
+        ],
+        "gross_pips_mean": -13.43,
+        "long": 11,
+        "short": 13
+      },
+      "drift_pp": 0.47,
+      "pass_discovery": false,
+      "pass_validation": false,
+      "stable": true,
+      "passed": false
+    },
+    "REV24": {
+      "samples": 78,
+      "split": {
+        "discovery": 54,
+        "validation": 24
+      },
+      "discovery": {
+        "n": 54,
+        "hits": 30,
+        "acc": 0.5556,
+        "base": 0.5741,
+        "skill_pp": -1.85,
+        "wilson_lo_98_33": 0.413,
+        "skill_lo_pp": -16.11,
+        "insufficient": false,
+        "skill_vs_base": {
+          "acc": 0.5556,
+          "base": 0.5741,
+          "skill_pp": -1.85,
+          "wilson_lo": 0.4238,
+          "skill_lo_pp": -15.03,
+          "n": 54,
+          "granted": false,
+          "reason": "skill -1.9 pp vs base 57.4 % (IC no por encima de 0)"
+        },
+        "net_pips_mean": -1.1,
+        "net_pips_ci95": [
+          -12.01,
+          9.81
+        ],
+        "gross_pips_mean": 0.4,
+        "long": 23,
+        "short": 31
+      },
+      "validation": {
+        "n": 24,
+        "hits": 15,
+        "acc": 0.625,
+        "base": 0.5,
+        "skill_pp": 12.5,
+        "wilson_lo_98_33": 0.4113,
+        "skill_lo_pp": -8.87,
+        "insufficient": true,
+        "skill_vs_base": {
+          "acc": 0.625,
+          "base": 0.5,
+          "skill_pp": 12.5,
+          "wilson_lo": 0.4271,
+          "skill_lo_pp": -7.29,
+          "n": 24,
+          "granted": false,
+          "reason": "skill +12.5 pp vs base 50.0 % (IC no por encima de 0)"
+        },
+        "net_pips_mean": 11.93,
+        "net_pips_ci95": [
+          -4.53,
+          28.4
+        ],
+        "gross_pips_mean": 13.43,
+        "long": 13,
+        "short": 11
+      },
+      "drift_pp": 14.35,
+      "pass_discovery": false,
+      "pass_validation": false,
+      "stable": false,
+      "passed": false
+    },
+    "BRK24": {
+      "samples": 2,
+      "split": {
+        "discovery": 1,
+        "validation": 1
+      },
+      "discovery": {
+        "n": 1,
+        "hits": 0,
+        "acc": 0.0,
+        "base": 1.0,
+        "skill_pp": -100.0,
+        "wilson_lo_98_33": 0.0,
+        "skill_lo_pp": -100.0,
+        "insufficient": true,
+        "skill_vs_base": {
+          "acc": 0.0,
+          "base": 1.0,
+          "skill_pp": -100.0,
+          "wilson_lo": 0.0,
+          "skill_lo_pp": -100.0,
+          "n": 1,
+          "granted": false,
+          "reason": "skill -100.0 pp vs base 100.0 % (IC no por encima de 0)"
+        },
+        "net_pips_mean": -49.8,
+        "net_pips_ci95": null,
+        "gross_pips_mean": -48.3,
+        "long": 0,
+        "short": 1
+      },
+      "validation": {
+        "n": 1,
+        "hits": 1,
+        "acc": 1.0,
+        "base": 1.0,
+        "skill_pp": 0.0,
+        "wilson_lo_98_33": 0.1809,
+        "skill_lo_pp": -81.91,
+        "insufficient": true,
+        "skill_vs_base": {
+          "acc": 1.0,
+          "base": 1.0,
+          "skill_pp": 0.0,
+          "wilson_lo": 0.2065,
+          "skill_lo_pp": -79.35,
+          "n": 1,
+          "granted": false,
+          "reason": "skill +0.0 pp vs base 100.0 % (IC no por encima de 0)"
+        },
+        "net_pips_mean": 79.4,
+        "net_pips_ci95": null,
+        "gross_pips_mean": 80.9,
+        "long": 0,
+        "short": 1
+      },
+      "drift_pp": 100.0,
+      "pass_discovery": false,
+      "pass_validation": false,
+      "stable": false,
+      "passed": false
+    }
+  },
+  "decision": {
+    "passed_rules": [],
+    "gbpusd": "DORMIDO",
+    "note": "Ninguna regla cumple el contrato: no se activa, no se prueba una cuarta en la misma muestra."
+  }
+}

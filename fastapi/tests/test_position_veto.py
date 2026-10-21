@@ -78,10 +78,15 @@ class TestVetoReasonPosition:
         qwen = {"regime": "TRENDING", "quality": 9.0, "bias": "BEARISH", "confidence": 0.9}
         assert _veto_reason("BUY", "HOLD", qwen, position_rejected=True) == "position_veto"
 
-    def test_default_flag_false_keeps_existing_attribution(self):
+    def test_default_flag_false_does_not_infer_a_veto(self):
+        """2026-10-21: RANGING/calidad ya NO se infieren como veto.
+
+        Se retiraron por no demostrar skill contra la base (Opción B). Sin
+        flags explícitos, un HOLD no se atribuye a un veto que no actuó.
+        """
         qwen = {"regime": "RANGING", "quality": 1.0}
-        assert _veto_reason("BUY", "HOLD", qwen) == "ranging_veto"
-        assert _veto_reason("BUY", "HOLD", qwen, position_rejected=False) == "ranging_veto"
+        assert _veto_reason("BUY", "HOLD", qwen) == "unknown_veto"
+        assert _veto_reason("BUY", "HOLD", qwen, position_rejected=False) == "unknown_veto"
 
     def test_no_flip_no_veto_even_with_flag(self):
         assert _veto_reason("BUY", "BUY", {"regime": "RANGING"},

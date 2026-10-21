@@ -119,11 +119,11 @@ async def _measure(symbol: str) -> dict:
           AND data->'data'->>'symbol' = $1
           AND data->'data'->>'llm_bias' IN ('BULLISH','BEARISH')
           AND data->'data'->>'llm_bias_prob' IS NOT NULL
-          AND (data->'data'->>'mt5_time')::float >= $2
+          AND created_at >= $2
         ORDER BY created_at
         """,
         symbol,
-        since.timestamp(),
+        since,
     )
 
     result = {
@@ -162,10 +162,11 @@ async def _measure(symbol: str) -> dict:
         """Dirección realizada a +24 h REALES — DEFINICIÓN CANÓNICA (L1).
 
         Delega en services.measurement.canonical_direction: el terminal es la
-        PRIMERA vela con time ≥ t0+24 h (determinista: no cambia al
-        rellenarse los huecos de la serie) y debe estar CERRADA. Con la
-        definición anterior ("última vela ≤ t0+24 h") la cifra se movía con
-        el reloj (87 % → 69,6 % → 10 % sobre las MISMAS llamadas)."""
+        ÚLTIMA vela con time <= t0+24 h, la serie debe CUBRIR t0+24 h y el
+        terminal debe estar CERRADO. La condición de cobertura se añadió el
+        21-10: sin ella, una llamada de hace 10 minutos usaba la última vela
+        como terminal y se publicaba como «+24 h» midiendo 10 minutos.
+        """
         from services.measurement import canonical_direction
         d = canonical_direction(
             bar_ep, bar_close, t0, now_epoch,

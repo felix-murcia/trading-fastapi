@@ -6,10 +6,10 @@ Terminal de Ejecución y Telemetría para Cerebro Autónomo (FastAPI + PPO v3).
 - Rol del Servidor: Decisión direccional, dimensionamiento de lotes, SL, TP y gestión de riesgo.
 */
 #property copyright "AI Quant Terminal"
-#property version   "13.9"
+#property version   "14.0"
 #property strict
 
-#define EA_VERSION "13.9"
+#define EA_VERSION "14.0"
 
 #include <Trade\Trade.mqh>
 
@@ -19,6 +19,10 @@ Terminal de Ejecución y Telemetría para Cerebro Autónomo (FastAPI + PPO v3).
 #define CIRCUIT_BREAK_COOLDOWN  300
 #define OUTBOX_FILE            "trade_filled_outbox.jsonl"
 #define OUTBOX_MAX_PER_FLUSH   10
+// v14.0 (2026-10-21): el guard de CLOSE era 0.03 y bloqueaba el time-stop de
+// posiciones de 0.02 (EURUSD, 21-10). El mínimo del bróker es 0.01; por
+// debajo de eso no hay nada que cerrar.
+#define MIN_CLOSE_VOLUME        0.01
 
 input group "=== Configuración del Cerebro ==="
 input string FastAPI_URL    = "http://127.0.0.1:8090"; // URL del servidor FastAPI
@@ -333,13 +337,22 @@ void OnTick()
    // posiciones del símbolo con MI magic (y, si hay más de una —brecha
    // heredada—, se reporta la más reciente y la cuenta queda visible).
    int myPositions = 0;
+   int foreignPositions = 0;
    ulong newestTicket = 0;
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
       ulong tk = PositionGetTicket(i);
       if(tk == 0) continue;
       if(PositionGetString(POSITION_SYMBOL) != Symbol()) continue;
-      if(PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+        {
+         // v14.0 (2026-10-21): posición del símbolo con OTRO magic (heredada,
+         // manual u otra instancia). El EA no la cuenta —su contrato es su
+         // magic— pero la REPORTA para que el desfase sea visible; el backend
+         // cuenta TODAS las posiciones del símbolo en MT5 y bloquea el duplicado.
+         foreignPositions++;
+         continue;
+        }
       myPositions++;
       if(tk > newestTicket)
         {
@@ -358,12 +371,17 @@ void OnTick()
       PrintFormat("[AI Terminal] %s: %d posiciones abiertas con MI magic (debería ser 1) — "
                   "la política de una por par está violada; el backend también la "
                   "aplica (tope por par = 1)", Symbol(), myPositions);
+   if(foreignPositions > 0)
+      PrintFormat("[AI Terminal] %s: %d posiciones del símbolo con OTRO magic — el EA "
+                  "no las cuenta (su contrato es su magic); el backend las ve en MT5 "
+                  "y bloquea el duplicado", Symbol(), foreignPositions);
 
-     // Construcción del payload extendido
+     // Construcción del payload extendido (v14.0: magic + recuentos visibles)
      double mt5_now = (double)TimeCurrent();
      string body = StringFormat(
-        "{\"symbol\":\"%s\",\"timeframe\":\"M5\",\"position\":%d,\"entry_price\":%.5f,\"sl_price\":%.5f,\"tp_price\":%.5f,\"steps_in_trade\":%d,\"mt5_time\":%.3f}",
-        Symbol(), currentPos, entryPrice, currentSL, currentTP, stepsInTrade, mt5_now
+        "{\"symbol\":\"%s\",\"timeframe\":\"M5\",\"position\":%d,\"entry_price\":%.5f,\"sl_price\":%.5f,\"tp_price\":%.5f,\"steps_in_trade\":%d,\"mt5_time\":%.3f,\"magic\":%d,\"my_positions\":%d,\"foreign_positions\":%d}",
+        Symbol(), currentPos, entryPrice, currentSL, currentTP, stepsInTrade, mt5_now,
+        (int)MagicNumber, myPositions, foreignPositions
      );
 
    // 2. LLAMADA AL CEREBRO
@@ -413,9 +431,10 @@ void OnTick()
            if(PositionGetString(POSITION_SYMBOL) == Symbol() && PositionGetInteger(POSITION_MAGIC) == MagicNumber)
               totalEAVolume += PositionGetDouble(POSITION_VOLUME);
           }
-        if(totalEAVolume < 0.03)
+        if(totalEAVolume < MIN_CLOSE_VOLUME)
           {
-           PrintFormat("[AI Terminal] CLOSE bloqueado: volumen EA %.2f < minimo 0.03", totalEAVolume);
+           PrintFormat("[AI Terminal] CLOSE bloqueado: volumen EA %.2f < minimo %.2f",
+                       totalEAVolume, MIN_CLOSE_VOLUME);
            ReportEADecision(cycle_id, decision, "hold", r);
            return;
           }

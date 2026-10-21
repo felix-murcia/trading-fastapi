@@ -95,3 +95,22 @@ class TestCanonicalHorizon:
         closes = [100.0] * 30
         bt, bc = _series(horas, closes)
         assert canonical_direction(bt, bc, bt[5], bt[-1] + 10) is None
+
+    def test_not_evaluable_when_the_series_does_not_reach_the_horizon(self):
+        """Si la serie termina antes de t0+H, NO hay terminal de +24 h.
+
+        Bug medido el 21-10: una llamada de las 09:50 tomaba como terminal la
+        última vela (10:00) y publicaba un movimiento de 10 minutos como si
+        fuera de 24 h. La base y el acierto quedaban contaminados.
+        """
+        horas = [0.0, 1.0, 2.0]
+        closes = [100.0, 101.0, 102.0]
+        bt, bc = _series(horas, closes)
+        assert canonical_direction(bt, bc, bt[0], bt[-1] + 10 * 3600) is None
+
+    def test_evaluable_when_the_series_covers_the_horizon_with_a_later_gap(self):
+        """Si hay una vela DESPUÉS de t0+H, el terminal es la última ≤ t0+H."""
+        horas = [0.0, 2.0, 22.0, 26.0, 28.0]
+        closes = [100.0, 101.0, 120.0, 90.0, 85.0]
+        bt, bc = _series(horas, closes)
+        assert canonical_direction(bt, bc, bt[0], bt[-1] + 10) == 1

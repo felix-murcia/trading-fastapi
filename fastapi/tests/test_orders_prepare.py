@@ -196,10 +196,10 @@ class TestEAGateContract:
         assert "gate_unreachable" in src
         assert 'return false;' in src
 
-    def test_ea_version_bumped_to_13(self):
+    def test_ea_version_bumped_to_14(self):
         src = _ea_source()
-        assert re.search(r'#property\s+version\s+"13\.', src), "Falta bump de #property version"
-        assert re.search(r'#define\s+EA_VERSION\s+"13\.', src), "Falta bump de EA_VERSION"
+        assert re.search(r'#property\s+version\s+"14\.', src), "Falta bump de #property version"
+        assert re.search(r'#define\s+EA_VERSION\s+"14\.', src), "Falta bump de EA_VERSION"
 
 
 # ─── P3-1d: gate de mundo, cupo por par y presupuesto de equity ─────────────

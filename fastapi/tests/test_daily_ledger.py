@@ -7,6 +7,7 @@ Contrato:
 - cualquiera puede contrastar los números con el histórico de la BD
   (`trade_outcomes`) sin creerle a nadie.
 """
+import asyncio
 import json
 import os
 import tempfile
@@ -40,6 +41,8 @@ class TestAppendOnly:
                     "today_pnl_from_winners_eur", "today_pnl_from_losers_eur",
                     "history", "bundle_sha", "llm_authority"):
             assert key in src, f"falta {key} en la línea del registro"
+        assert '"equity_scope": "account"' in src, "el equity es de la cuenta, no del símbolo"
+        assert '"trades_scope": "symbol"' in src, "las operaciones son del símbolo"
 
     def test_authority_is_measured_not_read_from_a_stale_cache(self):
         """T-31.10: la línea publica la MEDICIÓN (n, base, skill, IC), no un
@@ -58,3 +61,36 @@ class TestLedgerPath:
         p = daily_ledger.LEDGER_PATH
         assert p.endswith("daily_ledger.jsonl")
         assert os.path.isabs(p)
+
+
+class TestPerSymbol:
+    """G3 (2026-10-21): el registro sigue a TODOS los mundos vivos.
+
+    Antes la línea era sólo EURUSD; la operación USDCHF #278 (+0,54 €) estaba
+    en `trade_outcomes` pero no en el registro diario.
+    """
+
+    def test_active_symbols_follows_enabled_pairs(self, monkeypatch):
+        from config import settings
+        monkeypatch.setattr(settings, "pairs", [
+            {"symbol": "EURUSD", "enabled": True},
+            {"symbol": "GBPUSD", "enabled": False},
+            {"symbol": "USDCHF", "enabled": True},
+        ], raising=False)
+        assert daily_ledger.active_symbols() == ["EURUSD", "USDCHF"]
+
+    def test_records_one_line_per_symbol(self, monkeypatch):
+        async def fake(sym):
+            return {"symbol": sym}
+        monkeypatch.setattr(daily_ledger, "record_now", fake)
+        out = asyncio.run(daily_ledger.record_all(["EURUSD", "USDCHF"]))
+        assert [e["symbol"] for e in out] == ["EURUSD", "USDCHF"]
+
+    def test_one_failure_does_not_stop_the_other(self, monkeypatch):
+        async def fake(sym):
+            if sym == "EURUSD":
+                raise RuntimeError("boom")
+            return {"symbol": sym}
+        monkeypatch.setattr(daily_ledger, "record_now", fake)
+        out = asyncio.run(daily_ledger.record_all(["EURUSD", "USDCHF"]))
+        assert [e["symbol"] for e in out] == ["USDCHF"]

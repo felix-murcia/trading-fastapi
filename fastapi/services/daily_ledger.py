@@ -148,6 +148,11 @@ async def build_daily_entry(symbol: str = "EURUSD") -> dict:
         "day_basis": "utc",
         "broker_offset_h": broker_off,
         "equity_eur": equity,
+        # El equity/balance son de la CUENTA; las operaciones y el PnL de
+        # `trades_today` son del SÍMBOLO de la línea. Se declara para que nadie
+        # sume dos líneas del mismo instante y cuente el equity dos veces.
+        "equity_scope": "account",
+        "trades_scope": "symbol",
         "trades_today": len(trades),
         "pnl_today_eur": round(sum(float(t["pnl"]) for t in trades), 2),
         "today_wins": correct,
@@ -183,12 +188,38 @@ async def record_now(symbol: str = "EURUSD") -> dict:
     return entry
 
 
+def active_symbols() -> list[str]:
+    """Símbolos habilitados en PAIRS (el registro sigue a los mundos vivos).
+
+    G3 (2026-10-21): antes el bucle registraba SÓLO EURUSD; la operación
+    USDCHF #278 (+0,54 €) existía en `trade_outcomes` pero no en la línea
+    diaria. La línea es por símbolo porque sus estadísticas lo son; el
+    equity es de la CUENTA (se declara con `equity_scope`).
+    """
+    from config import settings
+    return [str(p.get("symbol")) for p in settings.pairs if p.get("enabled") and p.get("symbol")]
+
+
+async def record_all(symbols: list[str] | None = None) -> list[dict]:
+    """Una línea por símbolo activo; un fallo en uno no tumba a los demás."""
+    import logging
+    out: list[dict] = []
+    for sym in (symbols if symbols is not None else active_symbols()):
+        try:
+            out.append(await record_now(sym))
+        except Exception as exc:  # noqa: BLE001 — el registrador nunca muere
+            logging.getLogger(__name__).warning(
+                "[DAILY-LEDGER] %s: no se pudo registrar la línea: %s", sym, exc
+            )
+    return out
+
+
 async def _daily_ledger_loop(interval_s: int = 3600) -> None:
-    """Una línea por hora: el histórico muestra la evolución del día."""
+    """Una línea por hora y por símbolo activo: el histórico muestra la evolución."""
     await asyncio.sleep(90)   # no golpear la BD ni el bróker al arrancar
     while True:
         try:
-            await record_now()
+            await record_all()
         except Exception as exc:  # noqa: BLE001 — el registrador nunca muere
             import logging
             logging.getLogger(__name__).warning(
