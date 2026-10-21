@@ -34,6 +34,14 @@ FRANJAS (comprobadas el 2026-10-20):
     UTC, no a medianoche ⇒ el corte diario del riesgo debe seguir al día
     del bróquer (este módulo lo expone: `broker_day_bounds`).
 
+TRAMPA MEDIDA (2026-10-21): el MCP/MT5 etiqueta sus sellos ISO con
+`+02:00` mientras el reloj del servidor va **+3,00 h** (comprobado: el
+precio del servidor dice 12:41 y el UTC real 09:41, mientras la posición
+abierta se etiqueta `2026-10-21T14:35:52+02:00` = 09:35:52 UTC real) ⇒
+**la etiqueta de zona horaria que devuelve el bróker NO es su desfase
+real** ⇒ nunca se confíe en ella: el desfase se DETECTA (precio del
+servidor o vela en formación) y las conversiones pasan por aquí.
+
 REGLAS PARA EL CÓDIGO NUEVO:
   1. todo timestamp que se compares o agrupes declara su dominio;
   2. el desfase del bróquer se DETECTA (nunca se fija): el 25-10 cambia solo;
