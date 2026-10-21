@@ -1,0 +1,52 @@
+{
+  "aggregate": {
+    "actual_wins_3eur": 0,
+    "cf_max_dd_eur": 0.0,
+    "cf_max_dd_pct": 0.0,
+    "cf_wins_3eur": 0,
+    "control_max_dd_eur": 0.0,
+    "control_max_dd_pct": 0.0,
+    "delta_ci95_eur": null,
+    "delta_mean_eur": null,
+    "equity_eur": 496.62
+  },
+  "decision": "not_implemented_insufficient_sample",
+  "measured_at": "2026-10-21T12:05:58.960319+00:00",
+  "method": {
+    "bootstrap": 10000,
+    "eligibility": "0 < pnl_real < 3 EUR",
+    "horizon_bars": 48,
+    "intervention": "no cerrar; TP/SL o 48 H1; SL primero si ambos en la vela",
+    "min_n": 30,
+    "population": "cierres ejecutados por time_stop (order_filled + ciclo time_stop=true)",
+    "seed": 42
+  },
+  "n_eligible_0_3": 1,
+  "n_stops_executed": 1,
+  "n_uncensored": 0,
+  "prereg": "fastapi/ops/2026-10-21-pre-registro-time-stop-3eur.md",
+  "reason": "n no censurado=0 < 30: no hay decisión",
+  "study": "time_stop_protection_3eur",
+  "units": [
+    {
+      "actual_pnl_eur": 0.77,
+      "counterfactual": {
+        "bars_available": 0,
+        "eur_per_pip": 0.1789,
+        "mtm_pnl_eur": 0.66,
+        "mtm_price": 1.12324,
+        "reason": "sin velas H1 cerradas después del cierre",
+        "status": "censored"
+      },
+      "entry": 1.12361,
+      "filled_at": "2026-10-21T11:38:47.497125+00:00",
+      "order_id": 70,
+      "outcome_id": 279,
+      "sl": 1.12558,
+      "symbol": "EURUSD",
+      "tp": 1.12008,
+      "type": "SELL",
+      "volume": 0.02
+    }
+  ]
+}

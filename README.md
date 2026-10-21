@@ -3200,10 +3200,27 @@ quedan como histórico pre-corrección, y la primera línea con la regla aplicad
 de las 11:57. El `trade_outcomes` conserva el PnL real de cada cierre; lo que se
 corrige es su clasificación.
 
-**Si lo que se quiere es que el time-stop NO cierre un positivo <3 €** (dejarlo correr
-a TP/SL), es una política distinta y hay que decidirla aparte: la regla de AGENTS.md
-es de **clasificación**, no de bloqueo de salida. El time-stop es una salida mecánica
-por tiempo; puede realizar +0,77 € y eso cuenta como pérdida, no como acierto.
+**La política alternativa se midió antes de decidir (2026-10-21).** El pre-registro
+congelado está en `fastapi/ops/2026-10-21-pre-registro-time-stop-3eur.md`; la
+medición, en `fastapi/ops/2026-10-21-time-stop-3eur-measure.json` (script
+`fastapi/scripts/measure_time_stop_protection.py`, sólo lectura). Pregunta: ¿no
+cerrar por time-stop cuando `0 < pnl < 3 €` mejora la expectancy ajustada al riesgo?
+
+- **Población:** cierres **ejecutados** por time-stop (no los 46 ciclos repetidos
+  sobre la misma posición; el guard 0,03 de v13.9 los bloqueaba).
+- **n elegible:** 1 (EURUSD 279, +0,77 €, 11:38:47 UTC). **No censurados:** 0
+  (al corte de la medición, 12:05 UTC, el contrafactual no había tocado TP 1,12008
+  ni SL 1,12558; su mark-to-market +0,66 € es descriptivo, no resultado).
+- **Regla de decisión pre-registrada:** n≥30 no censurados, IC 95 % de Δ expectancy
+  > 0 y DD ≤ control +2 pp.
+- **Decisión:** `not_implemented_insufficient_sample` (n=0 < 30). **El time-stop
+  sigue igual; la protección NO se activa.** No se declara que sea mejor ni peor.
+- **Chequeo de cordura:** orden DB 70 ↔ `order_filled` 11:38:47 ↔ `trade_outcomes`
+  279 (entry 2026-10-20 22:55:38 bróker = 19:55:38 UTC; +0,77 €; €/pip 0,1789).
+
+La muestra se acumulará con v14.0, que ya puede cerrar 0,02; se repite la medición
+cuando haya ≥30 unidades no censuradas. Hasta entonces no se toca la salida: la regla
+de AGENTS.md es de **clasificación**, no de bloqueo de salida.
 
 **Tests:** `test_daily_ledger.py` (+2: +0,77/+5,00/−1,00 ⇒ 1 win/2 losses; +3,00 ⇒
 win) y `test_t31_ledger.py` (+1: track record con umbral 3 € y SQL `$2`). **Suite
