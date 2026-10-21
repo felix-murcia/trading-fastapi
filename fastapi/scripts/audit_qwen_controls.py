@@ -97,6 +97,18 @@ def _group(rows: list[dict]) -> dict:
     }
 
 
+def _wilson_bounds(hits: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """Intervalo de Wilson (bilateral) para una proporción."""
+    p = hits / n
+    den = 1 + z * z / n
+    centre = p + z * z / (2 * n)
+    margin = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
+    return (
+        max(0.0, (centre - margin) / den),
+        min(1.0, (centre + margin) / den),
+    )
+
+
 def _two_prop(a: dict, b: dict) -> dict | None:
     n1, n2 = a.get("n", 0), b.get("n", 0)
     if not n1 or not n2:
@@ -109,16 +121,21 @@ def _two_prop(a: dict, b: dict) -> dict | None:
         return None
     z = (p1 - p2) / se
     pval = math.erfc(abs(z) / math.sqrt(2))
-    se_diff = math.sqrt(p1 * (1 - p1) / n1 + p2 * (1 - p2) / n2)
     diff = p1 - p2
+    # 2026-10-21: IC de Newcombe (híbrido score), no Wald. El Wald se
+    # degenera con celdas 0 y n<30 (quality<5: n=1 ⇒ IC [−29,5, −16,4]
+    # con p=0,586; eff<0,35: n=19 ⇒ IC que excluía 0 con p=0,052).
+    # Newcombe es consistente con el test y robusto en esos casos.
+    l1, u1 = _wilson_bounds(h1, n1)
+    l2, u2 = _wilson_bounds(h2, n2)
+    lo = diff - math.sqrt((p1 - l1) ** 2 + (u2 - p2) ** 2)
+    hi = diff + math.sqrt((u1 - p1) ** 2 + (p2 - l2) ** 2)
     return {
         "diff_pp": round(diff * 100, 2),
         "z": round(z, 3),
         "p_value": round(pval, 6),
-        "ci95_pp": [
-            round((diff - 1.96 * se_diff) * 100, 2),
-            round((diff + 1.96 * se_diff) * 100, 2),
-        ],
+        "ci95_pp": [round(lo * 100, 2), round(hi * 100, 2)],
+        "ci_method": "newcombe_hybrid_score",
     }
 
 

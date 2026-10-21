@@ -3161,13 +3161,19 @@ hoy; no se concluye nada).
 
 | Control | Grupo | n | Acierto | Base | Skill | Comparación |
 |---|---|---|---|---|---|---|
-| **`reentry_ok`** | bloqueado (`false`) | 53 | **9,4 %** | 90,6 % | **−81,1 pp** | **−40,6 pp** vs permitido; p = **0,000276**; IC 95 % [−66,3, −14,8] |
+| **`reentry_ok`** | bloqueado (`false`) | 53 | **9,4 %** | 90,6 % | **−81,1 pp** | **−40,6 pp** vs permitido; p = **0,000276**; IC 95 % [−63,2, −16,1] |
 | | permitido (`true`) | 16 | 50,0 % | 50,0 % | 0,0 pp | n < 30: no se declara skill propio |
-| **`quality`** | `< 5` | 1 | 0,0 % | 100 % | −100 pp | **no evaluable** (n=1) |
+| **`quality`** | `< 5` | 1 | 0,0 % | 100 % | −100 pp | **no evaluable** (n=1); p = 0,586 |
 | | `≥ 5` | 157 | 22,9 % | 77,7 % | −54,8 pp | — |
-| **`regime`** | RANGING | 13 | 15,4 % | 84,6 % | −69,2 pp | −8,1 pp vs no-RANGING; p = **0,51** |
+| **`regime`** | RANGING | 13 | 15,4 % | 84,6 % | −69,2 pp | −8,1 pp vs no-RANGING; p = **0,51**; IC [−21,4, +19,5] |
 | | no-RANGING | 145 | 23,4 % | 77,2 % | −53,8 pp | sin discriminación |
-| **`eff < 0,35`** | sí | 19 | 5,3 % | — | — | p = 0,052; **n < 30** ⇒ no acreditado |
+| **`eff < 0,35`** | sí | 19 | 5,3 % | — | — | p = 0,052; IC [−28,9, +0,5]; **n < 30** ⇒ no acreditado |
+
+**Método del IC de comparación:** Newcombe híbrido score (no Wald). Se cambió tras
+detectar que el Wald se degenera con celdas 0 y n<30: `quality<5` (n=1) publicaba
+IC [−29,5, −16,4] con p=0,586, y `eff<0,35` (n=19) un IC que excluía 0 con p=0,052.
+Con Newcombe ambos IC incluyen 0, coherentes con su p-valor. El IC de `reentry_ok`
+pasa de [−66,3, −14,8] (Wald) a **[−63,2, −16,1]**; la conclusión no cambia.
 
 **Decisiones (aplicadas):**
 - **`reentry_ok`: SE QUEDA.** Es el único control de Qwen con evidencia real: bloquea
@@ -3188,7 +3194,9 @@ hoy; no se concluye nada).
 
 **Hallazgo incómodo (no se edulcora):** en las 158 propuestas crudas, el PPO dijo
 **1 BUY y 157 SELL** en un mercado que subió en **123/158 = 77,8 %** de las ventanas
-de +24 h. El acierto crudo del PPO fue **22,9 % vs base 77,7 % (−54,8 pp)**: en esta
+de +24 h. El acierto crudo del PPO fue **36/158 = 22,8 % vs base 77,8 % (−55,0 pp)**;
+en el subconjunto con `quality ≥ 5` (n=157) fue **36/157 = 22,9 % vs base 77,7 %
+(−54,8 pp)**: en esta
 muestra el PPO fue **anti-predictivo**, no sólo «sin edge». El dinero realizado
 (+341,04 € en 189 operaciones; 96/93) no viene del acierto direccional del PPO:
 viene de la relación 1,23:1, de los filtros (sobre todo `reentry_ok`) y de la gestión.
