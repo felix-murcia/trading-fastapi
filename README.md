@@ -3451,3 +3451,90 @@ El `trade_outcomes` 280 es la fuente del −8,86 €; la última línea del `dai
 histórico **−8,32 €**. El track record vivo EURUSD (`/api/v1/ai/ledger`) sigue
 190 trades / 77 wins / 113 losses / +341,81 €; el canario USDCHF es una línea aparte.
 
+
+---
+
+## Troubleshooting — Sesión 2026-10-21 (Tarde) · G3-2: SL/TP "suelo / techo más cercano"
+
+**Síntoma (Félix):** *"los SL/TP están a una distancia enorme para la ganancia
+que puede producir… con un lote pequeño… un tiempo demasiado largo para los
+beneficios que se pueden obtener"* y *"que los SL/TP se sitúen en los suelo y
+techos más cercanos a la entrada… con un lote que permita el trailing del SL a
++4 € como se hacía hasta ayer mismo"*.
+
+### 1. Causa raíz (NO era "el mercado se aleja": era el código)
+
+| # | Defecto | Dónde | Evidencia |
+|---|---|---|---|
+| **D1** | **Paridad train↔serve ROTA**: `/predict` calculaba los stops con `position=env_position` (0 al abrir ⇒ rama plana = fallback ATR `SL=1,5×ATR, TP=2×SL`), mientras el env los calculaba con `position=target_pos` (±1 ⇒ rama **estructural** swing/S-R). El modelo se entrenaba en un mundo y producción ejecutaba otro. | `routers/ai.py` (serve) vs `ml/trading_env_v2.py` (env) | Introducido el 2026-10-08 (`37e5745`, rama estructural): el *call site* de serve nunca la alcanzaba al abrir. El README afirmaba "paridad train/serve vía columnas del df" ⇒ **afirmación falsa**. Los tests no la veían porque el fixture hace coincidir ambas ramas (15 p). |
+| **D2** | **El SL real ≠ el SL auditado**: el EA añade el buffer de spread al colocarlo (`MathMax(spread, 2.0*pipSize)`) **fuera** del cálculo del backend ⇒ el sizing y el `audit_log` veían una distancia MENOR que la real. | `mql5/AI_Quant_Terminal.mq5` (buffer) vs `production_stops` | Medido 2026-10-21: EURUSD audit 13,3 pips ⇒ **real 15,1 pips** ⇒ riesgo real 5,37 € vs 4,73 € presupuestado ⇒ **+13 % de riesgo no declarado**. |
+| **D3** | **El trailing "Safe-4" podía quedar APAGADO**: el EA sólo mueve el SL a bloquear el beneficio si el riesgo **en €** de la posición ≥ `SL_LockSafetyNetEur` (4 €). Con el lote que salía del sizing, el riesgo caía por debajo ⇒ el trailing no tocaba nunca el stop. | EA `ManageTrailingStop` (guard `riskMoney < 4 € ⇒ return`) | El C1 (2026-10-21) bajó `PPO_RISK_PCT` 3 % → 1,5 % ⇒ el lote se partió por dos ⇒ el margen del Safe-4 quedó en el filo (medido: 4,66-5,30 € por operación). |
+| **D4** | **La geometría por defecto no era alcanzable**: SL = 1,5×ATR (dentro del ruido: el 50 % de las entradas aleatorias lo tocan en 12 h) y TP = 2×SL = 3×ATR (fuera del alcance: sólo el 17 % lo alcanzan en el horizonte). | `production_stops` | 29 981 velas H1 × 2 pares × 2 ventanas disjuntas (`scripts/measure_stop_geometry.py`): P(TP) 17 %, P(SL) 47 %, t medio 7,1 h. |
+
+### 2. La aritmética que explica la queja (medida)
+
+- `beneficio_€ = riesgo_€ × (TP/SL)` ⇒ **el beneficio NO depende de la distancia**;
+- `lote = riesgo_€ / (distancia_SL × pip_value)` ⇒ **la distancia SÍ determina el
+  lote** (el "lote pequeño" es *consecuencia* de la distancia larga);
+- `P(TP)` ⇒ el "tiempo demasiado largo" es, en realidad, "el objetivo no se
+  alcanza".
+
+### 3. Qué se cambió (G3-2, suite **1273 passed + 2 xfailed**)
+
+1. **Geometría "suelo / techo más cercano"** (`production_stops`): el SL se
+   coloca en el **suelo confirmado** más cercano bajo la entrada y el TP en el
+   **techo confirmado** más cercano sobre ella. Significancia mínima
+   `NEAREST_LEVEL_ATR_MULT = 0,75` × ATR (sin ella el "techo más cercano" con
+   fractal de 2 barras estaba a **3 pips** ⇒ R:R 0,25 y beneficio < 3 €: ruido).
+   Los swings son **confirmados** (un swing de la vela `i` se conoce en `i+2`):
+   el detector antiguo usaba `shift(-1)/shift(-2)` ⇒ **mirada al futuro** en los
+   stops del env.
+2. **Paridad restaurada por construcción**: una sola geometría, la misma función
+   importada por env y serve; el env calcula los stops con la **dirección
+   objetivo** y el serve calcula los de la **respuesta después del decode**
+   (antes los calculaba antes ⇒ nunca sabía la dirección).
+3. **Buffer de spread DENTRO de la distancia** (`effective_sl_pips`): el sizing
+   y el audit ven la distancia REAL ⇒ el riesgo real = el presupuestado.
+   Constante `SPREAD_BUFFER_PIPS = 2.0` espejada en el EA.
+4. **Suelo de lote de protección** (`min_lot_for_protection`): el lote no baja
+   de lo necesario para que el trailing "Safe-4" del EA pueda bloquear +4 €.
+   Con la geometría nueva el SL es algo más ancho ⇒ a riesgo constante el lote
+   BAJABA (0,04 → 0,02 ⇒ 3,15 € ⇒ trailing apagado); con el suelo: 0,03 ⇒
+   4,36 € ⇒ **Safe-4 VIVO** ⇒ y el TP sube de 2,85 € a 4,00 € ⇒ **vuelve a
+   cumplir la regla de 3 €**.
+5. **Audit comparable con la gráfica**: `sl_pips` (distancia real), `sl_pips_geom`
+   (la que se envía al EA), `floor_below`, `ceiling_above`, `risk_eur`,
+   `lock_alive`, `sl_geometry`.
+
+### 4. Resultado medido (30 000 velas H1 × 2 pares, 2 ventanas disjuntas)
+
+| | SL real | TP | R:R | P(TP) | P(SL) | t medio |
+|---|---|---|---|---|---|---|
+| EURUSD **vieja** | 18,3-20,2 p | 36,6-40,5 p | 2,00 | **17 %** | 47 % | 7,1 h |
+| EURUSD **nueva** | 17,9-19,5 p | **14,9-16,0 p (−59 %)** | 0,82 | **40-42 %** | 44 % | **4,4-4,6 h (−36 %)** |
+| USDCHF **vieja** | 20,9-22,1 p | 41,9-44,3 p | 2,00 | 10-13 % | 35-40 % | 8,1-8,9 h |
+| USDCHF **nueva** | 18,2-19,7 p | **14,3-15,9 p (−65 %)** | 0,80 | **41 %** | 38-41 % | **4,9-5,3 h** |
+
+### 5. Lo que cuesta (hay que decirlo)
+
+- El **R:R pasa de 2,00 a ~0,82** ⇒ el **€ al TP baja** (EURUSD 6,52 € →
+  2,65-2,85 € con el lote nominal; 4,00 € con el suelo de protección).
+- El **gate de recompensa mínima queda estructuralmente casi inalcanzable**
+  (con el suelo de lote el TP siempre vale ≥ ~4 €). Sigue como guarda del caso
+  extremo; su test se reescribió para **declarar** el hecho, no para ocultarlo.
+- El **obs no cambia** (las columnas nuevas son de df, no de `MARKET_FEATURES`)
+  ⇒ contrato `(20,25)` intacto ⇒ **no hace falta retrain para validar el
+  cambio**; el siguiente retrain sí evaluará por fin el mundo real.
+
+### 6. Decisiones de dinero PENDIENTES de Félix (no tomadas)
+
+1. `PPO_RISK_PCT` (hoy 1,5 %): para conservar el € nominal por operación
+   (~7 €) con el R:R nuevo haría falta ~2,6 %; o se mantiene 1,5 % y se acepta
+   ~4 € por operación con P(TP) ×2,4 y tiempo −36 %.
+2. `MIN_ENTRY_REWARD_EUR` (hoy 1,5 € por el C1): con la geometría nueva debería
+   volver a **3,0 €** (igual que la clasificación de AGENTS.md) para que no
+   entren trades cuyo TP selle por debajo de la regla.
+
+**Pre-registro y reversión:** `fastapi/ops/2026-10-21-pre-registro-geometria-suelo-techo.md`
+· medición reproducible: `scripts/measure_stop_geometry.py` · tests del
+contrato: `fastapi/tests/test_g3_nearest_levels.py` (9).

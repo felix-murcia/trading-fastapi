@@ -51,6 +51,15 @@ class Settings(BaseSettings):
     sl_mult: float = 1.5
     sl_pct: float = 0.001
     rr_min: float = 1.0
+    # G3-2 (2026-10-21): MÍNIMO DE PROTECCIÓN en € del trailing "Safe-4".
+    # El EA (input `SL_LockSafetyNetEur`, v14.0) sólo mueve el SL a bloquear
+    # el beneficio si el RIESGO EN € de la posición es ≥ este valor; con un
+    # lote pequeño el trailing queda APAGADO (el EA hace `return` antes de
+    # tocar el stop) y la posición nunca asegura nada. Por eso el backend
+    # bloquea la entrada si el riesgo real de la operación no llega aquí
+    # ("se protege o no se opera"). El valor espeja el input del EA: si
+    # cambias el input en MT5, cámbialo aquí también.
+    min_lock_eur: float = 4.0
     rr_min_xau: float = 1.2
     sl_min_spread_mult: int = 3
     sl_min_pips_default: float = 3.0

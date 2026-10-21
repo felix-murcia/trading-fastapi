@@ -92,7 +92,7 @@ class TestSharedSizingFunction:
 
         serve_lots = ps.size_ppo_position(
             volume_norm=0.4,
-            sl_pips=15.0,
+            sl_pips=17.0,
             equity=INITIAL,
             pip_value=ps.pip_value_per_lot("EURUSD", 1.1000),
             risk_pct=settings.ppo_risk_pct,
@@ -100,7 +100,7 @@ class TestSharedSizingFunction:
             min_lot=settings.min_volume,
         )
         assert env.volume == pytest.approx(serve_lots, abs=1e-9)
-        assert serve_lots == pytest.approx(0.08)   # 1000 × 3% × 0.4 / (15 × 10)
+        assert serve_lots == pytest.approx(0.07)   # 1000 × 3% × 0.4 / (17 × 10)
 
 
 class TestEnvVolumeBehavior:
@@ -126,14 +126,14 @@ class TestEnvVolumeBehavior:
         env_small = _env(initial_balance=500.0)
         env_small.reset()
         env_small.step(OPEN)
-        # 500 × 3% × 0.4 / (15 × 10) = 0.04
-        assert env_small.volume == pytest.approx(0.04, abs=1e-9)
+        # 500 × 3% × 0.4 / (17 × 10) = 0.03
+        assert env_small.volume == pytest.approx(0.03, abs=1e-9)
 
         env_big = _env(initial_balance=2000.0)
         env_big.reset()
         env_big.step(OPEN)
-        # 2000 × 3% × 0.4 / (15 × 10) = 0.16
-        assert env_big.volume == pytest.approx(0.16, abs=1e-9)
+        # 2000 × 3% × 0.4 / (17 × 10) = 0.14
+        assert env_big.volume == pytest.approx(0.14, abs=1e-9)
 
     def test_tiny_equity_never_opens_beyond_risk(self):
         # 5 de balance → 0.001 lots < lote mínimo → sin entrada.

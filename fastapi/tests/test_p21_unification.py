@@ -22,6 +22,7 @@ import pytest
 from ml.trading_env_v2 import (
     ForexTradingEnvV2,
     engineer_market_features,
+    effective_sl_pips,
     production_stops,
 )
 
@@ -88,9 +89,11 @@ class TestProductionStopsSingleSource:
         env.step(LONG)
         entry_candle_atr = float(env.df.iloc[env.current_step - 1]["atr"])
         sl_expected, tp_expected = production_stops(entry_candle_atr, PIP)
-        assert env.sl_pips == pytest.approx(sl_expected)
+        # G3-2: el env simula el SL REAL (geométrico + buffer de spread
+        # del EA) ⇒ el sizing y el PnL usan la distancia que se ejecuta.
+        assert env.sl_pips == pytest.approx(effective_sl_pips(sl_expected))
         assert env.tp_pips == pytest.approx(tp_expected)
-        assert env.sl_pips == pytest.approx(15.0)   # ATR 10 × 1.5
+        assert env.sl_pips == pytest.approx(17.0)   # ATR 10 × 1.5 + buffer 2
         assert env.tp_pips == pytest.approx(30.0)
 
 
@@ -106,10 +109,11 @@ class TestActionContract:
         env.reset()
         env.step(np.array([0.5, 0.4, 0.99, 0.99], dtype=np.float32))
         assert env.position == 1
-        # P2-2: sizing por riesgo — 1000 × 3% × 0.4 / (15 pips × 10) = 0.08
-        assert env.volume == pytest.approx(0.08, abs=1e-6)
+        # P2-2: sizing por riesgo — 1000 × 3% × 0.4 / (17 pips × 10) = 0.07
+        # (G3-2: el SL real incluye el buffer de spread del EA)
+        assert env.volume == pytest.approx(0.07, abs=1e-6)
         # D3: las cabezas sl/tp NO deciden los stops
-        assert env.sl_pips == pytest.approx(15.0)
+        assert env.sl_pips == pytest.approx(17.0)   # SL real (15 + buffer 2)
         assert env.tp_pips == pytest.approx(30.0)
 
     def test_step_rejects_unknown_action_sizes(self):
@@ -129,7 +133,7 @@ class TestTrailingMirrorsEA:
         env.step(LONG)
         assert env.position == 1
         entry = env.entry_price
-        assert env.sl_price == pytest.approx(entry - 15 * PIP)   # SL producción
+        assert env.sl_price == pytest.approx(entry - 17 * PIP)   # SL real (15 geom + 2 buffer)
         return env, entry
 
     def test_no_activation_below_full_risk_recovery(self):
@@ -143,7 +147,7 @@ class TestTrailingMirrorsEA:
 
         assert env.position == 1
         assert env.sl_price == pytest.approx(sl_before)
-        assert env.sl_pips == pytest.approx(15.0)   # no recalculado
+        assert env.sl_pips == pytest.approx(17.0)   # no recalculado
 
     @staticmethod
     def _ea_min_trail_pips(env, entry, close, position=1):
@@ -218,7 +222,7 @@ class TestTrailingMirrorsEA:
         env.step(SHORT)
         assert env.position == -1
         entry = env.entry_price
-        assert env.sl_price == pytest.approx(entry + 15 * PIP)
+        assert env.sl_price == pytest.approx(entry + 17 * PIP)
 
         # precio CAE el riesgo completo: mark = close + half ≤ entry − 15p y
         # newSL ≥ mark + 1 pip; low > TP (entry−30p) para no salir antes.
@@ -245,7 +249,7 @@ class TestTrailingMirrorsEA:
         env.step(LONG)
 
         assert env.sl_price == pytest.approx(sl_before)
-        assert env.sl_pips == pytest.approx(15.0)
+        assert env.sl_pips == pytest.approx(17.0)
 
 
 class TestRetrainContractChange:

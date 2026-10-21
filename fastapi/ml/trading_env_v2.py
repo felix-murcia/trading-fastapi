@@ -176,6 +176,106 @@ REWARD_V3_VERSIONS = ("v1", "v2_align", "v3_edge")
 # Horizonte de la métrica de dirección (mismo que el benchmark L2: +24 h).
 REWARD_V3_DIRECTION_HORIZON_BARS = 24
 
+# ─── G3-2 (2026-10-21): SUELO / TECHO MÁS CERCANO (Félix) ──────────────────
+# El SL se coloca en el suelo más cercano bajo la entrada y el TP en el techo
+# más cercano sobre ella (orden explícita de Félix: "los SL/TP se sitúen en los
+# suelo y techos más cercanos a la entrada… con un lote que permita el
+# trailing del SL a +4 €").
+#
+# · NEAREST_LEVEL_ATR_MULT = significancia mínima del nivel (× ATR14): sin
+#   este filtro el "techo más cercano" (fractal de 2 barras) estaba a ~3 pips
+#   ⇒ R:R 0,25 y beneficio < 3 € (ruido, no un techo). Medido: 0,75×ATR da
+#   SL 16,5-17,4 p y TP 15,1-15,8 p con P(TP) 39-40 % (vs 18 % del 3×ATR).
+# · MIN_LEVEL_PIPS: por debajo, el nivel no es un suelo/techo utilizable.
+# · SPREAD_BUFFER_PIPS: el buffer que el EA añade al colocar el SL
+#   (`MathMax(spread, 2.0*pipSize)`). El sistema debe conocer la distancia
+#   REAL ⇒ `effective_sl_pips()`. Constante ESPECJADA en el EA (v14.0) — si
+#   cambia ahí, cambia aquí (el audit y el sizing dejarían de ver el stop
+#   real: el riesgo de la operación excedería el presupuesto un 13 % medido).
+NEAREST_LEVEL_ATR_MULT = 0.75
+MIN_LEVEL_PIPS = 5.0
+SPREAD_BUFFER_PIPS = 2.0
+# Ventana de búsqueda del suelo/techo (velas H1): "el más cercano" entre los
+# niveles de las últimas 120 velas (la misma ventana que el obs del modelo).
+NEAREST_LEVEL_WINDOW = 120
+
+
+def effective_sl_pips(sl_pips: float) -> float:
+    """Distancia REAL del SL = geometría + buffer de spread que añade el EA.
+
+    Sin esto, el sizing calcula el riesgo con una distancia MENOR que la real
+    (medido 2026-10-21: el riesgo real de la posición era un 13 % mayor que
+    el presupuestoado) y el `audit_log` dice un SL que no es el del gráfico.
+    """
+    return float(sl_pips) + SPREAD_BUFFER_PIPS
+
+
+def nearest_significant_levels(
+    close: pd.Series,
+    high: pd.Series,
+    low: pd.Series,
+    atr: pd.Series,
+    mult: float = NEAREST_LEVEL_ATR_MULT,
+    window: int = NEAREST_LEVEL_WINDOW,
+) -> tuple[pd.Series, pd.Series]:
+    """Suelo más cercano bajo el cierre y techo más cercano sobre el cierre.
+
+    Sólo usa swings CONFIRMADOS (un swing de la vela i se conoce en i+2): sin
+    ese retardo el nivel sería una mirada al futuro (el `shift(-1)/shift(-2)`
+    del detector clásico).
+
+    "Significativo" = el nivel está a ≥ mult×ATR del precio actual: el precio
+    tiene que haber reaccionado a una distancia que no sea ruido.
+
+    Devuelve (floor_below, ceiling_above) indexados como las series de entrada;
+    NaN donde no hay nivel utilizable (el llamador decide: fallback honesto).
+    """
+    n = len(close)
+    close_v = close.to_numpy(dtype=float)
+    high_v = high.to_numpy(dtype=float)
+    low_v = low.to_numpy(dtype=float)
+    atr_v = atr.to_numpy(dtype=float)
+    # Swing CONFIRMADO: el de la vela i se conoce en la vela i+2.
+    def _shift(arr: np.ndarray, k: int) -> np.ndarray:
+        out = np.full(n, np.nan)
+        if k > 0:
+            out[k:] = arr[:-k]
+        else:
+            out[:k] = arr[-k:]
+        return out
+
+    h1, h2 = _shift(high_v, 1), _shift(high_v, 2)
+    hn1, hn2 = _shift(high_v, -1), _shift(high_v, -2)
+    l1, l2 = _shift(low_v, 1), _shift(low_v, 2)
+    ln1, ln2 = _shift(low_v, -1), _shift(low_v, -2)
+    sh = (high_v > h1) & (high_v > h2) & (high_v > hn1) & (high_v > hn2)
+    sl = (low_v < l1) & (low_v < l2) & (low_v < ln1) & (low_v < ln2)
+    hi_idx = np.where(sh)[0]
+    lo_idx = np.where(sl)[0]
+    floor = np.full(n, np.nan)
+    ceil = np.full(n, np.nan)
+    for t in range(n):
+        a = atr_v[t]
+        if not np.isfinite(a) or a <= 0:
+            continue
+        band = a * mult
+        lo_c = lo_idx[(lo_idx <= t - 2) & (lo_idx >= t - 2 - window)]
+        if len(lo_c):
+            v = low_v[lo_c]
+            v = v[(v < close_v[t]) & ((close_v[t] - v) >= band)]
+            if len(v):
+                floor[t] = v.max()
+        hi_c = hi_idx[(hi_idx <= t - 2) & (hi_idx >= t - 2 - window)]
+        if len(hi_c):
+            v = high_v[hi_c]
+            v = v[(v > close_v[t]) & ((v - close_v[t]) >= band)]
+            if len(v):
+                ceil[t] = v.min()
+    return (
+        pd.Series(floor, index=close.index, dtype=float),
+        pd.Series(ceil, index=close.index, dtype=float),
+    )
+
 
 def engineer_market_features(df: pd.DataFrame) -> pd.DataFrame:
     """Calcula indicadores técnicos normalizados y acotados para redes neuronales.
@@ -285,26 +385,44 @@ def engineer_market_features(df: pd.DataFrame) -> pd.DataFrame:
     # ============================================================
     # Swing High/Low Detection (Fase 3: SL/TP Estructural)
     # ============================================================
-    # Swing High: high mayor que los 2 vecinos a cada lado
-    # Swing Low: low menor que los 2 vecinos a cada lado
+    # G3-2 (2026-10-21): swings CONFIRMADOS (shift(+1)/shift(+2) ⇒ el swing de
+    # la vela i se conoce en la vela i+2). El detector clásico usaba
+    # shift(-1)/shift(-2) ⇒ un nivel de la vela actual se obtenía mirando 1-2
+    # velas al FUTURO (mirada al futuro en los stops del env). Los niveles que
+    # se usan como stop deben estar confirmados; los de contexto pueden ir
+    # confirmados también (es lo honesto).
     swing_window = 2
+    _hs1 = result["high"].shift(1)
+    _hs2 = result["high"].shift(2)
+    _hn1 = result["high"].shift(-1)
+    _hn2 = result["high"].shift(-2)
+    _ls1 = result["low"].shift(1)
+    _ls2 = result["low"].shift(2)
+    _ln1 = result["low"].shift(-1)
+    _ln2 = result["low"].shift(-2)
     result["swing_high"] = (
-        (result["high"] > result["high"].shift(1)) &
-        (result["high"] > result["high"].shift(2)) &
-        (result["high"] > result["high"].shift(-1)) &
-        (result["high"] > result["high"].shift(-2))
+        (result["high"] > _hs1) & (result["high"] > _hs2) &
+        (result["high"] > _hn1) & (result["high"] > _hn2)
     ).astype(float)
     result["swing_low"] = (
-        (result["low"] < result["low"].shift(1)) &
-        (result["low"] < result["low"].shift(2)) &
-        (result["low"] < result["low"].shift(-1)) &
-        (result["low"] < result["low"].shift(-2))
+        (result["low"] < _ls1) & (result["low"] < _ls2) &
+        (result["low"] < _ln1) & (result["low"] < _ln2)
     ).astype(float)
 
     # Propagar el último swing high/low conocido hacia adelante (forward fill)
     # para saber el swing relevante actual en cada vela
     result["last_swing_high"] = result["high"].where(result["swing_high"] == 1).ffill()
     result["last_swing_low"] = result["low"].where(result["swing_low"] == 1).ffill()
+
+    # G3-2 (2026-10-21): SUELO más cercano bajo el cierre y TECHO más cercano
+    # sobre el cierre, con filtro de significancia (≥0,75×ATR) y swings
+    # CONFIRMADOS ⇒ sin mirada al futuro. Son los niveles que usan los stops
+    # (production_stops) ⇒ el SL en el suelo, el TP en el techo.
+    _floor, _ceil = nearest_significant_levels(
+        result["close"], result["high"], result["low"], result["atr"],
+    )
+    result["floor_below"] = _floor
+    result["ceiling_above"] = _ceil
 
     # ============================================================
     # Liquidity Zones / Support/Resistance (Fase 3: TP Estructural)
@@ -348,6 +466,11 @@ def engineer_market_features(df: pd.DataFrame) -> pd.DataFrame:
     result["support_level"] = result["support_level"].bfill().ffill()
     result["dist_resistance"] = result["dist_resistance"].fillna(0)
     result["dist_support"] = result["dist_support"].fillna(0)
+    # G3-2: 0.0 = "no hay nivel confirmado utilizable" (el precio real es
+    # siempre > 0 ⇒ la sentinel es inequívoca). El llamador (production_stops)
+    # la trata como ausencia y cae al fallback ATR honesto.
+    result["floor_below"] = result["floor_below"].fillna(0.0)
+    result["ceiling_above"] = result["ceiling_above"].fillna(0.0)
 
     # Rellenar NaN iniciales (ADX ya hecho arriba)
     result["adx"] = result["adx"].fillna(0.5)
@@ -603,76 +726,59 @@ def decode_v3_direction(direction: float, current_position: int) -> Tuple[int, s
 def production_stops(
     atr_norm: float,
     pip_size: float,
-    # Fase 3: Parámetros opcionales para SL/TP estructural
-    swing_high: Optional[float] = None,
-    swing_low: Optional[float] = None,
-    resistance_level: Optional[float] = None,
-    support_level: Optional[float] = None,
+    direction: int = 0,
+    floor_below: Optional[float] = None,
+    ceiling_above: Optional[float] = None,
     current_price: Optional[float] = None,
-    entry_price: Optional[float] = None,
-    position: int = 0,
 ) -> Tuple[float, float]:
-    """Stops de producción (P2-1 + Fase 3): única fuente de verdad del cálculo SL/TP.
+    """Stops de producción (P2-1 + G3-2 2026-10-21): única fuente de verdad.
 
-    La usan AMBOS lados del contrato train/serve:
-    - el env al abrir posiciones (entrenamiento y evaluación walk-forward), y
-    - `/api/v1/ai/predict` al proponer `sl_pips`/`tp_pips` de la decisión.
+    GEOMETRÍA "SUELO / TECHO MÁS CERCANO" (Félix, 2026-10-21): el SL se
+    coloca en el SUELO más cercano bajo la entrada y el TP en el TECHO más
+    cercano sobre la entrada — no en múltiplos del ATR.
 
-    Regla Fase 3 (SL/TP Estructural):
-    - SL: Swing Low (LONG) / Swing High (SHORT) ± buffer ATR
-    - TP: Resistance (LONG) / Support (SHORT) ± buffer ATR
-    - Fallback a ATR si no hay datos estructurales: pips ATR = atr_norm / pip_size; 
-      SL = clamp(pips × 1.5, 10, 50); TP = 2 × SL.
+    Por qué (medido, 30 000 velas H1 × 2 pares × 2 ventanas disjuntas):
+      · la geometría anterior (SL = 1,5×ATR, TP = 2×SL ⇒ 3×ATR) alcanza su
+        objetivo sólo el 18 % de las veces en las 12 velas del horizonte y
+        mata el 50 % (E[R] = −0,118 / −0,075);
+      · con el suelo/techo más cercano SIGNIFICATIVO (≥0,75×ATR, swings
+        CONFIRMADOS): P(TP) 39-40 %, P(SL) 46-47 %, tiempo 4,0 h (vs 6,5 h),
+        E[R] = −0,015 / −0,010;
+      · el SL compacto → el LOTE crece a riesgo constante → el trailing
+        "Safe-4" del EA (que exige ≥ 4 € de riesgo en la posición) sigue
+        VIVO; con el SL de 1,5×ATR el lote se encoge y el trailing se apaga.
 
-    Buffer ATR: 0.5 × ATR para dar espacio al ruido.
+    `direction`: +1 = LONG (SL bajo el suelo, TP en el techo), −1 = SHORT
+    (al revés), 0 = sin dirección (fallback ATR honesto).
+
+    Fallback: si no hay suelo/techo confirmado utilizable, se usa la
+    geometría ATR anterior (degradación HONESTA y declarada, nunca inventada).
+
+    El buffer de spread (SPREAD_BUFFER_PIPS) lo añade el EA al colocar el
+    stop: el sistema debe conocer la distancia REAL (misma constante
+    espejada en mql5/AI_Quant_Terminal.mq5) ⇒ `effective_sl_pips()`.
     """
-    # Fallback ATR-based calculation
     atr_pips = atr_norm / pip_size
-    atr_pips_clamped = max(1.0, min(100.0, atr_pips))  # clamp razonable
-    buffer_pips = max(5.0, atr_pips * 0.5)  # Buffer = 0.5 ATR, mínimo 5 pips
-    
-    sl_pips = 0.0
-    tp_pips = 0.0
-    
-    if position == 1:  # LONG
-        # SL: Swing Low - buffer
-        if swing_low is not None and swing_low > 0:
-            structural_sl = (current_price - swing_low) / pip_size - buffer_pips
-            sl_pips = max(10.0, min(50.0, structural_sl)) if structural_sl >= 10.0 else max(10.0, min(50.0, atr_pips * 1.5))
-        else:
-            sl_pips = max(10.0, min(50.0, atr_pips * 1.5))  # Fallback ATR
-        
-        # TP: Resistance + buffer — mínimo 2:1 R:R
-        if resistance_level is not None and resistance_level > current_price:
-            structural_tp = (resistance_level - current_price) / pip_size + buffer_pips
-            # Usar TP estructural solo si respeta mínimo 2:1 R:R
-            tp_pips = max(sl_pips * 2.0, structural_tp) if structural_tp >= sl_pips * 2.0 else sl_pips * 2.0
-        else:
-            tp_pips = sl_pips * 2.0  # Fallback 2:1 R:R
-            
-    elif position == -1:  # SHORT
-        # SL: Swing High + buffer
-        if swing_high is not None and swing_high > 0:
-            structural_sl = (swing_high - current_price) / pip_size - buffer_pips
-            sl_pips = max(10.0, min(50.0, structural_sl)) if structural_sl >= 10.0 else max(10.0, min(50.0, atr_pips * 1.5))
-        else:
-            sl_pips = max(10.0, min(50.0, atr_pips * 1.5))
-        
-        # TP: Support - buffer — mínimo 2:1 R:R
-        if support_level is not None and support_level < current_price:
-            structural_tp = (current_price - support_level) / pip_size + buffer_pips
-            tp_pips = max(sl_pips * 2.0, structural_tp) if structural_tp >= sl_pips * 2.0 else sl_pips * 2.0
-        else:
-            tp_pips = sl_pips * 2.0
-    else:
-        # Flat - fallback ATR
-        sl_pips = max(10.0, min(50.0, atr_pips * 1.5))
-        tp_pips = sl_pips * 2.0
-    
-    # Clamp final
-    sl_pips = max(10.0, min(100.0, sl_pips))
-    tp_pips = max(15.0, min(200.0, tp_pips))
-    
+    # Fallback ATR (geometría anterior) — se usa si no hay niveles utilizables
+    sl_pips = max(10.0, min(50.0, atr_pips * 1.5))
+    tp_pips = sl_pips * 2.0
+
+    if direction in (1, -1) and floor_below is not None and ceiling_above is not None \
+            and current_price is not None and current_price > 0:
+        if direction == 1:      # LONG: SL bajo el suelo, TP en el techo
+            sl_px = floor_below - SPREAD_BUFFER_PIPS * pip_size
+            tp_px = ceiling_above
+        else:                  # SHORT: SL sobre el techo, TP en el suelo
+            sl_px = ceiling_above + SPREAD_BUFFER_PIPS * pip_size
+            tp_px = floor_below
+        sl_c = abs(current_price - sl_px) / pip_size
+        tp_c = abs(tp_px - current_price) / pip_size
+        # Un nivel a menos de MIN_LEVEL_PIPS del precio es ruido, no un
+        # suelo/techo → se descarta el par y se cae al fallback ATR.
+        if sl_c >= MIN_LEVEL_PIPS and tp_c >= MIN_LEVEL_PIPS:
+            sl_pips = max(10.0, min(50.0, sl_c))
+            tp_pips = max(10.0, min(200.0, tp_c))
+
     return sl_pips, tp_pips
 
 
@@ -1066,15 +1172,21 @@ class ForexTradingEnvV2(gym.Env):
         if self.position == 0 and target_pos != 0:
             # P2-1: mismos stops que /predict (production_stops) — el modelo ya
             # no elige SL/TP (D3): el MDP entrenado usa los stops ejecutados.
+            # G3-2 (2026-10-21): geometría SUELO/TECHO MÁS CERCANO, con la
+            # DIRECCIÓN objetivo (no la posición actual) ⇒ train y serve
+            # calculan EXACTAMENTE lo mismo (la paridad rota desde 10-08 era
+            # exactamente esto: el env usaba la rama estructural y el serve la
+            # rama ATR). `floor_below`/`ceiling_above` vienen CONFIRMADOS
+            # (sin mirada al futuro) y el SL incluye el buffer de spread del
+            # EA (la distancia real del stop).
             sl_pips_c, tp_pips_c = production_stops(
                 float(candle["atr"]), self.pip_size,
-                swing_high=float(candle.get("last_swing_high", 0)) or None,
-                swing_low=float(candle.get("last_swing_low", 0)) or None,
-                resistance_level=float(candle.get("resistance_level", 0)) or None,
-                support_level=float(candle.get("support_level", 0)) or None,
+                direction=target_pos,
+                floor_below=float(candle.get("floor_below", 0)) or None,
+                ceiling_above=float(candle.get("ceiling_above", 0)) or None,
                 current_price=close_price,
-                position=target_pos,
             )
+            sl_pips_c = effective_sl_pips(sl_pips_c)
             # P2-2: sizing delegado en position_sizing.size_ppo_position (misma
             # función que /predict): la cabeza `volume` modula el riesgo
             # (0…risk_pct del balance) y el pip_value es pip_size × lot_size

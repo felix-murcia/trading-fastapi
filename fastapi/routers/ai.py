@@ -35,6 +35,7 @@ from ml.trading_env_v2 import (
     build_v3_observation,
     decode_v3_direction,
     derive_obs_contract,
+    effective_sl_pips,
     engineer_market_features,
     get_market_features,
     join_higher_tf_channels,
@@ -67,6 +68,7 @@ from services.position_sizing import (
     PIP_SIZE,
     expected_close_eur,
     is_supported,
+    min_lot_for_protection,
     pip_value_per_lot,
     size_ppo_position,
 )
@@ -1156,24 +1158,25 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     # stops Y en el prompt de Qwen (antes inline, sin ruta hacia el LLM).
     support_level = float(df['support_level'].iloc[-1]) if 'support_level' in df.columns else None
     resistance_level = float(df['resistance_level'].iloc[-1]) if 'resistance_level' in df.columns else None
-    sl_pips, tp_pips = production_stops(
-        current_atr, pip_size,
-        swing_high=float(df['last_swing_high'].iloc[-1]) if 'last_swing_high' in df.columns else None,
-        swing_low=float(df['last_swing_low'].iloc[-1]) if 'last_swing_low' in df.columns else None,
-        resistance_level=resistance_level,
-        support_level=support_level,
-        current_price=current_price,
-        position=env_position,
-    )
-    sl_distance_price = sl_pips * pip_size
+    # G3-2 (2026-10-21): suelo/techo MÁS CERCANOS (confirmados, sin lookahead)
+    # — los niveles que usan los stops. El SL/TP de la RESPUESTA se calcula
+    # DESPUÉS del decode (dirección objetivo); aquí sólo se prepara el obs.
+    floor_below = float(df['floor_below'].iloc[-1]) if 'floor_below' in df.columns else 0.0
+    ceiling_above = float(df['ceiling_above'].iloc[-1]) if 'ceiling_above' in df.columns else 0.0
+    # Fallback del obs (posición abierta sin stops del EA): geometría ATR.
+    # En plano `build_v3_observation` pone dist_sl/dist_tp a 0 ⇒ el obs no
+    # depende de estos valores.
+    atr_sl_pips = max(10.0, min(50.0, (current_atr / pip_size) * 1.5))
+    sl_distance_price = atr_sl_pips * pip_size
+    atr_tp_distance_price = 2 * sl_distance_price
 
     if env_position != 0 and req.entry_price > 0:
         entry_p = req.entry_price
         sl_p = req.sl_price if req.sl_price > 0 else (entry_p - sl_distance_price if env_position == 1 else entry_p + sl_distance_price)
-        tp_p = req.tp_price if req.tp_price > 0 else (entry_p + tp_pips * pip_size if env_position == 1 else entry_p - tp_pips * pip_size)
+        tp_p = req.tp_price if req.tp_price > 0 else (entry_p + atr_tp_distance_price if env_position == 1 else entry_p - atr_tp_distance_price)
     else:
         sl_p = entry_p - sl_distance_price if env_position == 1 else entry_p + sl_distance_price
-        tp_p = entry_p + tp_pips * pip_size if env_position == 1 else entry_p - tp_pips * pip_size
+        tp_p = entry_p + atr_tp_distance_price if env_position == 1 else entry_p - atr_tp_distance_price
 
     market_slice = df[features_list].iloc[-20:].values
     # Fase 3 / P1 / R1: UNA sola consulta de velas desde el último cierre —
@@ -1273,6 +1276,25 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         decision = "HOLD"
     ml_prob = float(np.clip(abs(direction), 0.1, 0.99))
 
+    # G3-2 (2026-10-21): SL/TP de la RESPUESTA — geometría SUELO/TECHO MÁS
+    # CERCANO con la DIRECCIÓN objetivo (LONG: SL bajo el suelo, TP en el
+    # techo; SHORT: al revés). Se calcula AQUÍ, después del decode, porque
+    # depende de la dirección: antes se calculaba antes del decode y con la
+    # posición actual, lo que sólo daba la rama plana (fallback ATR) ⇒ el
+    # env entrenaba una geometría y producción otra (paridad rota 10-08).
+    # `sl_pips_geom` es lo que se envía al EA (que añade su buffer de spread);
+    # `sl_pips` es la distancia REAL del stop (geom + buffer) ⇒ es la que
+    # debe usar el sizing y el audit (si no, el riesgo real de la posición
+    # excede el presupuesto: 13 % medido el 21-10).
+    sl_pips_geom, tp_pips = production_stops(
+        current_atr, pip_size,
+        direction=target_pos,
+        floor_below=floor_below or None,
+        ceiling_above=ceiling_above or None,
+        current_price=current_price,
+    )
+    sl_pips = effective_sl_pips(sl_pips_geom)
+
     # P2-2: sizing delegado en position_sizing.size_ppo_position — la cabeza
     # `volume` modula el riesgo (0…settings.ppo_risk_pct del equity) con el
     # pip_value centralizado por símbolo. Reemplaza: tope degenerado
@@ -1291,6 +1313,49 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
 
     sl_pips_final = sl_pips
     tp_pips_final = tp_pips
+
+    # G3-2 (2026-10-21): el trailing "Safe-4" del EA sólo mueve el SL si el
+    # RIESGO EN € de la posición es ≥ SL_LockSafetyNetEur (4 €): con un lote
+    # pequeño el trailing queda APAGADO (el EA hace `return` antes de tocar
+    # nada) y la posición nunca asegura el beneficio. Félix lo pidió el
+    # 2026-10-21 ("un lote que permita el trailing del SL a +4 €").
+    #
+    # CON LA GEOMETRÍA NUEVA ESTO ES OBLIGATORIO, NO COSMÉTICO (medido con el
+    # motor real sobre 30 000 velas H1 × 2 pares, 2026-10-21): el SL en el
+    # suelo más cercano es más ANCHO que 1,5×ATR (17,7 p vs 15,1 p) ⇒ a
+    # riesgo constante el lote BAJA (0,04 → 0,02) ⇒ el riesgo real cae a
+    # 3,15 € < 4 € ⇒ el trailing se apaga. Con el suelo de lote el riesgo
+    # vuelve a 4,36 € (Safe-4 VIVO) y el beneficio al TP sube de 3,86 € a
+    # 5,79 € (regla de 3 € cumplida).
+    # El suelo NUNCA excede el tope de riesgo del equity (settings.ppo_risk_pct):
+    # si el stop es tan ancho que proteger 4 € no cabe en el tope ⇒ la
+    # operación NO se abre (se protege o no se opera).
+    pip_value = pip_value_per_lot(sym, current_price)
+    risk_eur = 0.0
+    lock_alive = False
+    if final_lots > 0.0 and sl_pips_final > 0.0:
+        _lock_lot = min_lot_for_protection(
+            sl_pips_final, pip_value, current_price, settings.min_lock_eur,
+            min_lot=settings.min_volume,
+        )
+        _lock_risk = (_lock_lot * sl_pips_final * pip_value / current_price
+                      if _lock_lot > 0 else 0.0)
+        _risk_cap = equity_val * settings.ppo_risk_pct
+        if _lock_lot > final_lots and _lock_risk <= _risk_cap:
+            logger.info(
+                "[%s] LOTE-PROTECCION ║ %.3f → %.3f lotes: el trailing Safe-4 "
+                "(%.2f€) queda VIVO (riesgo %.2f€ ≤ tope %.2f€)",
+                cycle_id, final_lots, _lock_lot, settings.min_lock_eur, _lock_risk, _risk_cap,
+            )
+            final_lots = _lock_lot
+        risk_eur = final_lots * sl_pips_final * pip_value / current_price
+        lock_alive = risk_eur >= settings.min_lock_eur
+        if not lock_alive:
+            logger.warning(
+                "[%s] TRAILING-SAFE4 ║ el trailing del EA NO puede mover el SL: "
+                "riesgo %.2f€ < mínimo %.2f€ (lote %.3f × SL %.1f pips).",
+                cycle_id, risk_eur, settings.min_lock_eur, final_lots, sl_pips_final,
+            )
 
     # ── LR-1 (Félix 2026-10-14): SKIP DE QWEN CON POSICIÓN ABIERTA ──────────
     # Con `env_position != 0` el juicio del LLM es decisionalmente neutro:
@@ -1863,8 +1928,19 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             # el log QWEN-PROMPT (traza del prompt, fuente única de verdad).
             "memory": memory_audit,
             "volume": final_lots if final_decision in ("BUY", "SELL") else None,
+            # G3-2: `sl_pips` = distancia REAL del stop (geom + buffer de
+            # spread del EA) — es la que se ve en el gráfico y la que usa el
+            # sizing. `sl_pips_geom` = lo que se envió al EA (el EA añade su
+            # buffer). Con ambos, el audit y la gráfica son comparables.
             "sl_pips": round(sl_pips_final, 1) if final_decision in ("BUY", "SELL") else None,
             "tp_pips": round(tp_pips_final, 1) if final_decision in ("BUY", "SELL") else None,
+            "sl_pips_geom": round(sl_pips_geom, 1) if final_decision in ("BUY", "SELL") else None,
+            "sl_geometry": "nearest_floor_ceiling",
+            "floor_below": round(floor_below, 5) if floor_below else None,
+            "ceiling_above": round(ceiling_above, 5) if ceiling_above else None,
+            "risk_eur": round(risk_eur, 2) if risk_eur else None,
+            "lock_min_eur": settings.min_lock_eur,
+            "lock_alive": lock_alive,
             "latency_ms": round((time.time() - t_start) * 1000, 2),
             "veto": decision != final_decision,
             "veto_reason": veto_reason,
@@ -1925,7 +2001,11 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         llm_bias=qwen["bias"],
         decision=_ea_decision,
         volume=final_lots if final_decision in ("BUY", "SELL") else None,
-        sl_pips=round(sl_pips_final, 1) if final_decision in ("BUY", "SELL") else None,
+        # G3-2: al EA se envía la distancia GEOMÉTRICA del SL (el EA añade su
+        # propio buffer de spread al colocarlo ⇒ el stop real queda en
+        # `sl_pips_geom + SPREAD_BUFFER_PIPS`, que es lo que el audit
+        # registra como `sl_pips` y lo que usa el sizing).
+        sl_pips=round(sl_pips_geom, 1) if final_decision in ("BUY", "SELL") else None,
         tp_pips=round(tp_pips_final, 1) if final_decision in ("BUY", "SELL") else None,
         model_version="v3",
         quality_score=round(qwen["quality"], 2),

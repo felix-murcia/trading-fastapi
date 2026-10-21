@@ -136,6 +136,34 @@ def expected_close_eur(
     )
 
 
+def min_lot_for_protection(
+    sl_pips: float,
+    pip_value: float,
+    price: float,
+    min_protection_eur: float,
+    min_lot: float = 0.01,
+) -> float:
+    """Lote mínimo para que el trailing "Safe-4" del EA pueda proteger.
+
+    El EA (input `SL_LockSafetyNetEur`, v14.0) sólo mueve el SL al bloquear
+    el beneficio si el RIESGO EN € de la posición es ≥ ese valor: con un lote
+    más pequeño el trailing queda APAGADO (hace `return` antes de tocar el
+    stop) y la posición nunca asegura nada. Félix lo pidió explícitamente el
+    2026-10-21 ("un lote que permita el trailing del SL a +4 €").
+
+    Devuelve el lote (redondeado AL ALZA al paso) cuyo riesgo en € es
+    ≥ `min_protection_eur`, o 0.0 si es imposible (precio/pip inválidos).
+    """
+    if sl_pips <= 0.0 or pip_value <= 0.0 or price <= 0.0 or min_protection_eur <= 0.0:
+        return 0.0
+    eur_per_pip_per_lot = pip_value / price
+    if eur_per_pip_per_lot <= 0.0:
+        return 0.0
+    lots_raw = min_protection_eur / (sl_pips * eur_per_pip_per_lot)
+    lots = math.ceil(lots_raw / min_lot - 1e-9) * min_lot
+    return round(lots, 2)
+
+
 def size_ppo_position(
     volume_norm: float,
     sl_pips: float,
@@ -171,9 +199,16 @@ def size_ppo_position(
     if risk_usd <= 0.0:
         return 0.0
     lots_raw = risk_usd / (float(sl_pips) * float(pip_value))
-    # +1e-9: inmuniza el floor contra error de punto flotante en múltiplos
-    # exactos (un 0.08 calculado como 0.07999… no debe bajar a 0.07).
-    lots = math.floor(lots_raw / min_lot + 1e-9) * min_lot
+    # Epsilon RELATIVO al cociente (no absoluto): el `volume_norm` viene de
+    # una cabeza float32 del PPO (p.ej. 0.03999999910593033) ⇒ el riesgo
+    # sale con ruido de ~1e-8 RELATIVO. Con un epsilon absoluto de 1e-9 el
+    # floor tumbaba un lote que SÍ cabía al borde del mínimo (medido
+    # 2026-10-21: 0.00999999977 lote con min_lot 0.01 ⇒ 0 lotes ⇒
+    # "sizing inviable" en una entrada válida). El epsilon relativo (1e-6
+    # del cociente) es 2 órdenes de magnitud mayor que ese ruido y 4
+    # órdenes menor que el paso de lote ⇒ nunca promueve un lote
+    # genuinamente inviable.
+    lots = math.floor(lots_raw / min_lot + 1e-6) * min_lot
     lots = round(lots, 2)
     if lots < min_lot:
         return 0.0

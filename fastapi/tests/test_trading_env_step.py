@@ -41,14 +41,17 @@ from ml.trading_env_v2 import (
 INITIAL = 1000.0
 LOT = 100000.0
 COMM = 7.0
-# P2-2: sizing por riesgo — 1000 equity × 3% × vol_norm 0.4 / (SL 15 × ppv 10)
-VOL_OPEN = 0.08
-SL_PIPS = 15.0          # production_stops: ATR 10 pips × 1.5 (P2-1, no acción)
-TP_PIPS = 30.0          # TP = 2 × SL
+# G3-2 (2026-10-21): el SL REAL incluye el buffer de spread que añade el EA
+# al colocarlo (SPREAD_BUFFER_PIPS = 2.0) ⇒ el env simula el stop que se
+# ejecuta, no el geométrico. Contract change declarado (README + PROTOCOLO).
+# sizing por riesgo — 1000 equity × 3% × vol_norm 0.4 / (SL 17 × ppv 10)
+VOL_OPEN = 0.07
+SL_PIPS = 17.0          # production_stops: ATR 10 pips × 1.5 + buffer 2 pips
+TP_PIPS = 30.0          # TP = 2 × SL geométrico (el buffer es del SL)
 HALF_SPREAD = 1.5 * 0.0001 / 2   # 7.5e-5
 
-OPEN = np.array([0.5, 0.4], dtype=np.float32)    # long, vol_norm=0.4 → 0.08 lots
-OPEN_BIG = np.array([0.5, 1.0], dtype=np.float32)  # vol_norm=1.0 → 0.20 lots
+OPEN = np.array([0.5, 0.4], dtype=np.float32)    # long, vol_norm=0.4 → 0.07 lots
+OPEN_BIG = np.array([0.5, 1.0], dtype=np.float32)  # vol_norm=1.0 → 0.14 lots
 FLAT = np.array([0.0, 0.0], dtype=np.float32)
 
 
@@ -133,10 +136,10 @@ class TestOpenAppliesSpreadAndCommission:
 class TestIntraCandleExits:
     def test_sl_has_priority_over_tp_when_both_hit(self):
         env, entry = _make_opened_env()
-        sl = entry - SL_PIPS * 0.0001          # entry − 0.0015
+        sl = entry - SL_PIPS * 0.0001          # entry − 0.0017
         tp = entry + TP_PIPS * 0.0001          # entry + 0.0030
         # Vela que toca AMBOS: gap adverso (low ≤ sl) y favorable (high ≥ tp)
-        env.df.loc[6, ["high", "low", "close"]] = [entry + 0.021, entry - 0.0016, entry]
+        env.df.loc[6, ["high", "low", "close"]] = [entry + 0.021, entry - 0.0018, entry]
         balance_before = env.balance                                # 999.44
 
         _, reward, terminated, _, info = env.step(FLAT)
@@ -191,23 +194,23 @@ class TestIntraCandleExits:
 
     def test_sl_loss_is_capped_by_risk_pct_no_ruin_in_one_trade(self):
         # P2-2: sizing por riesgo → el SL de una operación NO puede llevar a
-        # la quiebra. initial=100, vol_norm=1.0:
-        #   lots = 100 × 3% × 1.0 / (15 pips × 10) = 0.02 (no 0.5)
-        #   pérdida = 0.02 × 100000 × 0.0015 = 3.0 € (no 75 €)
+        # la quiebra. initial=100, vol_norm=1.0 (G3-2: SL real = 17 pips):
+        #   lots = 100 × 3% × 1.0 / (17 pips × 10) = 0.01 (no 0.5)
+        #   pérdida = 0.01 × 100000 × 0.0017 = 1.7 € (no 75 €)
         env, entry = _make_opened_env(action=OPEN_BIG, initial_balance=100.0)
-        assert env.volume == pytest.approx(0.02, abs=1e-9)
-        sl = entry - SL_PIPS * 0.0001                            # entry − 0.0015
+        assert env.volume == pytest.approx(0.01, abs=1e-9)
+        sl = entry - SL_PIPS * 0.0001                            # entry − 0.0017
         env.df.loc[6, ["high", "low", "close"]] = [entry, entry - 0.011, entry - 0.005]
 
         _, _, terminated, _, info = env.step(FLAT)
 
-        expected = 100.0 - 0.02 * COMM - 0.02 * LOT * (SL_PIPS * 0.0001) - 0.02 * COMM
-        assert info["balance"] == pytest.approx(expected)       # 96.72
+        expected = 100.0 - 0.01 * COMM - 0.01 * LOT * (SL_PIPS * 0.0001) - 0.01 * COMM
+        assert info["balance"] == pytest.approx(expected)
         assert terminated is False
         assert info["drawdown"] <= 0.5
         # Pérdida total de la operación ≤ tope de riesgo (3%) + comisiones
         loss = 100.0 - info["balance"]
-        assert loss <= 100.0 * 0.03 + 2 * 0.02 * COMM + 1e-9
+        assert loss <= 100.0 * 0.03 + 2 * 0.01 * COMM + 1e-9
         assert info["win_rate"] == 0.0
 
     def test_terminates_on_50_percent_drawdown(self):
@@ -366,9 +369,14 @@ class TestFase3MemoryChurnAndThreeEuro:
         assert env.trade_count == 1
         assert obs[:, -1] == pytest.approx(0.0)
         # R-1: el gate necesita el pnl por trade (close discrecional pierde
-        # round-trip de spread −1.2 € + comisión de cierre −0.56 €)
-        assert info["trade_pnls"] == pytest.approx([-1.76])
-        assert info["balance"] == pytest.approx(997.68)
+        # round-trip de spread −1.05 € + comisión de cierre −0.49 €)
+        assert info["trade_pnls"] == pytest.approx(
+            [VOL_OPEN * LOT * (-2 * HALF_SPREAD) - VOL_OPEN * COMM]
+        )
+        assert info["balance"] == pytest.approx(
+            INITIAL - VOL_OPEN * COMM
+            + (VOL_OPEN * LOT * (-2 * HALF_SPREAD) - VOL_OPEN * COMM)
+        )
 
         obs, *_ = env.step(FLAT)      # idx8: +1 vela
         assert obs[:, -1] == pytest.approx(1.0 / env.max_holding_steps)
@@ -380,17 +388,17 @@ class TestFase3MemoryChurnAndThreeEuro:
         env.reset()
         env.step(FLAT)                              # paso 1
         _, r_open, *_ = env.step(OPEN)              # paso 2: abre (sin cierre previo)
-        _, r_close, _, _, info = env.step(FLAT)     # paso 3: cierra en +0.64 €
+        _, r_close, _, _, info = env.step(FLAT)     # paso 3: cierra en +0.56 €
 
-        pnl = 0.08 * LOT * (0.0003 - 2 * HALF_SPREAD) - 0.08 * COMM
-        assert pnl == pytest.approx(0.64)
+        pnl = VOL_OPEN * LOT * (0.0003 - 2 * HALF_SPREAD) - VOL_OPEN * COMM
+        assert pnl == pytest.approx(0.56)
         assert info["trade_pnls"] == pytest.approx([pnl])
         # la regla 3 € cambia la SEÑAL de aprendizaje, nunca el dinero
-        assert info["balance"] == pytest.approx(INITIAL - 0.56 + pnl)
+        assert info["balance"] == pytest.approx(INITIAL - VOL_OPEN * COMM + pnl)
         assert env.wins == 0 and env.losses == 1     # win de dinero, pérdida AGENTS.md
 
-        # el paso de cierre sólo suma el pnl realizado (+0.64 €): base 0.064
-        # y la inversión R-1 −2×0.64×0.1 = −0.128 → reward −0.064 (PERDEDORA
+        # el paso de cierre sólo suma el pnl realizado (+0.56 €): base 0.056
+        # y la inversión R-1 −2×0.56×0.1 = −0.112 → reward −0.056 (PERDEDORA
         # para el aprendizaje aunque el dinero subió)
         assert r_close == pytest.approx(
             (pnl / INITIAL) * 100.0 - 2.0 * (pnl / INITIAL) * 100.0
@@ -404,10 +412,10 @@ class TestFase3MemoryChurnAndThreeEuro:
         env.reset()
         env.step(FLAT)                              # paso 1
         env.step(OPEN)                              # paso 2
-        _, r_close, _, _, info = env.step(FLAT)     # paso 3: cierra en +3.84 €
+        _, r_close, _, _, info = env.step(FLAT)     # paso 3: cierra en +3.36 €
 
-        pnl = 0.08 * LOT * (0.0007 - 2 * HALF_SPREAD) - 0.08 * COMM
-        assert pnl == pytest.approx(3.84)
+        pnl = VOL_OPEN * LOT * (0.0007 - 2 * HALF_SPREAD) - VOL_OPEN * COMM
+        assert pnl == pytest.approx(3.36)
         assert info["trade_pnls"] == pytest.approx([pnl])
         assert env.wins == 1 and env.losses == 0
         # delta = pnl realizado (+3.84 €) → SIN inversión, reward positivo
@@ -493,8 +501,12 @@ class TestFase3MemoryChurnAndThreeEuro:
         env.step(OPEN)
         assert env.balance == pytest.approx(INITIAL)      # sin comisión de apertura
         _, _, _, _, info = env.step(FLAT)
-        assert info["trade_pnls"] == pytest.approx([-1.2])
-        assert info["balance"] == pytest.approx(INITIAL - 1.2)
+        assert info["trade_pnls"] == pytest.approx(
+            [VOL_OPEN * LOT * (-2 * HALF_SPREAD)]
+        )
+        assert info["balance"] == pytest.approx(
+            INITIAL + VOL_OPEN * LOT * (-2 * HALF_SPREAD)
+        )
 
 
 class TestPositionVetoParity:
@@ -630,13 +642,13 @@ class TestP1TimeStopAndBreakeven:
         En la vela 12 el low toca el SL → se sale AL SL (−12.56 €), no al
         mark del time-stop (−1.76 €): los pnl distinguen la rama.
 
-        El low se inyecta DESPUÉS de engineer: inyectarlo en el crudo
-        dispara el bfill de `last_swing_low` y cambia la SL estructural de
-        la apertura (15 p → 10 p, vol 0.08 → 0.12) — contrato del fixture."""
+        El low se inyecta DESPUÉS de engineer: el fixture no tiene suelo/techo
+        confirmados utilizables ⇒ la apertura usa el fallback ATR
+        (17 p = 10 × 1.5 + buffer 2, vol 0.07) — contrato del fixture."""
         env = _env(engineer_market_features(_raw_df()))
         env.reset()
-        env.df.loc[17, "low"] = 1.0985                 # idx17 = orig36 = vela 12
-        env.step(OPEN)                                # abre en 1.1000 (15 p/0.08)
+        env.df.loc[17, "low"] = 1.0982                 # idx17 = orig36 = vela 12 (bajo el SL)
+        env.step(OPEN)                                # abre en 1.1000 (17 p/0.07)
         assert env.sl_pips == pytest.approx(SL_PIPS) and env.volume == VOL_OPEN
         for _ in range(11):
             env.step(self.HOLD_LONG)                  # mantiene
@@ -686,8 +698,12 @@ class TestP1TimeStopAndBreakeven:
 
     def test_breakeven_keeps_sl_already_raised_by_trailing(self):
         # trailing_atr_mult=0 → minTrail fijo 15 p: el trailing gana la
-        # carrera en el salto (activación también +1R → SL := entry+0.0015)
+        # carrera en el salto (activación también +1R → SL := entry+minTrail)
         # y riskDist queda ≤ 0 → el breakeven no lo rebaja a la entrada.
+        # G3-2: el SL del trailing lo fija `trailing_min_pips` (15), NO el SL
+        # inicial (el antiguo test coincidía porque SL_PIPS == 15; con el
+        # buffer de spread el SL inicial son 17 y los dos términos ya no
+        # coinciden — el mínimo del trailing manda).
         env = _env(
             engineer_market_features(_df_step_move(0.0020)),
             trailing_atr_mult=0.0,
@@ -699,5 +715,5 @@ class TestP1TimeStopAndBreakeven:
         env.step(self.HOLD_LONG)                      # salto +20 pips
 
         assert env.position == 1
-        assert env.sl_price == pytest.approx(env.entry_price + SL_PIPS * 0.0001)
+        assert env.sl_price == pytest.approx(env.entry_price + 15 * 0.0001)
         assert env.sl_price > env.entry_price

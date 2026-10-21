@@ -14,6 +14,7 @@ from gymnasium.spaces import Box
 sys.path.insert(0, str(Path(__file__).parents[1] / "ml"))
 
 from ml.trading_env_v2 import (
+    effective_sl_pips,
     MARKET_FEATURES,
     build_v3_observation,
     decode_v3_direction,
@@ -21,10 +22,15 @@ from ml.trading_env_v2 import (
 )
 from ml.train_ppo_v3 import FEATURE_NAMES
 from config import settings
+from core.rules import MIN_ENTRY_REWARD_EUR
 from main import app
 import routers.ai
 from routers.ai import Brain, PredictRequest, PredictResponse, TradeFilledRequest
-from services.position_sizing import pip_value_per_lot, size_ppo_position
+from services.position_sizing import (
+    min_lot_for_protection,
+    pip_value_per_lot,
+    size_ppo_position,
+)
 
 
 class FakeAsyncClient:
@@ -192,6 +198,19 @@ def test_ai_predict_e2e_flow():
                 max_lot=settings.max_volume,
                 min_lot=settings.min_volume,
             )
+            # G3-2: el SL que se manda al EA es el GEOMÉTRICO; el sizing usa la
+            # distancia REAL (geom + buffer de spread) y el lote tiene un suelo
+            # de protección (el trailing Safe-4 del EA exige ≥ min_lock_eur de
+            # riesgo en la posición).
+            _eff_sl = effective_sl_pips(payload["sl_pips"])
+            _lock_lot = min_lot_for_protection(
+                _eff_sl, pip_value_per_lot("EURUSD", 1.1), 1.1,
+                settings.min_lock_eur, min_lot=settings.min_volume,
+            )
+            if _lock_lot > expected_lots:
+                _lock_risk = _lock_lot * _eff_sl * pip_value_per_lot("EURUSD", 1.1) / 1.1
+                if _lock_risk <= 1000.0 * settings.ppo_risk_pct:
+                    expected_lots = _lock_lot
             assert abs(payload["volume"] - expected_lots) < 1e-9
 
 
@@ -1017,11 +1036,22 @@ class TestRewardGate(_ServeHarness):
       #255 (1.927 € calculado vs 1.93 € del bróker) — ver TestExpectedCloseEur."""
 
     @pytest.mark.parametrize("direction", [0.80, -0.80])
-    def test_block_when_tp_reward_below_min_win(self, direction):
-        """ATR mínimo (SL 10 p / TP 20 p) + vol head 0.04 → 0.01 lot:
-        TP = 20 × 0.01 × 10 / 1.1011 ≈ 1.82 € < 3 → HOLD con
-        reward_below_min. Para SELL también: el mecánico vence al veto
-        de bias (Qwen BULLISH)."""
+    def test_protection_floor_makes_the_tp_worth_enough(self, direction):
+        """G3-2 (2026-10-21): el SUELO DE PROTECCIÓN cambia este caso.
+
+        Antes (vol head 0.04 → 0.01 lot): TP = 20 p × 0.01 = 1.82 € < 3 €
+        ⇒ veto `reward_below_min` (el trade era imposible de ganar por
+        construcción). Ahora el lote se eleva al mínimo que mantiene VIVO el
+        trailing "Safe-4" del EA (riesgo ≥ 4 €) ⇒ 0.05 lotes ⇒ el TP vale
+        20 × 0.05 × 10 / 1.1011 ≈ 9,08 € ⇒ el gate de recompensa NO dispara
+        (el trade ya no es "imposible de ganar": el TP está en el techo más
+        cercano y el lote lo hace rentable) y el veto que queda es el de
+        re-entrada / quórum según el caso.
+
+        ⇒ El gate de recompensa mínima queda ESTRUCTURALMENTE casi
+        inalcanzable con el suelo de protección (sólo dispara en el caso
+        extremo: SL muy ancho (50 p) + techo muy cerca (5 p)).
+        """
         with self._serve(
             self._model(direction=direction, volume=0.04),
             qwen_client=TightCandlesClient,
@@ -1029,12 +1059,14 @@ class TestRewardGate(_ServeHarness):
             response = self._predict(client, {"position": 0, "steps_in_trade": 0})
 
         assert response.status_code == 200, response.text
-        assert response.json()["decision"] == "HOLD"
         trace = self._cycle_audit(audit)
-        assert trace["reward_below_min"] is True
-        assert trace["veto_reason"] == "reward_below_min"
-        assert trace["reward_eur"] == pytest.approx(20 * 0.01 * 10 / 1.1011, abs=0.01)
-        assert trace["reward_eur"] < 3.0
+        # el lote se elevó al suelo de protección (riesgo ≥ 4 €)
+        assert trace["risk_eur"] is not None
+        assert trace["risk_eur"] >= settings.min_lock_eur
+        assert trace["lock_alive"] is True
+        # el TP vale ahora suficiente ⇒ el gate de recompensa no se dispara
+        assert trace["reward_below_min"] is False
+        assert trace["reward_eur"] >= MIN_ENTRY_REWARD_EUR
 
     def test_pass_when_tp_reward_reaches_min_win(self):
         """Candles por defecto (ATR ~25 p → TP ≥ 60 p) + vol head 0.18 →
@@ -1062,12 +1094,14 @@ class TestRewardGate(_ServeHarness):
             response = self._predict(client, {"position": 0, "steps_in_trade": 0})
 
         assert response.status_code == 200, response.text
-        assert response.json()["decision"] == "HOLD"
         trace = self._cycle_audit(audit)
         assert trace["reentry_window"] is True
         assert trace["reentry_ok"] is False
-        assert trace["reward_below_min"] is True
-        assert trace["veto_reason"] == "reward_below_min"
+        # G3-2: con el suelo de protección el TP ya vale suficiente ⇒ el
+        # veto mecánico de recompensa NO se dispara y la cadena sigue al
+        # juicio de re-entrada (que es el que bloquea este caso).
+        assert trace["reward_below_min"] is False
+        assert trace["veto_reason"] == "reentry_veto"
 
     def test_sizing_veto_wins_when_no_lots(self):
         """vol head 0.0 → presupuesto 0 → 0 lot (veto sizing). El gate de
