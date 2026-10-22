@@ -149,3 +149,10 @@ Deuda que sigue congelada y con dueño: `predict_direction` 1230 líneas (H-I),
 de dinero que exige medición previa) y `ml/` → `services` (capa).
 `/close` y `/news-check` quedan declarados como candidatos: con el motor
 retirado sólo actúan sobre el ledger `smc_` heredado.
+
+**Verificación en vivo (deploy 11:43 UTC):** `/v1/smc/signal` → 404 (POST y
+GET); openapi expone sólo `close`, `news-check`, `audit`, `news`, `analytics`;
+`smc_signals` eliminada de PostgreSQL (0 filas); ciclos post-deploy EURUSD
+11:45:41 (`contract_ok=true`, `reentry_veto`) y USDCHF 11:47:01
+(`contract_ok=true`, `ppl_eur` 10,861, `risk_eur` 9,38 ≤ 9,89 = 2 % de
+494,47 €); `/health` OK.

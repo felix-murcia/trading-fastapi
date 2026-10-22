@@ -3790,3 +3790,13 @@ runtime y scripts ML → **0 en runtime**.
 Suite: **1288 passed + 2 xfailed** (antes 1298 + 2: 11 tests de piezas
 retiradas y 1 test nuevo que fija el fallo ruidoso de XAUEUR). Sin cambios
 MQL5 (EA v14.1).
+
+### Verificación en vivo (deploy 11:43 UTC)
+
+- `/v1/smc/signal` → **404** (POST y GET); el openapi expone sólo `close`,
+  `news-check`, `audit`, `news` y `analytics`.
+- `smc_signals` eliminada de PostgreSQL (0 filas antes del `DROP`).
+- Ciclos post-deploy: EURUSD 11:45:41 (`contract_ok=true`, `reentry_veto`) y
+  USDCHF 11:47:01 (`contract_ok=true`, `ppl_eur` 10,861, `risk_eur` 9,38 ≤
+  9,89 = 2 % de 494,47 €). `/health` OK (equity 494,47 €).
+- Único ERROR: backup GCS sin ADC (conocido, sin impacto).
