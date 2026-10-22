@@ -77,9 +77,9 @@ class TestPollOffsetGate:
 
 
 class TestVersionBump:
-    def test_version_14_0_in_property_and_define(self):
-        """Bump obligatorio en cada cambio MQL5 (v13.9 → v14.0: guard de
-        CLOSE 0,03 → 0,01 + diagnóstico de magic, orden Félix 2026-10-21)."""
+    def test_version_14_1_in_property_and_define(self):
+        """Bump obligatorio en cada cambio MQL5 (v14.0 → v14.1: el webhook
+        envía el SWAP del cierre, 2026-10-21)."""
         src = _ea_source()
-        assert re.search(r'#property\s+version\s+"14\.0"', src)
-        assert re.search(r'#define\s+EA_VERSION\s+"14\.0"', src)
+        assert re.search(r'#property\s+version\s+"14\.1"', src)
+        assert re.search(r'#define\s+EA_VERSION\s+"14\.1"', src)

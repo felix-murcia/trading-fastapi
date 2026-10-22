@@ -3538,3 +3538,52 @@ techos más cercanos a la entrada… con un lote que permita el trailing del SL 
 **Pre-registro y reversión:** `fastapi/ops/2026-10-21-pre-registro-geometria-suelo-techo.md`
 · medición reproducible: `scripts/measure_stop_geometry.py` · tests del
 contrato: `fastapi/tests/test_g3_nearest_levels.py` (9).
+
+### 7. Operaciones reales con la geometría G3-2 (21-10 19:45 → 22-10 09:00) y DOS huecos más
+
+**Operaciones ejecutadas con G3-2** (3 cerradas + 1 abierta), verificadas contra
+los *deals* del bróker (`/api/v1/history/deals`), no sólo contra el audit:
+
+| # | Par | Tipo | Lote | SL | TP | Duración | Resultado | € |
+|---|---|---|---|---|---|---|---|---|
+| 76 | EURUSD | SELL | 0,06 | 12,2 p | 10,0 p | 7,27 h | SL | **−6,51 €** (+swap −0,16) |
+| 77 | USDCHF | SELL | 0,04 | 20,4 p | 10,0 p | **0,59 h** | **TP** | **+4,33 €** |
+| 78 | EURUSD | SELL | 0,03 | 21,1 p | 16,3 p | 3,88 h | **TP** | **+4,36 €** |
+| 79 | USDCHF | SELL | 0,04 | 20,1 p | 36,2 p | abierta | — | +6,25 € (flotante) |
+
+⇒ **El TP se alcanza** (2 de 3 cerradas) y **el tiempo se ha desplomado**
+(0,59 h y 3,88 h; media 2,2 h frente a las 6,5 h de la geometría anterior y
+el time-stop de 12 h). Los dos cierres por TP valen **4,33 € y 4,36 €**: por
+encima de la regla de 3 € ⇒ **ganancias reales por la clasificación**, no
+"ganancias" que el ledger cuenta como pérdidas (la incoherencia que
+introdujo el C1 al bajar el gate a 1,5 €). Net cerrado: **+2,18 €**.
+
+**Dos huecos encontrados al auditar esas operaciones (y corregidos):**
+
+1. **El SWAP no se contabilizaba.** El EA (v14.0) enviaba el pnl **bruto** del
+   bróker y no el swap (financiación por mantener la posición abierta) ⇒ el
+   pnl registrado era incompleto y **todas** las métricas (ledger, win rate,
+   expectativa) perdían ese coste. Medido: **−0,16 €** en la operación 76
+   (7,3 h) y **−1,12 € acumulados** en el histórico de 99 deals.
+   **Fix:** EA **v14.1** (`DEAL_SWAP` → `"swap"` en el webhook) + el backend
+   registra el **resultado real** (bruto + swap) y lo deja trazado en el log.
+   *Pendiente:* backfill del swap de las 198 filas históricas (el histórico
+   del bróker tiene los swaps ⇒ es reproducible).
+2. **El audit mentía sobre la geometría.** `sl_geometry` era una constante
+   (`"nearest_floor_ceiling"`) incluso cuando la operación se hizo con el
+   **fallback ATR** (el nivel del lado correspondiente no existía). Medido: en
+   **USDCHF, 54 de 171 ciclos (32 %)** están sin nivel utilizable (el precio
+   está en el mínimo de su rango ⇒ no hay suelo confirmado debajo) ⇒ ahí el
+   TP vuelve a ser 2×SL (34-38 pips). **Fix:** `stop_geometry_kind()` declara
+   en el audit qué geometría se aplicó de verdad (`nearest_floor_ceiling` /
+   `atr_fallback`).
+   *Pendiente (decisión de diseño, no de código):* el fallback es **por lado**
+   (si falta el suelo, el SL es ATR pero el TP sigue siendo el techo) o
+   **completo** (si falta uno, todo ATR). Ahora mismo es completo.
+
+**Nota de reloj (sin cambios):** el `time` de las posiciones del MT5 viene
+etiquetado `+02:00` pero el servidor está en **UTC+3** (los *deals* lo
+confirman: entrada 22:45:39 del bróker = 19:45:39 UTC, que es exactamente el
+`created_at` de la orden 76). La etiqueta del servidor es 1 h engañosa; el
+`time_msc` de los deals y el `entry_time` de `trade_outcomes` sí son
+coherentes.

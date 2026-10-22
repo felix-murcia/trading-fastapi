@@ -48,7 +48,7 @@ class TestCloseOutbox:
         src = _ea_source()
         assert "OUTBOX_MAX_PER_FLUSH" in src, "Falta límite de reintentos por ciclo"
 
-    def test_ea_version_bumped_to_13_9(self):
+    def test_ea_version_bumped_to_14_1(self):
         src = _ea_source()
         # v13.5: Safe-4 (Félix 2026-10-15) — lock +SL_LockSafetyNetEur
         # (4€) antes de 1R; breakeven deja de moverse a la entrada tal cual.
@@ -60,8 +60,11 @@ class TestCloseOutbox:
         # todos los pares — Symbol() en todo; orden Félix 2026-10-18).
         # v14.0: guard de CLOSE 0,03 → 0,01 + diagnóstico de magic
         # (posición USDCHF 58986641010 con magic 90002, 2026-10-21).
-        assert re.search(r'#property\s+version\s+"14\.0"', src), "Falta bump a 14.0"
-        assert re.search(r'#define\s+EA_VERSION\s+"14\.0"', src)
+        # v14.1: el webhook envía el SWAP del cierre (financiación) — sin él el
+        # pnl registrado era el bruto y el ledger perdía ese coste
+        # (medido: −0,16 € en la operación 76; −1,12 € en el histórico).
+        assert re.search(r'#property\s+version\s+"14\.1"', src), "Falta bump a 14.1"
+        assert re.search(r'#define\s+EA_VERSION\s+"14\.1"', src)
 
     def test_ea_filters_opening_deals_v13_2(self):
         # v13.2: OnTradeTransaction descarta DEAL_ENTRY_IN — el deal de

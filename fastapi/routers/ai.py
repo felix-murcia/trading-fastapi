@@ -40,6 +40,7 @@ from ml.trading_env_v2 import (
     get_market_features,
     join_higher_tf_channels,
     production_stops,
+    stop_geometry_kind,
 )
 from services.auto_retrain import (
     approve_retrain as _approve_retrain,
@@ -1935,7 +1936,7 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             "sl_pips": round(sl_pips_final, 1) if final_decision in ("BUY", "SELL") else None,
             "tp_pips": round(tp_pips_final, 1) if final_decision in ("BUY", "SELL") else None,
             "sl_pips_geom": round(sl_pips_geom, 1) if final_decision in ("BUY", "SELL") else None,
-            "sl_geometry": "nearest_floor_ceiling",
+            "sl_geometry": stop_geometry_kind(target_pos, floor_below, ceiling_above),
             "floor_below": round(floor_below, 5) if floor_below else None,
             "ceiling_above": round(ceiling_above, 5) if ceiling_above else None,
             "risk_eur": round(risk_eur, 2) if risk_eur else None,
@@ -2346,6 +2347,13 @@ class TradeFilledRequest(BaseModel):
     exit_reason: str  # "sl", "tp", "manual", "news", "signal_end", "ea"
     deal_ticket: int | str | None = None
     position_id: int | str | None = None
+    # G3-2 (2026-10-21): el SWAP del cierre (financiación por mantener la
+    # posición abierta). Antes NO llegaba al backend ⇒ el pnl registrado era
+    # el bruto del bróker y el coste de la financiación se perdía en todas las
+    # métricas (ledger, win rate, expectativa). Medido: −0,16 € en la
+    # operación 76 (EURUSD, 7,3 h) y −1,12 € acumulados en el histórico.
+    # `None` = EA antiguo que no lo envía ⇒ 0 (declarado en el audit).
+    swap: float | str | None = None
 
     @field_validator("direction")
     @classmethod
@@ -2467,11 +2475,18 @@ async def trade_filled_webhook(req: TradeFilledRequest, _: None = Depends(verify
     pnl_pct = float(req.pnl_pct) if isinstance(req.pnl_pct, str) else req.pnl_pct
     deal_ticket = int(req.deal_ticket) if req.deal_ticket not in (None, "") else None
     position_id = int(req.position_id) if req.position_id not in (None, "") else None
+    swap = float(req.swap) if req.swap not in (None, "") else 0.0
+    # El pnl que se registra es el RESULTADO REAL (bruto + swap): el swap es
+    # un coste cierto de mantener la posición y esconderlo falsea el ledger.
+    pnl_total = pnl + swap
+    if swap:
+        logger.info("[TRADE-FILLED] swap=%.2f € (bruto %.2f → real %.2f) symbol=%s",
+                    swap, pnl, pnl_total, req.symbol)
     await record_trade_filled(
         symbol=req.symbol,
         entry_time=entry_time_out,
         exit_time=exit_time_out,
-        pnl=pnl,
+        pnl=pnl_total,
         pnl_pct=pnl_pct,
         direction=direction,
         sl_hit=req.sl_hit,

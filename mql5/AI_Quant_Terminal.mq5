@@ -6,10 +6,10 @@ Terminal de Ejecución y Telemetría para Cerebro Autónomo (FastAPI + PPO v3).
 - Rol del Servidor: Decisión direccional, dimensionamiento de lotes, SL, TP y gestión de riesgo.
 */
 #property copyright "AI Quant Terminal"
-#property version   "14.0"
+#property version   "14.1"
 #property strict
 
-#define EA_VERSION "14.0"
+#define EA_VERSION "14.1"
 
 #include <Trade\Trade.mqh>
 
@@ -897,6 +897,12 @@ void CloseAllPositions()
      double entryPrice = 0.0;
      double exitPrice  = HistoryDealGetDouble(dealTicket, DEAL_PRICE);
      double pnl        = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
+     // v14.1 (2026-10-21): el SWAP (financiacion por mantener la posicion
+     // abierta) es un coste CIERTO: sin el el backend registraba el pnl BRUTO
+     // y el ledger/win-rate/expectativa perdian ese coste. Medido: -0,16 EUR
+     // en la operacion EURUSD 76 (7,3 h) y -1,12 EUR acumulados en el
+     // historico. El backend suma el swap al pnl (resultado real).
+     double dealSwap   = HistoryDealGetDouble(dealTicket, DEAL_SWAP);
      long openingType  = DEAL_TYPE_SELL;
      datetime entryTime= 0;
      datetime closeTime= (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME);
@@ -953,6 +959,7 @@ void CloseAllPositions()
        "\"entry_time\":\"", IntegerToString(entryTime), "\",",
        "\"exit_time\":\"", IntegerToString(closeTime), "\",",
        "\"pnl\":", DoubleToString(pnl, 2), ",",
+       "\"swap\":", DoubleToString(dealSwap, 2), ",",
        "\"pnl_pct\":", DoubleToString(pnlPct, 4), ",",
        "\"direction\":\"", direction, "\",",
        "\"sl_hit\":", slHit ? "true" : "false", ",",

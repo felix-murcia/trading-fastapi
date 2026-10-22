@@ -723,6 +723,26 @@ def decode_v3_direction(direction: float, current_position: int) -> Tuple[int, s
     return target_pos, decision
 
 
+def stop_geometry_kind(
+    direction: int,
+    floor_below: Optional[float],
+    ceiling_above: Optional[float],
+) -> str:
+    """Qué geometría se ha aplicado realmente: "nearest_floor_ceiling" o
+    "atr_fallback".
+
+    El audit DEBE declararlo (G3-2, 2026-10-21): la rama de fallback (ATR
+    ×1,5 / TP 2×SL) se usa cuando falta el nivel del lado correspondiente —
+    en USDCHF el 32 % de los ciclos (el precio está en el mínimo de su rango
+    y no hay suelo confirmado debajo) ⇒ con un campo constante el audit
+    mentía sobre lo que se hizo.
+    """
+    if direction in (1, -1) and floor_below and ceiling_above \
+            and float(floor_below) > 0 and float(ceiling_above) > 0:
+        return "nearest_floor_ceiling"
+    return "atr_fallback"
+
+
 def production_stops(
     atr_norm: float,
     pip_size: float,
