@@ -11,7 +11,7 @@ estimaciones ni proyecciones en este informe.
 
 | Pregunta | Respuesta | Cómo se mide |
 |---|---|---|
-| **¿El dinero que ha hecho viene de acertar la dirección, o de la suerte?** | **99,95 % de confianza en que es la DIRECCIÓN** (no la suerte) | 20 000 simulaciones del mismo sistema con la dirección barajada: **ninguna llega al PnL real**; la mediana del "azar" es **−197,93 €** y el PnL real es **+373,88 €** |
+| **¿El dinero que ha hecho viene de acertar la dirección, o de la suerte?** | **INCONCLUSO** | El resultado publicado del test de permutación es internamente contradictorio; la confianza de 99,95 % queda retirada hasta reproducirlo y conservar sus resultados. |
 | **¿La ventaja se mantendrá en otros regímenes de mercado?** | **55 %** (no lo sabemos) | El 96 % de las operaciones son de **2 meses** (sep-oct 2026, un solo régimen); el acierto direccional (53 %) no se separa del azar; el modelo **no tiene edge validado fuera de muestra** (holdout: **−0,53 €/operación**) |
 | **¿La aplicación, tal como está hoy, es un producto terminado?** | **40 %** | Drawdown máximo real del **30,2 %** (154,75 €) y racha de **11 pérdidas seguidas**; el segundo cerebro (LLM) **no aporta nada medible** y cuesta 40 s de cada ciclo |
 
@@ -60,9 +60,14 @@ la dirección** (manteniendo tamaño, entrada y salida) y se repite 20 000 veces
 | mediana | **−197,93 €** |
 | p90 | +24,55 € |
 | p99 | +199,22 € |
-| máximo en 20 000 simulaciones | +465,11 € (pero el PnL real es **+373,88 €** y **ninguna** simulación lo alcanza) |
+| máximo en 20 000 simulaciones | **+465,11 €**, frente al PnL real de **+373,88 €** |
 
-**⇒ El PnL real está por encima de las 20 000 simulaciones.** No es suerte.
+**Corrección (2026-10-22):** el máximo reportado (+465,11 €) supera el PnL
+real (+373,88 €), contradiciendo la afirmación de que ninguna simulación lo
+supera. Los datos crudos de las 20 000 simulaciones no están incluidos en este
+informe; por tanto, el percentil/p-valor no se puede reconstruir aquí y se
+retiran tanto el 99,95 % como la conclusión de que el resultado supera el
+azar. Este test queda **inconcluso** hasta regenerar y archivar sus resultados.
 
 *Este test es inmune a los errores de medición de estos días*: compara el
 sistema consigo mismo barajado, así que cualquier desalineación de reloj o de
@@ -99,10 +104,11 @@ Actividad por semana (2026): 1 · **65** · 21 · 23 · 33 · 17 · 15 · 5 oper
 
 | Ventana | Operaciones | PnL | Confianza (test de la suerte) |
 |---|---|---|---|
-| Últimos 30 días | 57 | **+114,52 €** | **98,0 %** |
-| Históricamente | 151 | +373,88 € | 99,95 % |
+| Últimos 30 días | 57 | **+114,52 €** | **Pendiente de reproducción** |
+| Históricamente | 151 | +373,88 € | **Retirado (test inconcluso)** |
 
-⇒ Sí, ahora mismo es skill, no suerte.
+⇒ No se puede concluir que sea skill y no suerte hasta reproducir el test y
+archivar sus resultados.
 
 ### 2.6 La calidad direccional es FINA (y hay que decirlo)
 
@@ -155,13 +161,16 @@ el sistema.
 ## 3. ¿QUÉ CONCLUSIÓN SE SACA?
 
 ### Lo que SÍ está demostrado
-1. **Hay una ventaja real**: el PnL está por encima de 20 000 simulaciones
-   del sistema barajado (99,95 % de confianza), no depende de 5 operaciones
-   sueltas (+242,68 € sin ellas) y se mantiene en la ventana de 30 días (98 %).
-2. **La ventaja viene de la dirección, no de la mecánica**: los aciertos
-   aportan +571,98 € y los fallos restan −279,84 €.
-3. **El sistema es capaz de generar su edge sin el modelo de texto** (que
-   hoy no tiene poder).
+1. **No está demostrado que el PnL supere el azar direccional**: el test
+   publicado es inconsistente; se retiran el 99,95 % histórico y el 98,0 %
+   reciente queda pendiente de reproducción. La exclusión de las cinco mejores
+   operaciones (+242,68 €) es descriptiva, no sustituye ese test.
+2. Los aciertos aportan +571,98 € y los fallos restan −279,84 € como
+   descomposición contable; esto no demuestra por sí solo edge direccional
+   causal del PPO.
+3. El resultado histórico se obtuvo cuando el sistema operaba sin autoridad
+   direccional del modelo de texto; esto no demuestra que el PPO aislado tenga
+   edge, como muestran sus métricas direccionales OOS pendientes de validación.
 
 ### Lo que NO está demostrado (y hay que decirlo claro)
 1. **La muestra efectiva son 2 meses**, no 2 años: 180 de 187 operaciones son

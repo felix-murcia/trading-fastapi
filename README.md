@@ -3901,3 +3901,63 @@ verdes; **0** literales `except Exception` en runtime. Commit: `1f48f5f`
 (60 ficheros, +1466/−1652). Sin EA: v14.1 no cambia.
 Evidencia: `fastapi/ops/2026-10-22-consolidacion-arquitectura.md` §7 ·
 `fastapi/ops/2026-10-22-hallazgos-motor-dinero.md`.
+
+## 2026-10-22 (PUNTO DE INFLEXIÓN · PPO/LLM, horizonte común de 20 h)
+
+Se reestructura el backlog: PPO y LLM deben responder la misma pregunta con el
+mismo snapshot de mercado, cada uno debe demostrar edge OOS por separado y una
+contradicción BUY/SELL no puede convertirse en una orden ni ocultarse como veto.
+El HOLD defensivo ante conflicto contiene el riesgo, pero no acredita alineación.
+El objetivo nuevo son **20 horas transcurridas**, no 20 barras ni la medición
+histórica a +24 h. Quedan en NO-GO los cambios de autoridad/promoción ligados a
+este objetivo hasta superar los gates de datos, benchmark, PPO aislado, LLM
+aislado y replay emparejado.
+
+La evidencia anterior se conserva como historial: T-28 no cubre todas las rutas
+de promoción; el replay de Fase 2 tiene C2–C7 sin evaluar y C1–C8 apagados; los
+resultados previos a +24 h no validan H=20. Las afirmaciones de saturación/deriva
+del bundle actual quedan pendientes de reproducción con su hash y VecNormalize.
+Además, se corrigió la conclusión del test de permutación del informe de
+viabilidad: su máximo reportado (+465,11 €) supera el PnL de comparación
+(+373,88 €), así que se retiró el 99,95 % y el test queda inconcluso hasta
+reproducirlo con resultados archivados.
+Plan y backlog canónicos: [`fastapi/ops/2026-10-22-punto-inflexion-ppo-llm-20h.md`](fastapi/ops/2026-10-22-punto-inflexion-ppo-llm-20h.md).
+
+### P1 · Auditor de integridad de exports MT5 (solo lectura)
+
+Se añade `fastapi/services/market_snapshot_audit.py` y su suite
+`fastapi/tests/test_market_snapshot_audit.py`. El auditor calcula SHA-256 y
+revisa columnas, timestamps, orden, duplicados, OHLC, spread negativo/no finito
+y huecos mayores que el timeframe. El reloj fuente es obligatorio en la CLI;
+no se deduce del CSV. Los huecos se reportan para revisión de calendario, no se
+declaran automáticamente corruptos. No escribe snapshots ni se conecta al
+camino de predicción.
+
+Uso:
+
+```bash
+cd fastapi
+python -m services.market_snapshot_audit --timeframe H1 --timestamp-basis UTC ../resultadosBT/EURUSD_H1_202601020000_202610121900.csv
+```
+
+**Auditoría inicial (2026-10-22, exports locales `resultadosBT/`):** los seis
+CSV pasan integridad estructural y OHLC (202 filas D1, 1.211 H4, 4.835/4.837
+H1; cero timestamps inválidos, duplicados, desorden o OHLC/spread malformado).
+Todos requieren revisión de calendario por las pausas de mercado (máximo 50 h
+H1, 52 h H4, 72 h D1). El último H1 es 2026-10-12 19:00; a la fecha de esta
+auditoría, el export tenía **238 h 38 min** de antigüedad y no constituye el
+snapshot actual para validar el régimen del 22-10. Además, el campo spread del
+export vale cero en 4.439/4.837 filas EURUSD H1 y 3.054/4.835 GBPUSD H1; no se
+usará como coste sin reconciliar unidad y fuente. El CSV no codifica su zona
+horaria; la ejecución declaró `UTC` según la procedencia documentada, pero la
+declaración debe acompañar al snapshot.
+
+**Validación:** `pytest tests/test_market_snapshot_audit.py -q` → **8 passed**;
+arquitectura + auditor → **14 passed**; Pylance → sin errores sintácticos. En
+archivo limpio del commit `391ee76`, `pytest tests/ -q` → **1276 passed, 2
+xfailed**. La suite completa del árbol actual, tras añadir la octava prueba, dio
+**22 failed, 1262 passed, 2 xfailed, 17 warnings**; los 22 fallos están en
+pruebas de predicción/veto vinculadas a rutas que ya tenían cambios locales y
+no se editaron en este trabajo. Antes del auditor eran **22 failed, 1254
+passed, 2 xfailed**. El auditor no está conectado al retrain ni habilita
+candidatos.

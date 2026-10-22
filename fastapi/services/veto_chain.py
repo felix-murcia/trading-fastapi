@@ -467,9 +467,10 @@ def apply_bias_low_confidence_veto(
     if bias == "NEUTRAL":
         return False, f"BIAS_NEUTRAL:no thesis for {decision}"
     
-    # Si la probabilidad del sesgo es muy baja, hay incertidumbre → bloquear
-    if bias_prob < 0.55:
-        return False, f"BIAS_LOW_CONF:{bias}:{bias_prob:.2f}"
+    # Si la probabilidad del sesgo es muy baja, NO bloqueamos aquí.
+    # El veto original de bias (apply_bias_veto en routers/ai.py) se encarga
+    # de la atribución correcta (bias_veto_bearish / bias_veto_bullish).
+    # Este veto solo actúa cuando NO hay tesis direccional (NEUTRAL).
     
     return True, ""
 

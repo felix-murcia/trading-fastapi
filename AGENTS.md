@@ -34,6 +34,7 @@ curl http://localhost:8090/docs
 
 ## Critical Conventions
 
+- **TDD Development.** Primero realizar los tests y luego la implementación. 
 - **No silent failures.** No `except Exception`, no fallbacks, no heuristic defaults. Errors must propagate. If Qwen is unreachable, log and use safe defaults — never crash.
 - **Every trade must be persisted.** If a close is not recorded in `trade_outcomes`, it is a critical error.
 - **SL/TP must include spread.** Any close with < 3 EUR profit is a loss.

@@ -1,5 +1,9 @@
 # Protocolo Anti-Bucle
 
+## Punto de inflexión vigente — 2026-10-22
+
+El backlog PPO/LLM se reordena: misma pregunta direccional, horizonte de **20 horas transcurridas**, información de mercado común y edge medible de cada modelo por separado. La autoridad de producción queda **NO-GO** para este objetivo hasta superar los gates de datos, evaluación OOS y alineación. T-28 y C1–C8 no sustituyen esos gates; C1–C8 siguen apagados. Plan canónico: [`fastapi/ops/2026-10-22-punto-inflexion-ppo-llm-20h.md`](fastapi/ops/2026-10-22-punto-inflexion-ppo-llm-20h.md).
+
 Antes de cualquier cambio en el sistema de trading:
 
 0. El fichero `CLAUDE.md` es de obligado cumplimento. También hay que revisar el codegraph para entender la estructura del proyecto.
