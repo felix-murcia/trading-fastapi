@@ -3897,6 +3897,7 @@ en runtime.
 ### Cierre
 
 `pytest tests/ -q` → **1276 passed + 2 xfailed**; reglas de arquitectura (6)
-verdes; **0** literales `except Exception` en runtime. Sin EA: v14.1 no cambia.
+verdes; **0** literales `except Exception` en runtime. Commit: `1f48f5f`
+(60 ficheros, +1466/−1652). Sin EA: v14.1 no cambia.
 Evidencia: `fastapi/ops/2026-10-22-consolidacion-arquitectura.md` §7 ·
 `fastapi/ops/2026-10-22-hallazgos-motor-dinero.md`.

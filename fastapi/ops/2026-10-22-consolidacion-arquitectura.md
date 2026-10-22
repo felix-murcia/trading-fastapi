@@ -160,9 +160,9 @@ GET); openapi expone sólo `close`, `news-check`, `audit`, `news`, `analytics`;
 
 ## 7. H-I / H-K / H-N — cierre de la deuda congelada (2026-10-22, tercera pasada)
 
-**Suite final: 1276 passed + 2 xfailed.** Sin EA (v14.1). El diff rastreado
-suma **54 ficheros, +472/−1652**, con 3 módulos nuevos (35 + 116 + 349 líneas)
-y la evidencia de la medición (115 líneas).
+**Suite final: 1276 passed + 2 xfailed.** Sin EA (v14.1). El commit `1f48f5f`
+suma **60 ficheros, +1466/−1652**: 3 módulos nuevos (35 + 116 + 349 líneas),
+la evidencia de la medición (115 líneas) y el script reproducible (271 líneas).
 
 **Corrección de §6:** `/close` y `/news-check` ya NO existen. Se retiraron en
 esta pasada junto con `services/position_ownership.py` y
