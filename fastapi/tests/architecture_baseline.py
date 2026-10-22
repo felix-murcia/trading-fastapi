@@ -33,7 +33,6 @@ BIG_FUNCS = {
     "services/drift_monitor.py::run_drift_check": 138,
     "services/strategist.py::evaluate_criteria": 138,
     "services/qwen_authority.py::_measure": 132,
-    "services/simple_pipeline.py::process_signal": 130,
     "services/ledger.py::build_ledger": 126,
     "routers/smc.py::get_analytics": 124,
     "services/trade_contract.py::evaluate_trade": 115,
@@ -79,7 +78,6 @@ EXCEPT_EXCEPTION = {
     "services/qwen_authority.py": 2,
     "services/risk_guardian.py": 1,
     "services/risk_state_store.py": 2,
-    "services/simple_pipeline.py": 4,
     "services/structured_logging.py": 1,
     "services/timebase.py": 2,
 }

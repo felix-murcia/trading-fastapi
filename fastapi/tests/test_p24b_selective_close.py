@@ -10,8 +10,6 @@ P2-4b: cierre selectivo por ledger de propiedad — los mundos no se pisan.
   del EA como si fuera de SMC.
 - `news-check`: mismo criterio selectivo + ahora persiste sus cierres
   propios en trade_outcomes (antes: jamás los registraba).
-- Flip de señal (simple_pipeline): comportamiento end-to-end — la posición
-  del EA SOBREVIVE al flip, la propia se cierra y la orden continúa.
 - ExecutionPort: expone `close_position(ticket)` (el primitivo real);
   `close_positions_by_symbol` eliminado por zero llamantes (doctrina P3-1d).
 
@@ -20,7 +18,7 @@ fuente de verdad de propiedad (magic=0 además lo comparten los manuales).
 """
 import json
 from contextlib import ExitStack
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -29,7 +27,6 @@ import services.position_ownership as po
 from routers import smc
 from core.adapters import MT5ExecutionDataAdapter
 from core.ports import ExecutionPort
-from models.orders import OrderPrepareResponse
 
 _EA = {"ticket": 222, "symbol": "EURUSD", "type": "buy", "volume": 0.1,
        "price": 1.10, "sl": 1.095, "tp": 1.12, "profit": 3.4, "state": ""}
@@ -238,56 +235,6 @@ class TestNewsCheckSelective:
         assert resp["action"] == "skip"
         assert resp["closed"] == []
 
-
-# ─── Flip de señal (simple_pipeline, end-to-end) ─────────────────────────────
-
-class TestFlipSelectiveClose:
-    @pytest.mark.asyncio
-    async def test_ea_position_survives_signal_flip(self):
-        """La señal flippea con una posición del EA (ajena) y una propia
-        abiertas: se cierra SOLO la propia y la orden nueva continúa."""
-        import services.simple_pipeline as sp
-        from contextlib import ExitStack as ES
-
-        sp._last_attempt.clear()   # sin cooldown residual de otros tests
-        pool = MagicMock()
-        pool.execute = AsyncMock()
-        ledger = _ledger_pool([{"mt5_order_id": "111"}])
-        approved = OrderPrepareResponse(approved=True, order_payload={}, rejection_reason="")
-
-        try:
-            with ES() as stack:
-                stack.enter_context(patch.object(sp, "get_pool", return_value=pool))
-                stack.enter_context(patch.object(po, "get_pool", return_value=ledger))
-                stack.enter_context(patch("services.mt5_client.get_spread",
-                                          AsyncMock(return_value=0.0002)))
-                stack.enter_context(patch("services.mt5_client.get_positions",
-                                          AsyncMock(return_value={"open": [_OWN, _EA]})))
-                close = stack.enter_context(patch("services.mt5_client.close_position", AsyncMock()))
-                stack.enter_context(patch("services.order_manager.prepare",
-                                          AsyncMock(return_value=approved)))
-                stack.enter_context(patch("services.mt5_client.place_order",
-                                          AsyncMock(return_value={"ticket": 999})))
-
-                out = await sp.process_signal(
-                    "EURUSD", "buy", "P24BFLIP", 1.10,
-                    sl_anchor=1.0985, tp_anchor=1.1045, use_news_filter=False,
-                )
-        finally:
-            sp._last_attempt.clear()
-
-        close.assert_awaited_once_with(111)   # la del EA (222) jamás se toca
-        assert out["action"] == "buy"         # la orden siguió tras el cierre selectivo
-        # audit del flip documenta cerrado vs saltado (sql, cycle_id, event, data)
-        audit_calls = [c for c in pool.execute.call_args_list
-                       if len(c.args) > 2 and c.args[2] == "simple_position_closed"]
-        assert len(audit_calls) == 1
-        data = json.loads(audit_calls[0].args[3])
-        assert data["closed_tickets"] == [111]
-        assert data["skipped_foreign"] == [222]
-
-
-# ─── ExecutionPort: primitivo real, cierre-todo retirado ─────────────────────
 
 class TestExecutionPortContract:
     def test_port_exposes_close_by_ticket(self):

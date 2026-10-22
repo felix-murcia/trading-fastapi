@@ -1,15 +1,3 @@
--- Señal activa por símbolo (upsert desde el EA SignalBridge)
-CREATE TABLE IF NOT EXISTS smc_signals (
-    symbol      TEXT PRIMARY KEY,
-    entry_zone  BOOLEAN NOT NULL DEFAULT FALSE,
-    direction   TEXT,
-    zone_high   NUMERIC(12,5),
-    zone_low    NUMERIC(12,5),
-    timeframe   TEXT,
-    source      TEXT DEFAULT 'crystal_liquidity',
-    received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
 -- Órdenes enviadas a MT5
 CREATE TABLE IF NOT EXISTS orders (
     id           BIGSERIAL PRIMARY KEY,

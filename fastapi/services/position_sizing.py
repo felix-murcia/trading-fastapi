@@ -1,20 +1,11 @@
-"""
-Cálculo de SL/TP con riesgo monetario fijo.
+"""Primitivas de dinero: pip por símbolo, pip value, conversión a EUR y sizing.
 
-SL distance = precio × sl_pct  (porcentaje del precio, escalado al instrumento)
-Volume      = sl_risk_usd / (sl_pips × pip_value_per_lot)
-TP          = SL × rr_min (2.0)
-
-Este enfoque da distancias de SL/TP proporcionadas a la volatilidad de cada
-instrumento sin necesidad de ATR ni datos de mercado adicionales.
+Este módulo NO decide operaciones (eso es `services/trade_contract.py`): aquí
+solo viven las cuentas que el contrato, el guardián de riesgo y el entorno de
+entrenamiento comparten. Una sola conversión pips→EUR (`expected_close_eur`).
 """
 
-import logging
 import math
-
-from config import settings
-
-logger = logging.getLogger(__name__)
 
 PIP_SIZE = {
     # Forex majors (quote=USD → pip_value fijo $10)
@@ -28,7 +19,6 @@ PIP_SIZE = {
     "USDCAD": 0.0001,
     # Materias primas
     "XAUUSD": 0.10,
-    "XAUEUR": 0.10,
     # P2-2: estos dos vivían solo en order_validator.PIP_SIZE; al unificar la
     # fuente, order_validator importa este dict (pip centralizado, una sola copia).
     "USDCNH": 0.0001,
@@ -55,6 +45,11 @@ _USD_BASE_CHF_QUOTE = {"USDCHF"}
 # convenio que el bróker y que el risk_guardian (G2-5/D2).
 _USD_QUOTE_NON_EUR_BASE = {"GBPUSD", "AUDUSD", "NZDUSD", "XAUUSD"}
 
+# Únicos símbolos cuyo pip vale 10 unidades de la divisa de cotización
+# (nocional fijo 100 000 × 0,0001): quote=USD y USDCHF (10 CHF). Cualquier
+# otro símbolo NO tiene regla de pip: falla ruidosamente, no se inventa.
+_PIP_10_QUOTE = {"EURUSD", "GBPUSD", "AUDUSD", "NZDUSD", "XAUUSD", "USDCHF"}
+
 
 async def eurusd_price() -> float:
     """Precio EURUSD vigente (para la conversión honesta USD→EUR del gate de
@@ -77,13 +72,12 @@ def pip_value_per_lot(symbol: str, price: float) -> float:
         return 1000.0 / price   # pip=0.01 → 0.01×100000/price = 1000/price
     if symbol in _USD_BASE:
         return 10.0 / price     # pip=0.0001 → 0.0001×100000/price = 10/price
-    if symbol == "XAUEUR":
-        return 10.90            # Aprox 10💶 to 💵. Quote=EUR → 10 EUR * (EURUSD aprox 1.09)
-    # quote=USD (EURUSD, GBPUSD, AUDUSD, NZDUSD, XAUUSD) y base=USD con
-    # nocional fijo de 10 unidades de la divisa de cotización por pip
-    # (USDCHF: 10 CHF — la conversión CHF→EUR la hace `expected_close_eur`,
-    # no esta función: aquí el pip sigue en la divisa de cotización).
-    return 10.0
+    # quote=USD (EURUSD, GBPUSD, AUDUSD, NZDUSD, XAUUSD) y USDCHF (10 CHF):
+    # nocional fijo de 10 unidades de la divisa de cotización por pip. La
+    # conversión a EUR la hace `expected_close_eur`, no esta función.
+    if symbol in _PIP_10_QUOTE:
+        return 10.0
+    raise ValueError(f"pip_value_per_lot sin regla de pip para {symbol}")
 
 
 def expected_close_eur(
@@ -203,116 +197,4 @@ def size_ppo_position(
     if lots < min_lot:
         return 0.0
     return float(min(lots, max_lot))
-
-
-def derive_order_from_bb(
-    direction: str, symbol: str, entry: float, sl_anchor: float, tp_anchor: float, spread: float,
-) -> tuple[float, float, float, float]:
-    """Calcula el tamaño basándose exactamente en los anclajes de las Bandas (SL/TP) y riesgo monetario."""
-    pip = PIP_SIZE[symbol]
-    ppv = pip_value_per_lot(symbol, entry)
-
-    # 1. SL Distance
-    base_dist = abs(entry - sl_anchor)
-    sl_min_pips = {
-        "USDJPY": settings.sl_min_pips_usdjpy,
-        "XAUUSD": settings.sl_min_pips_xauusd,
-        "XAUEUR": settings.sl_min_pips_xaueur,
-    }.get(symbol, settings.sl_min_pips_default)
-    
-    sl_floor = max(sl_min_pips * pip, settings.sl_min_spread_mult * spread)
-    if base_dist < sl_floor:
-        base_dist = sl_floor
-
-    sl_dist = round(base_dist * settings.sl_mult, 5)
-    sl_pips = sl_dist / pip
-    
-    risk_usd_map = {
-        "XAUUSD": settings.sl_risk_usd_xauusd,
-        "XAUEUR": settings.sl_risk_usd_xaueur,
-    }
-    risk_usd = risk_usd_map.get(symbol, settings.sl_risk_usd)
-    
-    max_sl_pips_affordable = risk_usd / (settings.min_volume * ppv)
-    if sl_pips > max_sl_pips_affordable:
-        sl_pips = max_sl_pips_affordable
-        sl_dist = round(sl_pips * pip, 5)
-
-    # 2. TP Distance directly from Bands!
-    tp_dist = round(abs(entry - tp_anchor), 5)
-    
-    # 3. Volume
-    volume  = risk_usd / (sl_pips * ppv)
-    volume  = max(settings.min_volume, min(settings.max_volume, round(volume, 2)))
-
-    if direction == "buy":
-        sl = round(entry - sl_dist, 5)
-        tp = round(entry + tp_dist, 5)
-    else:
-        sl = round(entry + sl_dist, 5)
-        tp = round(entry - tp_dist, 5)
-
-    actual_risk   = round(volume * sl_pips * ppv, 2)
-    
-    logger.info(
-        "[SIZING-BB] %s %s entry=%.5f sl_anchor=%.5f tp_anchor=%.5f sl_dist=%.5f sl_pips=%.1f tp_dist=%.5f vol=%.2f risk=$%.2f",
-        symbol, direction, entry, sl_anchor, tp_anchor, sl_dist, sl_pips, tp_dist, volume, actual_risk,
-    )
-    return entry, sl, tp, volume
-
-
-def derive_order_from_candle_open(
-    direction: str, symbol: str, entry: float, candle_open: float, spread: float,
-) -> tuple[float, float, float, float]:
-    """SL = sl_mult × distancia flecha. Sin TP (salida por señal contraria/EMA)."""
-    pip = PIP_SIZE[symbol]
-    ppv = pip_value_per_lot(symbol, entry)
-
-    base_dist = abs(entry - candle_open)
-    sl_min_pips = {
-        "USDJPY": settings.sl_min_pips_usdjpy,
-        "XAUUSD": settings.sl_min_pips_xauusd,
-        "XAUEUR": settings.sl_min_pips_xaueur,
-    }.get(symbol, settings.sl_min_pips_default)
-    sl_floor = max(sl_min_pips * pip, settings.sl_min_spread_mult * spread)
-    if base_dist < sl_floor:
-        base_dist = sl_floor
-
-    sl_dist = round(base_dist * settings.sl_mult, 5)
-    sl_pips = sl_dist / pip
-    
-    risk_usd_map = {
-        "XAUUSD": settings.sl_risk_usd_xauusd,
-        "XAUEUR": settings.sl_risk_usd_xaueur,
-    }
-    risk_usd = risk_usd_map.get(symbol, settings.sl_risk_usd)
-    
-    # HARD-CAP: Protect monetary risk by aggressively clipping SL if it exceeds risk at min_volume
-    max_sl_pips_affordable = risk_usd / (settings.min_volume * ppv)
-    if sl_pips > max_sl_pips_affordable:
-        sl_pips = max_sl_pips_affordable
-        sl_dist = round(sl_pips * pip, 5)
-
-    # Resolve RR dynamic values
-    rr = getattr(settings, "rr_min_xau", settings.rr_min) if symbol in ["XAUUSD", "XAUEUR"] else settings.rr_min
-    tp_dist = round(sl_dist * rr, 5) if rr > 0 else 0.0
-    
-    volume  = risk_usd / (sl_pips * ppv)
-    volume  = max(settings.min_volume, min(settings.max_volume, round(volume, 2)))
-
-    if direction == "buy":
-        sl = round(entry - sl_dist, 5)
-        tp = round(entry + tp_dist, 5) if tp_dist else 0.0
-    else:
-        sl = round(entry + sl_dist, 5)
-        tp = round(entry - tp_dist, 5) if tp_dist else 0.0
-
-    actual_risk   = round(volume * sl_pips * ppv, 2)
-    actual_reward = round(actual_risk * rr, 2) if rr > 0 else 0.0
-
-    logger.info(
-        "[SIZING] %s %s entry=%.5f signal_price=%.5f sl_dist=%.5f sl_pips=%.1f tp_dist=%.5f vol=%.2f risk=$%.2f reward=$%.2f",
-        symbol, direction, entry, candle_open, sl_dist, sl_pips, tp_dist, volume, actual_risk, actual_reward,
-    )
-    return entry, sl, tp, volume
 

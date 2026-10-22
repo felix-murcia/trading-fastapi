@@ -15,7 +15,6 @@ Sólo lectura: no toca el sistema vivo, no abre posiciones, no escribe en la BD.
 """
 import asyncio
 import bisect
-import datetime as dt
 import logging
 
 logger = logging.getLogger(__name__)

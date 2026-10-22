@@ -30,7 +30,6 @@ from services.usd_exposure import usd_conflict, usd_sign
         ("USDCNH", "SELL", -1),
         ("USDSEK", "BUY", +1),
         # Sin pata USD: no se inventa dirección
-        ("XAUEUR", "BUY", None),
         ("EURGBP", "BUY", None),
         ("EURCHF", "SELL", None),
         # Normalización y tipos desconocidos
@@ -114,7 +113,7 @@ def test_same_symbol_is_skipped():
 def test_cross_without_usd_does_not_block():
     """Una orden sin pata USD no se bloquea por este guard."""
     assert usd_conflict(
-        "XAUEUR", "BUY", [{"symbol": "EURUSD", "type": "sell", "ticket": 7}]
+        "EURGBP", "BUY", [{"symbol": "EURUSD", "type": "sell", "ticket": 7}]
     ) is None
 
 

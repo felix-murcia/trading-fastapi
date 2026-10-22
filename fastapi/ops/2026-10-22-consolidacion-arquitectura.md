@@ -31,14 +31,14 @@ positivos no es auditabla.
 | H-E | Dinero | `min_lot_for_protection` duplicaba I2 del contrato (suelo Safe-4) | MEDIA | 0 usos en producción | **borrado** |
 | H-F | Dinero | `derive_order` = segundo motor de sizing, sin llamadores | MEDIA | sólo 2 tests | **borrado** |
 | H-G | Dinero | `MIN_ENTRY_REWARD_EUR` = segunda verdad del mínimo de entrada | MEDIA | sólo un test | **retirado** |
-| H-H | Dinero | **DOS pipelines vivos con DOS motores de dinero**: `/api/v1/ai` (contrato) y `/v1/smc` → `simple_pipeline` (`derive_order_from_bb`, riesgo fijo `sl_risk_usd`, `rr_min`) | CRÍTICA | `main.py:250-253`; `settings.simple_pipeline_enabled=True`; `smc_signals` = **0 filas** | **abierto — decisión** |
+| H-H | Dinero | **DOS pipelines vivos con DOS motores de dinero**: `/api/v1/ai` (contrato) y `/v1/smc` → `simple_pipeline` (`derive_order_from_bb`, riesgo fijo `sl_risk_usd`, `rr_min`) | CRÍTICA | `main.py:250-253`; `settings.simple_pipeline_enabled=True`; `smc_signals` = **0 filas** | **resuelto 2026-10-22 — camino de señal retirado** |
 | H-I | Complejidad | `predict_direction()` = **1230 líneas** y 49 llamadas distintas; `/predict` = 2526 líneas | ALTA | AST | congelado (no crece) |
 | H-J | Capas | `ml/trading_env_v2.py` importa `services.position_sizing` (dominio→aplicación) | MEDIA | `:52` | deuda declarada |
 | H-K | Errores | **82 `except Exception`** en runtime (AGENTS.md: «No silent failures») | ALTA | AST | congelado (no crece) |
 | H-L | Higiene | 25 imports sin uso en runtime | BAJA | AST | **borrados**; un test lo impide |
-| H-M | Higiene | `pip_value_per_lot("XAUEUR")` = 10,90 «aprox» (heurística dentro del dinero) | MEDIA | `position_sizing.py:78` | abierto (par deshabilitado) |
+| H-M | Higiene | `pip_value_per_lot("XAUEUR")` = 10,90 «aprox» (heurística dentro del dinero) | MEDIA | `position_sizing.py:78` | **resuelto 2026-10-22 — XAUEUR eliminado** |
 | H-N | Geometría | El contrato no bloquea un R:R malo pero posible (SL 45 p / TP 40 p ⇒ 0,89) | ALTA | diseño declarado | abierto — decisión de dinero |
-| H-O | Legado | `ml/archive/train_ppo_v2.py` (375 líneas) sin referencias; documentado en README | BAJA | `grep` = 0 | abierto — decisión |
+| H-O | Legado | `ml/archive/train_ppo_v2.py` (375 líneas) sin referencias; documentado en README | BAJA | `grep` = 0 | **resuelto 2026-10-22 — borrado** |
 
 ## 3. Corregido hoy (con números)
 
@@ -104,15 +104,13 @@ puertas mecánicas. No arregla la deuda histórica: **la congela** en
 
 ## 4. Lo que NO se ha tocado (y por qué)
 
-- **H-H (dos pipelines).** `/v1/smc/signal` es superficie documentada
-  (README:107,144) para «SMC EAs» externos. `smc_signals` tiene **0 filas** y
-  ninguna orden ha salido de ese camino, pero borrar una API pública es una
-  decisión de producto, no una limpieza. Dos salidas:
-  (a) **retirar** el camino de señal (`POST/GET /signal`, `simple_pipeline`,
-  `derive_order_from_bb`, `derive_order_from_candle_open` y sus claves de
-  config) ⇒ queda UN motor de dinero; (b) **unificarlo** con el contrato si
-  el pipeline se va a usar. Las lecturas (`/analytics`, `/news`) las usa el
-  dashboard y se quedan.
+- **H-H (dos pipelines) — RESUELTO (2026-10-22).** Félix decidió **retirar**
+  el camino de señal (opción a): `POST/GET /signal`, `simple_pipeline`,
+  `derive_order_from_bb`, `derive_order_from_candle_open`, sus 14 claves de
+  config y la tabla `smc_signals`. Evidencia de que no se usaba: **1 sola
+  orden** con prefijo `smc_` en toda la historia (`orders` id 1,
+  2026-09-15, `cancelled`) y `smc_signals` = 0 filas. Las lecturas
+  (`/analytics`, `/news`, `/audit`) las usa el dashboard y se quedan.
 - **H-I (`predict_direction` 1230 líneas).** Extraerlo sin rediseñar el ciclo
   es un trabajo de varios días y el test de arquitectura ya impide que crezca.
   Orden propuesto: (1) cadena de vetos → módulo puro con tests; (2) bloque de
@@ -131,3 +129,23 @@ pytest tests/ -q  →  1298 passed, 2 xfailed
 
 Incluye el caso real de la orden 80 (rechazado) y el deal 285 del bróker
 (conversión USDCHF reproducida con +0,03 % de error).
+
+
+## 6. Cierre de los tres puntos abiertos (2026-10-22)
+
+Félix decidió: **retirar** el camino de señal SMC, **borrar** XAUEUR y
+**borrar** `ml/archive/train_ppo_v2.py`. Ejecutado; detalle y tabla de líneas
+en README §2026-10-22 (2).
+
+| Punto | Acción | Evidencia |
+|---|---|---|
+| H-H | `POST/GET /v1/smc/signal`, `simple_pipeline`, los dos `derive_order_from_*`, 14 claves de config y tabla `smc_signals` retirados | `orders` con prefijo `smc_` = **1** (id 1, `cancelled`, 2026-09-15); `smc_signals` = **0 filas** |
+| H-M | XAUEUR eliminado de `PIP_SIZE`, `order_validator` y la conversión; `pip_value_per_lot` falla ruidosamente fuera de `_PIP_10_QUOTE` | `test_symbol_sin_regla_de_pip_falla_ruidoso` |
+| H-O | `ml/archive/train_ppo_v2.py` (375 l.) y su directorio, borrados | `grep` = 0 referencias |
+
+Suite: **1288 passed + 2 xfailed** (1051 líneas borradas en 28 ficheros).
+Deuda que sigue congelada y con dueño: `predict_direction` 1230 líneas (H-I),
+82 `except Exception` (H-K), tope de distancia SL / R:R mínimo (H-N, decisión
+de dinero que exige medición previa) y `ml/` → `services` (capa).
+`/close` y `/news-check` quedan declarados como candidatos: con el motor
+retirado sólo actúan sobre el ledger `smc_` heredado.

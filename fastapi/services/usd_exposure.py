@@ -12,7 +12,7 @@ Convenio:
   base=USD (USDCHF, USDJPY, USDCAD, USDCNH, USDSEK):
       BUY  -> largo USD (+1)
       SELL -> corto USD (-1)
-  sin pata USD (XAUEUR, cruces): None -> no bloquea.
+  sin pata USD (cruces tipo EURGBP): None -> no bloquea.
 
 No cierra posiciones: sólo rechaza la orden nueva. Las posiciones ajenas
 cuentan igual: el riesgo es de la cuenta, no del magic.

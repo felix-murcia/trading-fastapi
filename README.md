@@ -102,11 +102,14 @@ El EA `AI_Quant_Terminal.mq5` consulta a FastAPI cada nueva vela H1:
    - PPO SELL + LLM BULLISH → HOLD
    - Caso contrario → Ejecuta señal
 
-### Modo 2: SMC Pipeline (Alternativo)
-EAs `FalseBreakoutBridge.mq5` y `LiquidityGrabBridge.mq5` usan indicadores técnicos:
-- Envían señales a `POST /v1/smc/signal`
-- FastAPI aplica filtros (cooldown, noticias, validación geométrica)
-- Envía órdenes directamente a MT5
+### Modo 2: SMC — retirado (2026-10-22)
+
+El camino de señal SMC (`POST/GET /v1/smc/signal`, `services/simple_pipeline.py`)
+se retiró: era un **segundo motor de dinero** vivo (riesgo fijo `sl_risk_usd`,
+`rr_min`, fuera del contrato) que en toda su historia produjo **1 orden
+cancelada** (`orders` id 1) y **0 señales** (`smc_signals`). El router `/v1/smc`
+conserva sólo operaciones y lectura: `POST /close`, `POST /news-check`,
+`GET /audit`, `GET /news`, `GET /analytics`.
 
 ## Parámetros Configurables (AI_Quant_Terminal v11.0)
 
@@ -141,9 +144,9 @@ DailyLossLimit   = 50.0              // Pérdida diaria máxima en USD
 | POST | `/api/v1/orders/submit` | Envía órdenes validadas a MT5 |
 | GET | `/api/v1/account/info` | Info de cuenta y equity |
 | GET | `/api/v1/market/candles/latest` | Últimas velas para análisis |
-| POST | `/v1/smc/signal` | Recibe señales técnicas para SMC EAs |
-| POST | `/v1/smc/news-check` | Cierra posiciones antes de noticias de alto impacto |
-| POST | `/v1/smc/close` | Cierre manual por símbolo |
+| POST | `/v1/smc/news-check` | Cierra posiciones del ledger SMC antes de noticias de alto impacto |
+| POST | `/v1/smc/close` | Cierre manual por símbolo (sólo tickets del ledger SMC) |
+| GET | `/v1/smc/analytics` | Analítica del dashboard |
 | GET | `/health` | Health check con estado MCP y equity |
 | GET | `/docs` | Swagger UI (FastAPI auto-generated) |
 
@@ -249,15 +252,14 @@ docker logs trading-fastapi -f
 ```
 ├── mql5/
 │   ├── AI_Quant_Terminal.mq5     # EA principal con IA (ML + LLM)
-│   ├── FalseBreakoutBridge.mq5   # EA alternativo (SMC técnico)
-│   └── LiquidityGrabBridge.mq5  # EA para XAUUSD (SMC técnico)
+│   └── ListPositionsMagic.mq5    # Utilidad de inspección de posiciones
 │
 ├── fastapi/
 │   ├── main.py                   # App FastAPI + lifespan
 │   ├── config.py                 # Configuración desde .env
 │   ├── routers/
 │   │   ├── ai.py                 # /api/v1/ai/predict (ML+LLM)
-│   │   ├── smc.py               # /v1/smc/* (Señales técnicas)
+│   │   ├── smc.py               # /v1/smc/* (cierre, noticias, analítica)
 │   │   ├── orders.py            # Gestión de órdenes
 │   │   └── deps.py              # Autenticación via token
 │   ├── services/
@@ -265,16 +267,14 @@ docker logs trading-fastapi -f
 │   │   ├── news_filter.py       # Filtro de noticias de alto impacto
 │   │   ├── news_scraper.py      # Scraping de noticias macro
 │   │   ├── order_manager.py     # Preparación y validación de órdenes
-│   │   ├── position_sizing.py   # Cálculo SL/TP/Volumen
+│   │   ├── position_sizing.py   # Pip, conversión a EUR y sizing
 │   │   ├── structured_logging.py # Logging con trace_id para correlación MQL5↔API
 │   │   ├── auto_retrain.py      # Auto-retrain PPO cada N trades
 │   │   ├── market_microstructure.py # Volume Profile + Orderbook Imbalance
-│   │   └── simple_pipeline.py   # Pipeline SMC alternativo
 │   └── ml/
 │       ├── trading_env.py        # Gymnasium Env para PPO
 │       ├── train_ppo.py          # Script de entrenamiento PPO (legacy, 8 features)
-│   ├── train_ppo_v2.py       # Script de entrenamiento PPO v2 (legacy, 10 features)
-│   │   ├── train_ppo_v3.py       # Script de entrenamiento PPO v3 (12 features, acción continua)
+│       ├── train_ppo_v3.py       # Script de entrenamiento PPO v3 (12 features, acción continua)
 │   │   ├── trading_env_v2.py     # Entorno Gymnasium con acción continua Box(2,)
 │   │   ├── retrain_agent.py      # Agente de auto-retrain
 │   │   └── logs/
@@ -323,10 +323,6 @@ DAILY_LOSS_LIMIT=50.0            # Pérdida diaria máxima en USD
 # News Filter
 NEWS_FILTER_ENABLED=true
 NEWS_BLACKOUT_MINUTES=15
-
-# Pipeline SMC
-SIMPLE_PIPELINE_ENABLED=false    # true = usa SMC, false = usa AI Brain
-SIGNAL_COOLDOWN_MINUTES=60
 ```
 
 ## Flujo de Decisión (AI Brain)
@@ -365,7 +361,7 @@ Cada vez que un trade se cierra, se registra en `trade_outcomes`. Cada 10 trades
 
 **Modelo actual**: `ppo_trading_bot_v3.zip` — obs space `(20, 24)` (bundle activo, pre-memoria: 17 features + 7 canales; **contrato Fase 3 = `(20, 25)`** con `bars_since_close` para el próximo reentrenamiento — el serve deriva el canal del ancho del obs), acción continua Box(2,) `[direction, volume]` — stops ATR de `production_stops()` compartidos con `/predict` (P2-1) y volumen como escalador de riesgo 0…3% del equity vía `size_ppo_position()` compartida serve↔env (P2-2)
 
-**Modelo legacy**: `ppo_trading_bot.zip` — 200k steps, obs space `(10, 11)`, 10 features, acción Discrete(3), entrenado con `train_ppo_v2.py`
+**Modelo legacy**: `ppo_trading_bot.zip` — 200k steps, obs space `(10, 11)`, 10 features, acción Discrete(3), entrenado con el script v2 (retirado del repo el 2026-10-22)
 
 ### Volume Profile
 Análisis de perfil de volumen por vela:
@@ -1135,7 +1131,7 @@ Ahora, si las Bandas de Bollinger son inválidas o el ratio es insuficiente, el 
 
 4. **Modularización del frontend** — `frontend/js/app.js` se separó en `api.js` (llamadas fetch), `ui.js` (renderizado DOM/Chart.js) y `app.js` (orquestación). Cada módulo <100 líneas.
 
-5. **Limpieza de código legacy** — `train_ppo_v2.py` se movió a `ml/archive/` al no estar referenciado en scripts de automatización.
+5. **Limpieza de código legacy** — `train_ppo_v2.py` se movió a `ml/archive/` al no estar referenciado en scripts de automatización (borrado definitivamente el 2026-10-22).
 
 **Validación:** `pytest fastapi/tests/ -q` → 73 passed, 2 failed (pre-existentes, no relacionados con estos cambios).
 
@@ -1156,7 +1152,7 @@ Ahora, si las Bandas de Bollinger son inválidas o el ratio es insuficiente, el 
 - `frontend/index.html`
 
 **Archivos movidos:**
-- `fastapi/ml/train_ppo_v2.py` → `fastapi/ml/archive/train_ppo_v2.py`
+- `fastapi/ml/train_ppo_v2.py` → `fastapi/ml/archive/train_ppo_v2.py` (borrado el 2026-10-22)
 
 ### X. Fix P0-2: `/predict` devolvía 500 con MT5 caído (2026-09-28)
 
@@ -3742,3 +3738,55 @@ imports sin uso.
   (par deshabilitado), R:R malo permitido (decisión de dinero).
 
 Suite: **1298 passed + 2 xfailed**. Sin cambios MQL5 (EA v14.1).
+
+
+## 2026-10-22 (2) · RETIRADA DEL SEGUNDO MOTOR DE DINERO (SMC), XAUEUR Y `ml/archive`
+
+Decisión de Félix sobre los tres puntos abiertos del informe de consolidación:
+**retirar** el camino de señal SMC, **borrar** XAUEUR y **borrar**
+`ml/archive/train_ppo_v2.py`.
+
+### Por qué se retira y no se unifica
+
+`/v1/smc/signal` era un segundo motor de dinero vivo: `simple_pipeline` abría
+órdenes con riesgo fijo (`sl_risk_usd`) y `rr_min`, sin pasar por el contrato
+(`evaluate_trade`). Uso real en toda la historia: **1 orden** (`orders` id 1,
+2026-09-15, `cancelled`) y `smc_signals` = **0 filas**. Unificarlo habría
+mantenido dos contratos para un camino sin demanda.
+
+### Qué se borró (1051 líneas, 28 ficheros)
+
+| Pieza | Líneas |
+|---|---|
+| `services/simple_pipeline.py` (motor completo) | 171 |
+| `routers/smc.py`: `POST/GET /signal` + modelos `SMCSignalIn/Out` | 87 |
+| `position_sizing.py`: los dos `derive_order_from_*`, pip XAUEUR y cabecera | 133 |
+| 14 claves de config (`simple_pipeline_enabled`, `signal_cooldown_minutes`, `sl_risk_usd*`, `sl_mult`, `sl_pct`, `rr_min*`, `sl_min_*`) | 14 |
+| `XAUEUR` en `order_validator` | 2 |
+| Tabla `smc_signals` (DDL; 0 filas en vivo) | 12 |
+| `ml/archive/train_ppo_v2.py` + directorio | 375 |
+| Tests de las piezas retiradas (11) | 219 |
+
+`/v1/smc` conserva lo que usa el dashboard: `/analytics`, `/news`, `/audit`.
+`/close` y `/news-check` se quedan como herramientas manuales, pero con el
+motor retirado **sólo pueden actuar sobre tickets del ledger `smc_` heredado**
+(hoy: 1 orden cancelada) — no tocan posiciones del EA. Son candidatos a la
+siguiente pasada, no se borran sin decisión.
+
+### XAUEUR: se elimina el símbolo, no se sustituye la heurística
+
+`pip_value_per_lot("XAUEUR")` devolvía 10,90 «aprox» (quote=EUR sin tasa
+declarada) y XAUEUR no estaba habilitado en `PAIRS`. Se retira de `PIP_SIZE`,
+de `order_validator` y de la conversión. Además el fallback `return 10.0` para
+cualquier símbolo pasa a conjunto explícito (`_PIP_10_QUOTE`, 6 símbolos) con
+`ValueError` fuera de él: **un pip inventado ya no puede colarse**.
+
+### La regla de higiene, ahora completa
+
+`test_sin_imports_muertos` sólo miraba `from x import y`; ahora también
+`import x`. El barrido encontró y borró 12 imports de módulo muertos en
+runtime y scripts ML → **0 en runtime**.
+
+Suite: **1288 passed + 2 xfailed** (antes 1298 + 2: 11 tests de piezas
+retiradas y 1 test nuevo que fija el fallo ruidoso de XAUEUR). Sin cambios
+MQL5 (EA v14.1).

@@ -197,12 +197,19 @@ def test_sin_imports_muertos():
             node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
         }
         for node in ast.walk(tree):
-            if not isinstance(node, ast.ImportFrom):
+            if isinstance(node, ast.ImportFrom):
+                nombres = [
+                    (a.asname or a.name, node.lineno) for a in node.names
+                    if a.name != "annotations"        # __future__: no es un nombre
+                ]
+            elif isinstance(node, ast.Import):
+                nombres = [
+                    (a.asname or a.name.split(".")[0], node.lineno)
+                    for a in node.names
+                ]
+            else:
                 continue
-            for alias in node.names:
-                nombre = alias.asname or alias.name
-                if nombre == "annotations":       # __future__: no es un nombre
-                    continue
+            for nombre, linea in nombres:
                 if nombre not in usados:
-                    muertos.append((_rel(p), node.lineno, nombre))
+                    muertos.append((_rel(p), linea, nombre))
     assert not muertos, f"imports sin uso: {muertos}"

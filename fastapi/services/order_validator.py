@@ -24,13 +24,11 @@ VALID_RANGES = {
     "USDCNH": (6.50, 8.50),
     "USDSEK": (8.00, 12.00),
     "XAUUSD": (2000.0, 8000.0),
-    "XAUEUR": (2000.0, 8000.0),
 }
 
 SL_LIMITS: dict[str, tuple[float, float]] = {
     "USDJPY": (5.0, 300.0),
     "XAUUSD": (10.0, 2000.0),
-    "XAUEUR": (10.0, 2000.0),
 }
 _SL_DEFAULT = (3.0, 300.0)
 

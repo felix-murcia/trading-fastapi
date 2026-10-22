@@ -43,14 +43,6 @@ class Settings(BaseSettings):
     # p<0,05 por tramo), se devuelve PPO_RISK_PCT a 0.03.
     ppo_risk_pct: float = 0.03        # P2-2: tope de riesgo por trade del PPO (fracción del equity)
     order_max_age_hours: int = 48
-    simple_pipeline_enabled: bool = True
-    signal_cooldown_minutes: int = 60     # H1: 1 vela = 60 min
-    sl_risk_usd: float = 15.0
-    sl_risk_usd_xauusd: float = 15.0
-    sl_risk_usd_xaueur: float = 15.0
-    sl_mult: float = 1.5
-    sl_pct: float = 0.001
-    rr_min: float = 1.0
     # G3-2 (2026-10-21): MÍNIMO DE PROTECCIÓN en € del trailing "Safe-4".
     # El EA (input `SL_LockSafetyNetEur`, v14.0) sólo mueve el SL a bloquear
     # el beneficio si el RIESGO EN € de la posición es ≥ este valor; con un
@@ -60,12 +52,6 @@ class Settings(BaseSettings):
     # ("se protege o no se opera"). El valor espeja el input del EA: si
     # cambias el input en MT5, cámbialo aquí también.
     min_lock_eur: float = 4.0
-    rr_min_xau: float = 1.2
-    sl_min_spread_mult: int = 3
-    sl_min_pips_default: float = 3.0
-    sl_min_pips_usdjpy: float = 5.0
-    sl_min_pips_xaueur: float = 10.0
-    sl_min_pips_xauusd: float = 10.0
     news_filter_enabled: bool = True
     news_blackout_minutes: int = 15
 

@@ -60,23 +60,3 @@ class TestSettings:
         from config import Settings
         settings = Settings()
         assert settings.news_filter_enabled is True
-
-    def test_sl_risk_usd_defaults(self, monkeypatch):
-        """sl_risk_usd/sl_mult default = 15.0/15.0/1.5 — defectos del CÓDIGO,
-        no del entorno. El .env del contenedor define overrides (SL_MULT=1.2):
-        para probar el default hay que quitarlos (monkeypatch los restaura)."""
-        for var in ("sl_risk_usd", "SL_RISK_USD",
-                    "sl_risk_usd_xauusd", "SL_RISK_USD_XAUUSD",
-                    "sl_mult", "SL_MULT"):
-            monkeypatch.delenv(var, raising=False)
-        os.environ["database_url"] = "postgresql://user:pass@localhost/db"
-        os.environ["internal_token"] = "test-token"
-        os.environ["hmac_secret"] = "test-hmac"
-        import importlib
-        import config
-        importlib.reload(config)
-        from config import Settings
-        settings = Settings()
-        assert settings.sl_risk_usd == 15.0
-        assert settings.sl_risk_usd_xauusd == 15.0
-        assert settings.sl_mult == 1.5

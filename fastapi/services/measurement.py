@@ -47,7 +47,6 @@ REGLAS (Félix, 2026-10-19/20):
   vara y los contenders son comparables.
 """
 import bisect
-import math
 from typing import Optional
 
 # Horizonte por defecto de la skill direccional: +24 h reales (el mismo que

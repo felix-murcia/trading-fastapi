@@ -156,7 +156,6 @@ async def _promote_bundle_files(
     Es el MISMO camino que usa la promoción del pipeline, extraído para que
     la promoción de un artefacto ya medido no duplique la lógica de escritura.
     """
-    import numpy as np
     from services import drift_monitor
     from services.model_registry import build_manifest, record_promotion, write_manifest
 

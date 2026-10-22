@@ -7,7 +7,6 @@ Genera features avanzadas para el modelo PPO:
 3. Correlation Features — SPX, DXY, VIXbetaint
 """
 import logging
-import asyncio
 from typing import Optional
 from dataclasses import dataclass
 

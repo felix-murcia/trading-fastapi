@@ -24,7 +24,6 @@ import asyncio
 import datetime as dt
 import json
 import os
-import time
 
 from core.rules import MIN_WIN_EUR, is_winning_close
 

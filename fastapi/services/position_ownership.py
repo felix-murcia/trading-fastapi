@@ -1,21 +1,22 @@
-"""
+r"""
 P2-4b: propiedad de posiciones — el cierre selectivo por ledger de tickets.
 
 ¿De quién es una posición abierta en un símbolo? El MCP no expone magic ni
 comment en /positions (auditado contra su openapi), así que el magic no puede
 decidirlo (magic=0 además es compartido con trades manuales). La fuente de
-verdad es NUESTRO ledger `orders`: la ruta SMC persiste cada orden con
-`cycle_id LIKE 'smc\_%'` y su ticket en `orders.mt5_order_id`.
+verdad es NUESTRO ledger `orders`: el motor SMC retirado (2026-10-22) dejó sus
+órdenes con `cycle_id LIKE 'smc\_%'` y su ticket en `orders.mt5_order_id`;
+ese ledger se sigue leyendo para no tocar nunca las posiciones del EA.
 
 Por eso ningún cierre toca ya `DELETE /positions/symbol/{symbol}` entero:
 - El EA (magic 90001) abre por `/v1/orders/prepare` con cycle_id distinto — su
   posición es OTRO mundo y solo él (o su SL/TP) la cierra.
-- Las rutas SMC (flip de señal, cierre manual, noticias) cierran SOLO los
-  tickets del ledger. "Mundos totalmente independientes" también en el cierre:
+- Las rutas SMC (cierre manual, noticias) cierran SOLO los tickets del
+  ledger. "Mundos totalmente independientes" también en el cierre:
   una estrategia no puede borrar la posición de otra.
 
 `close_positions_owned` no registra trades: qué cerrar/persistir es decisión
-de cada caller (el endpoint /close sí alimenta auto-retrain, el flip no).
+de cada caller (el endpoint /close sí alimenta auto-retrain).
 """
 import logging
 
@@ -28,7 +29,7 @@ SMC_PREFIX = "smc_"
 
 
 def _ledger_prefix_pattern(prefix: str) -> str:
-    """Patrón LIKE con el prefijo escapado — `smc_` no puede virar wildcard
+    r"""Patrón LIKE con el prefijo escapado — `smc_` no puede virar wildcard
     (`_` = cualquier carácter en LIKE): 'smc\_%' = literal 'smc_' + resto."""
     escaped = prefix.replace("\\", "\\\\").replace("_", "\\_")
     return escaped + "%"

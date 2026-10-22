@@ -26,10 +26,10 @@ curl http://localhost:8090/docs
 | EA (MQL5) | `mql5/AI_Quant_Terminal.mq5` | Polls `/api/v1/ai/predict` every 5 min; reports closes to `/api/v1/ai/trade/filled` |
 | Backend | `fastapi/main.py` | FastAPI app, lifespan (background loops), health, router registration |
 | AI router | `fastapi/routers/ai.py` | PPO v3 inference + Qwen LLM veto + guards |
-| SMC router | `fastapi/routers/smc.py` | Alternative SMC pipeline (`/v1/smc/*`) |
+| SMC router | `fastapi/routers/smc.py` | Operational only: `/analytics`, `/news`, `/audit`, `/close`, `/news-check` (signal path retired 2026-10-22) |
 | Services | `fastapi/services/` | auto_retrain, mt5_client, order_manager, trade_journal, risk_guardian |
 | ML | `fastapi/ml/` | `trading_env_v2.py` (Gymnasium env), `train_ppo_v3.py`, model artifacts |
-| DB | `fastapi/db/schema.sql` | PostgreSQL: orders, trade_outcomes, audit_log, smc_signals, model_registry, training_experiments, retrain_state, risk_account_state, risk_pair_state (+ trade_insights: DDL runtime en `services/trade_journal.py`; `deferred_orders` eliminada en P1-5, 2026-09-29) |
+| DB | `fastapi/db/schema.sql` | PostgreSQL: orders, trade_outcomes, audit_log, model_registry, training_experiments, retrain_state, risk_account_state, risk_pair_state (+ trade_insights: DDL runtime en `services/trade_journal.py`; `deferred_orders` eliminada en P1-5, 2026-09-29) |
 | Frontend | `frontend/` | Static HTML/JS dashboard (Chart.js) |
 
 ## Critical Conventions

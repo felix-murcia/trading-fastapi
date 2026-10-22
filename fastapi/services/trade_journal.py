@@ -15,7 +15,6 @@ import logging
 from datetime import datetime, timezone
 
 import httpx
-import pandas as pd
 
 from core.rules import is_winning_close
 from db.connection import get_pool

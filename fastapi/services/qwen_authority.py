@@ -54,7 +54,6 @@ umbral de exactitud congelado (MIN_ACC) se conserva como SUELO, pero no
 basta: el límite inferior de Wilson tiene que quedar por encima de la base.
 """
 import asyncio
-import bisect
 import datetime as dt
 import logging
 import os

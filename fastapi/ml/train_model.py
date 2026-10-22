@@ -1,7 +1,6 @@
 import urllib.request
 import json
 import pandas as pd
-import numpy as np
 import pickle
 import os
 from sklearn.ensemble import RandomForestClassifier

@@ -1,7 +1,6 @@
 import urllib.request
 import json
 import pandas as pd
-import numpy as np
 import os
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv

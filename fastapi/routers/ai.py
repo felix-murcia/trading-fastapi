@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import os
 import time
@@ -10,7 +9,6 @@ from typing import Optional
 import httpx
 import numpy as np
 import pandas as pd
-import torch
 import gymnasium as gym
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, field_validator
@@ -857,12 +855,11 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             cycle_id, req.foreign_positions, sym, req.magic,
         )
 
-    # P2-3: blackout de noticias de alto impacto — mismo mecanismo que el SMC
-    # (simple_pipeline → news_filter.is_news_blackout): ventana ±news_blackout_minutes
-    # alrededor de un evento High/Medium de la divisa → sin órdenes (ni entrada
-    # ni inversión); SL/TP y trailing del EA siguen activos. Si el calendario no
-    # se puede descargar, la función hace fail-open con error logueado (idéntico
-    # al SMC — no se inventa un segundo comportamiento).
+    # P2-3: blackout de noticias de alto impacto (news_filter.is_news_blackout):
+    # ventana ±news_blackout_minutes alrededor de un evento High/Medium de la
+    # divisa → sin órdenes (ni entrada ni inversión); SL/TP y trailing del EA
+    # siguen activos. Si el calendario no se puede descargar, la función hace
+    # fail-open con error logueado.
     blacked_out, news_event = await is_news_blackout(sym)
     if blacked_out:
         logger.warning("[%s] BLACKOUT noticias (%s) → HOLD", cycle_id, news_event)
