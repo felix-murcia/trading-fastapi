@@ -20,7 +20,7 @@ debe justificarse en el commit y en README §9.
 # fichero::función → líneas (medido 2026-10-22, suite 1276 passed + 2 xfailed)
 BIG_FUNCS = {
     # H-I (2026-10-22): 1230 → 994 tras extraer trade_setup y veto_chain.
-    "routers/ai.py::predict_direction": 994,
+    "routers/ai.py::predict_direction": 995,
     "services/auto_retrain.py::_do_retrain_core": 441,
     "ml/trading_env_v2.py::step": 373,
     "services/qwen_client.py::query_qwen_unified": 372,

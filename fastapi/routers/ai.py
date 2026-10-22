@@ -1492,6 +1492,7 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             qwen_reentry_ok=qwen.get("reentry_ok"),
             min_entry_confidence=settings.min_entry_confidence,
             effective_prob=qwen["effective_prob"],
+            open_positions=req.foreign_positions, qwen=qwen,
         )
     )
     final_decision = mech.decision

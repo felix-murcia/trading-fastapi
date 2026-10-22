@@ -54,6 +54,8 @@ class MechanicalInputs:
     qwen_reentry_ok: Optional[bool]
     min_entry_confidence: float
     effective_prob: float
+    open_positions: list[dict] = None  # <-- NUEVO: posiciones abiertas para la gate de cross-pair
+    qwen: dict = None  # <-- NUEVO: datos de Qwen (bias, bias_prob, etc.) para veto de confianza
 
 
 @dataclass(frozen=True)
@@ -97,6 +99,121 @@ def _time_stop(inp: MechanicalInputs) -> tuple[str, bool]:
     return inp.decision, False
 
 
+def _check_position_veto(
+    inp: MechanicalInputs, decision: str, position_rejected: bool,
+) -> tuple[str, bool]:
+    """Veto de posición: flip con posición abierta → HOLD."""
+    if position_rejected:
+        logger.warning(
+            "[%s] VETO POSICION ║ flip %s con posición abierta (pos=%d) → HOLD "
+            "(coherente con EA: salida solo SL/TP)",
+            inp.cycle_id, decision, inp.position_raw,
+        )
+        return "HOLD", True
+    return decision, False
+
+
+def _check_contract_veto(
+    inp: MechanicalInputs, decision: str, contract_rejected: bool,
+    reward_below_min: bool,
+) -> tuple[str, bool, bool]:
+    """Veto de contrato de dinero: invariante I1/I2/I3 falla → HOLD."""
+    if contract_rejected and decision in ("BUY", "SELL"):
+        reward_below_min = inp.contract.reason in (
+            "tp_no_paga_bloqueo", "tp_no_cubre_costes",
+        )
+        logger.warning(
+            "[%s] VETO CONTRATO ║ %s · TP %.1f p × %.2f lot · riesgo %.2f€ "
+            "(tope %.2f€) · TP neto %.2f€ < exigido %.2f€ → HOLD",
+            inp.cycle_id, inp.contract.reason, inp.tp_pips, inp.lots,
+            inp.contract.risk_eur, inp.contract.cap_eur,
+            inp.contract.reward_net_eur,
+            max(MIN_WIN_EUR, inp.min_lock_eur),
+        )
+        return "HOLD", True, reward_below_min
+    return decision, False, reward_below_min
+
+
+def _check_reentry_veto(
+    inp: MechanicalInputs, reentry_ok: Optional[bool], decision: str,
+) -> str:
+    """Veto de re-entrada: reentry_ok=false dentro de CHURN_BARS → HOLD."""
+    if inp.reentry_window and reentry_ok is False and decision in ("BUY", "SELL"):
+        logger.warning(
+            "[%s] VETO RE-ENTRADA (cerebro) ║ reentry_ok=false, %d velas H1 desde el "
+            "último cierre ≤ CHURN_BARS=%d → HOLD",
+            inp.cycle_id, inp.bars_since_close, inp.churn_bars,
+        )
+        return "HOLD"
+    return decision
+
+
+def _check_low_confidence_veto(
+    inp: MechanicalInputs, decision: str, low_confidence: bool,
+) -> tuple[str, bool]:
+    """Veto de confianza: effective_prob < umbral → HOLD."""
+    if (
+        inp.min_entry_confidence > 0.0
+        and inp.effective_prob < inp.min_entry_confidence
+        and decision in ("BUY", "SELL")
+    ):
+        low_confidence = True
+        logger.warning(
+            "[%s] VETO CONFIANZA ║ effective_prob %.3f < umbral %.2f → HOLD",
+            inp.cycle_id, inp.effective_prob, inp.min_entry_confidence,
+        )
+        return "HOLD", True
+    return decision, low_confidence
+
+
+def _check_qwen_degraded_veto(
+    inp: MechanicalInputs, decision: str,
+) -> str:
+    """Veto de degradación Qwen: cerebro no disponible → HOLD."""
+    if not inp.qwen_ok and decision in ("BUY", "SELL"):
+        # Fail-closed de degradación: si el cerebro no responde no se abre
+        # nada. Es seguridad mecánica, no un juicio de calidad.
+        logger.warning(
+            "[%s] VETO QWEN-DEGRADADO ║ cerebro no disponible → HOLD",
+            inp.cycle_id,
+        )
+        return "HOLD"
+    return decision
+
+
+def _check_usd_consistency_veto(
+    inp: MechanicalInputs, decision: str,
+) -> str:
+    """Veto de consistencia USD-axis: contradicción en el eje USD → HOLD."""
+    if decision not in ("BUY", "SELL"):
+        return decision
+    usd_ok, usd_reason = apply_usd_pair_consistency_veto(inp)
+    if not usd_ok:
+        logger.warning(
+            "[%s] VETO USD-PAIR-CONSISTENCY ║ %s → HOLD",
+            inp.cycle_id, usd_reason,
+        )
+        return "HOLD"
+    return decision
+
+
+def _check_bias_confidence_veto(
+    inp: MechanicalInputs, decision: str,
+) -> str:
+    """Veto de sesgo con baja confianza: sin tesis clara → HOLD."""
+    if decision not in ("BUY", "SELL"):
+        return decision
+    qwen_data = inp.qwen or {}
+    bias_ok, bias_reason = apply_bias_low_confidence_veto(decision, qwen_data)
+    if not bias_ok:
+        logger.warning(
+            "[%s] VETO BIAS-LOW-CONFIDENCE ║ %s → HOLD",
+            inp.cycle_id, bias_reason,
+        )
+        return "HOLD"
+    return decision
+
+
 def _apply_hold_chain(
     inp: MechanicalInputs, decision: str, time_stop: bool,
     reentry_ok: Optional[bool],
@@ -114,52 +231,25 @@ def _apply_hold_chain(
     position_rejected = inp.env_position != 0 and decision in ("BUY", "SELL")
     low_confidence = False
 
-    if position_rejected:
-        logger.warning(
-            "[%s] VETO POSICION ║ flip %s con posición abierta (pos=%d) → HOLD "
-            "(coherente con EA: salida solo SL/TP)",
-            inp.cycle_id, decision, inp.position_raw,
+    decision, position_rejected = _check_position_veto(
+        inp, decision, position_rejected
+    )
+    if decision != "HOLD":
+        decision, contract_rejected, reward_below_min = _check_contract_veto(
+            inp, decision, contract_rejected, reward_below_min
         )
-        decision = "HOLD"
-    elif contract_rejected and decision in ("BUY", "SELL"):
-        reward_below_min = inp.contract.reason in (
-            "tp_no_paga_bloqueo", "tp_no_cubre_costes",
+    if decision != "HOLD":
+        decision = _check_reentry_veto(inp, reentry_ok, decision)
+    if decision != "HOLD":
+        decision, low_confidence = _check_low_confidence_veto(
+            inp, decision, low_confidence
         )
-        logger.warning(
-            "[%s] VETO CONTRATO ║ %s · TP %.1f p × %.2f lot · riesgo %.2f€ "
-            "(tope %.2f€) · TP neto %.2f€ < exigido %.2f€ → HOLD",
-            inp.cycle_id, inp.contract.reason, inp.tp_pips, inp.lots,
-            inp.contract.risk_eur, inp.contract.cap_eur,
-            inp.contract.reward_net_eur,
-            max(MIN_WIN_EUR, inp.min_lock_eur),
-        )
-        decision = "HOLD"
-    elif inp.reentry_window and reentry_ok is False and decision in ("BUY", "SELL"):
-        logger.warning(
-            "[%s] VETO RE-ENTRADA (cerebro) ║ reentry_ok=false, %d velas H1 desde el "
-            "último cierre ≤ CHURN_BARS=%d → HOLD",
-            inp.cycle_id, inp.bars_since_close, inp.churn_bars,
-        )
-        decision = "HOLD"
-    elif (
-        inp.min_entry_confidence > 0.0
-        and inp.effective_prob < inp.min_entry_confidence
-        and decision in ("BUY", "SELL")
-    ):
-        low_confidence = True
-        logger.warning(
-            "[%s] VETO CONFIANZA ║ effective_prob %.3f < umbral %.2f → HOLD",
-            inp.cycle_id, inp.effective_prob, inp.min_entry_confidence,
-        )
-        decision = "HOLD"
-    elif not inp.qwen_ok and decision in ("BUY", "SELL"):
-        # Fail-closed de degradación: si el cerebro no responde no se abre
-        # nada. Es seguridad mecánica, no un juicio de calidad.
-        logger.warning(
-            "[%s] VETO QWEN-DEGRADADO ║ cerebro no disponible → HOLD",
-            inp.cycle_id,
-        )
-        decision = "HOLD"
+    if decision != "HOLD":
+        decision = _check_qwen_degraded_veto(inp, decision)
+    if decision != "HOLD":
+        decision = _check_usd_consistency_veto(inp, decision)
+    if decision != "HOLD":
+        decision = _check_bias_confidence_veto(inp, decision)
 
     return MechanicalOutcome(
         decision=decision,
@@ -246,6 +336,142 @@ def apply_sizing_veto(
     else:
         logger.debug("[%s] sizing_below_min (rate-limited) → HOLD", cycle_id)
     return "HOLD", True
+# ============================================================================
+# VETO: Cross‑pair USD consistency (lógica real, no esqueleto)
+# ============================================================================
+def _usd_perspective(symbol: str, direction: str) -> Optional[str]:
+    """
+    Devuelve si USD está 'fuerte' o 'débil' según la dirección del par.
+    
+    USDXXX (ej. USDCHF, USDJPY):
+        BUY  → USD fuerte  (compramos USD)
+        SELL → USD débil   (vendemos USD)
+    
+    XXXUSD (ej. EURUSD, GBPUSD):
+        BUY  → USD débil   (compramos EUR, vendemos USD implícito)
+        SELL → USD fuerte  (vendemos EUR, compramos USD implícito)
+    
+    Retorna None si el par no involucra USD.
+    """
+    base = symbol[:3]
+    quote = symbol[3:]
+    
+    if base == "USD":
+        return "fuerte" if direction == "BUY" else "débil"
+    if quote == "USD":
+        return "débil" if direction == "BUY" else "fuerte"
+    return None
+
+
+def _usd_contradiction(sym1: str, dir1: str, sym2: str, dir2: str) -> bool:
+    """
+    Detecta contradicción en el eje USD entre dos pares.
+    
+    Dos pares USD-correlacionados están en contradicción si ambos
+    asignan la misma fuerza a USD (ambos 'fuerte' o ambos 'débil').
+    
+    Ejemplo real del incidente:
+        EURUSD SELL  → USD fuerte  (vendemos EUR, compramos USD)
+        USDCHF SELL  → USD fuerte  (vendemos USDCHF = vendemos USD, compramos CHF)
+        ¡CONTRADICCIÓN! USD no puede ser fuerte y débil a la vez.
+    
+    Esperado: EURUSD SELL (USD fuerte) + USDCHF BUY (USD débil) = consistente.
+    """
+    p1 = _usd_perspective(sym1, dir1)
+    p2 = _usd_perspective(sym2, dir2)
+    
+    if p1 is None or p2 is None:
+        return False  # No se puede evaluar, no bloqueamos
+    
+    return p1 == p2  # Misma perspectiva USD = contradicción
+
+
+def apply_usd_pair_consistency_veto(
+    inp: MechanicalInputs
+) -> tuple[bool, str]:
+    """
+    Guard de consistencia USD-axis entre pares correlacionados.
+    
+    Lógica:
+      - Si EURUSD está BEARISH (USD fuerte), USDCHF no puede ser BEARISH 
+        (eso sería USD fuerte en ambos lados = contradicción).
+      - Se permite NEUTRAL o dirección opuesta.
+      - Solo bloquea si hay exposición USD en el mismo lado.
+    
+    Retorna (True, "") si no hay contradicción; (False, motivo) si la hay.
+    """
+    if not inp.open_positions:
+        return True, ""
+    
+    current_symbol = inp.symbol
+    current_direction = inp.decision
+    
+    if current_direction not in ("BUY", "SELL"):
+        return True, ""
+    
+    # Solo aplica a pares que involucran USD
+    if "USD" not in current_symbol:
+        return True, ""
+    
+    for pos in inp.open_positions:
+        pos_symbol = pos.get("symbol", "")
+        pos_direction = pos.get("type", "") or pos.get("direction", "")
+        
+        if not pos_symbol or not pos_direction:
+            continue
+        
+        if pos_direction not in ("BUY", "SELL"):
+            continue
+        
+        # Ambos pares deben involucrar USD para comparar perspectiva
+        if "USD" not in pos_symbol:
+            continue
+        
+        # Si es el mismo símbolo, no hay contradicción posible (misma posición)
+        if pos_symbol == current_symbol:
+            continue
+        
+        if _usd_contradiction(current_symbol, current_direction, pos_symbol, pos_direction):
+            return False, (
+                f"USD_CONFLICT:{pos_symbol}:{pos_direction} "
+                f"vs {current_symbol}:{current_direction}"
+            )
+    
+    return True, ""
+
+
+# ============================================================================
+# VETO: Bias low confidence (lógica real)
+# ============================================================================
+def apply_bias_low_confidence_veto(
+    decision: str, qwen: dict
+) -> tuple[bool, str]:
+    """
+    Veto de sesgo con baja confianza.
+    
+    Si Qwen devuelve NEUTRAL (sin tesis clara) y la decisión es BUY o SELL,
+    bloqueamos la entrada. No operamos sin sesgo direccional confirmado.
+    
+    También bloquea si el bias_prob es demasiado bajo (< 0.55), indicando
+    incertidumbre del LLM.
+    
+    Retorna (True, "") si pasa; (False, motivo) si se bloquea.
+    """
+    if decision not in ("BUY", "SELL"):
+        return True, ""
+    
+    bias = qwen.get("bias", "NEUTRAL")
+    bias_prob = qwen.get("bias_prob", 0.5)
+    
+    # Si el sesgo es NEUTRAL, no hay tesis → bloquear
+    if bias == "NEUTRAL":
+        return False, f"BIAS_NEUTRAL:no thesis for {decision}"
+    
+    # Si la probabilidad del sesgo es muy baja, hay incertidumbre → bloquear
+    if bias_prob < 0.55:
+        return False, f"BIAS_LOW_CONF:{bias}:{bias_prob:.2f}"
+    
+    return True, ""
 
 
 def _detector_inputs(
