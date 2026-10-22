@@ -63,14 +63,16 @@ class TestWorldGate:
         with patch("main.init_pool", AsyncMock()), \
              patch("main.close_pool", AsyncMock()), \
              patch("routers.ai.load_inference_artifacts", MagicMock()), \
-             patch("routers.ai.is_news_blackout", news), \
-             patch("httpx.AsyncClient", _ExplodingClient):
+             patch("routers.ai.is_news_blackout", news):
             with TestClient(app) as client:
-                response = client.post(
-                    "/api/v1/ai/predict",
-                    json={"symbol": "JPYUSD", "timeframe": "H1", "position": 0},
-                    headers={**TOKEN, "x-cycle-id": "p31b-unknown"},
-                )
+                # El parche va DESPUÉS del arranque: el gate se mide en la
+                # petición, no en el bootstrap (que sí puede leer equity).
+                with patch("httpx.AsyncClient", _ExplodingClient):
+                    response = client.post(
+                        "/api/v1/ai/predict",
+                        json={"symbol": "JPYUSD", "timeframe": "H1", "position": 0},
+                        headers={**TOKEN, "x-cycle-id": "p31b-unknown"},
+                    )
 
         assert response.status_code == 200, response.text
         payload = response.json()
@@ -92,14 +94,14 @@ class TestWorldGate:
         with patch("main.init_pool", AsyncMock()), \
              patch("main.close_pool", AsyncMock()), \
              patch("routers.ai.load_inference_artifacts", MagicMock()), \
-             patch("routers.ai.is_news_blackout", news), \
-             patch("httpx.AsyncClient", _ExplodingClient):
+             patch("routers.ai.is_news_blackout", news):
             with TestClient(app) as client:
-                response = client.post(
-                    "/api/v1/ai/predict",
-                    json={"symbol": "EURUSD", "timeframe": "H1", "position": 0},
-                    headers={**TOKEN, "x-cycle-id": "p31b-disabled"},
-                )
+                with patch("httpx.AsyncClient", _ExplodingClient):
+                    response = client.post(
+                        "/api/v1/ai/predict",
+                        json={"symbol": "EURUSD", "timeframe": "H1", "position": 0},
+                        headers={**TOKEN, "x-cycle-id": "p31b-disabled"},
+                    )
 
         assert response.status_code == 200, response.text
         payload = response.json()

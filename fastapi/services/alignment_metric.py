@@ -25,6 +25,7 @@ import logging
 import math
 from collections import Counter
 from typing import Optional, Sequence
+from services.error_taxonomy import LOOP_ERRORS
 
 logger = logging.getLogger(__name__)
 
@@ -195,7 +196,7 @@ async def alignment_gate(symbol: str, pool=None) -> dict:
     try:
         rows = await load_recent_pairs(pool, symbol)
         report = compute_report(rows)
-    except Exception as exc:
+    except LOOP_ERRORS as exc:
         reason = f"error:{type(exc).__name__}: {exc}"
         logger.warning("[T28] alignment gate falló (%s) → no promovible", reason)
         return {

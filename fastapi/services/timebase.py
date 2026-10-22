@@ -51,6 +51,7 @@ import datetime as dt
 import logging
 import time
 from typing import Optional
+from services.error_taxonomy import LOOP_ERRORS
 
 logger = logging.getLogger(__name__)
 
@@ -114,8 +115,7 @@ async def broker_offset_hours(symbol: str = "EURUSD") -> int:
         from config import settings
         async with httpx.AsyncClient(timeout=6.0) as c:
             r = await c.get(f"{settings.mt5_http_url}/api/v1/market/price/{symbol}")
-            r.raise_for_status()
-            srv = r.json().get("time")
+            srv = r.json().get("time") if r.status_code == 200 else None
         if srv:
             if isinstance(srv, (int, float)):
                 srv_ts = float(srv)
@@ -123,12 +123,12 @@ async def broker_offset_hours(symbol: str = "EURUSD") -> int:
                 srv_ts = dt.datetime.fromisoformat(
                     str(srv).replace("Z", "+00:00")).timestamp()
             offset_h = int(round((srv_ts - time.time()) / 3600.0))
-    except Exception:  # noqa: BLE001 — el desfase NUNCA tumba una operación
+    except LOOP_ERRORS:  # noqa: BLE001 — el desfase NUNCA tumba una operación
         offset_h = None
     if offset_h is None:
         try:
             offset_h = await _offset_from_candles(symbol)
-        except Exception:  # noqa: BLE001
+        except LOOP_ERRORS:  # noqa: BLE001
             offset_h = int(_OFFSET_CACHE["offset_h"])
     _OFFSET_CACHE["offset_h"] = int(offset_h)
     _OFFSET_CACHE["ts"] = now
@@ -152,8 +152,7 @@ async def _offset_from_candles(symbol: str = "EURUSD") -> int:
             f"{settings.mt5_http_url}/api/v1/market/candles/latest",
             params={"symbol_name": symbol, "timeframe": "H1", "count": 3},
         )
-        r.raise_for_status()
-        data = r.json()
+        data = r.json() if r.status_code == 200 else {}
     raw = data if isinstance(data, list) else data.get("candles", [])
     return int(broker_offset_hours_from_candles(raw))
 

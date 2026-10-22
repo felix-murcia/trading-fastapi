@@ -17,9 +17,10 @@ deuda sólo puede encoger. Añadir una entrada es una decisión consciente que
 debe justificarse en el commit y en README §9.
 """
 
-# fichero::función → líneas (medido 2026-10-22, suite 1293 passed)
+# fichero::función → líneas (medido 2026-10-22, suite 1276 passed + 2 xfailed)
 BIG_FUNCS = {
-    "routers/ai.py::predict_direction": 1230,
+    # H-I (2026-10-22): 1230 → 994 tras extraer trade_setup y veto_chain.
+    "routers/ai.py::predict_direction": 994,
     "services/auto_retrain.py::_do_retrain_core": 441,
     "ml/trading_env_v2.py::step": 373,
     "services/qwen_client.py::query_qwen_unified": 372,
@@ -51,33 +52,8 @@ BIG_FUNCS = {
     "routers/ai.py::trade_filled_webhook": 80,
 }
 
-# fichero → ocurrencias de `except Exception` (medido 2026-10-22: 82 en total)
-EXCEPT_EXCEPTION = {
-    "main.py": 7,
-    "ml/trading_env_v2.py": 2,
-    "ml/train_ppo.py": 1,
-    "ml/train_ppo_v3.py": 1,
-    "routers/ai.py": 6,
-    "routers/smc.py": 5,
-    "services/alerting.py": 2,
-    "services/alignment_metric.py": 1,
-    "services/auto_retrain.py": 2,
-    "services/cross_audit.py": 9,
-    "services/daily_ledger.py": 7,
-    "services/drift_monitor.py": 4,
-    "services/equity_curve.py": 1,
-    "services/ledger.py": 4,
-    "services/llm_replay.py": 1,
-    "services/market_microstructure.py": 3,
-    "services/model_backup.py": 6,
-    "services/news_filter.py": 1,
-    "services/news_scraper.py": 1,
-    "services/order_manager.py": 3,
-    "services/position_ownership.py": 1,
-    "services/predict_silence.py": 2,
-    "services/qwen_authority.py": 2,
-    "services/risk_guardian.py": 1,
-    "services/risk_state_store.py": 2,
-    "services/structured_logging.py": 1,
-    "services/timebase.py": 2,
-}
+# fichero → ocurrencias de `except Exception` (medido 2026-10-22: 0 tras H-K).
+# La captura genérica se sustituyó por `services/error_taxonomy.py`:
+# DB / HTTP / PARSE / MODEL / LOOP. Los bugs (AttributeError, NameError,
+# ImportError, AssertionError) ya NO se degradan.
+EXCEPT_EXCEPTION = {}

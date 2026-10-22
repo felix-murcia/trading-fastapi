@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from config import settings
+from services.error_taxonomy import LOOP_ERRORS
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +78,7 @@ async def _fetch_calendar() -> list[dict]:
         logger.info("[NEWS] Loaded %d high-impact events for this week", len(high_impact))
         return high_impact
 
-    except Exception as exc:
+    except LOOP_ERRORS as exc:
         logger.error("[NEWS] Failed to fetch calendar: %s", exc)
         # Backoff: el fallo arma el timestamp — sin esto, la caída del
         # mirror reintentaba en CADA llamada (timeout ×2 por ciclo de

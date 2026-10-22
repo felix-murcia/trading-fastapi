@@ -11,6 +11,7 @@ Cubren las funciones con valores numéricos verificados de forma independiente
 """
 import pytest
 
+from core import rules
 from core.rules import MIN_WIN_EUR, is_winning_close
 from services import position_sizing as ps
 
@@ -51,7 +52,7 @@ class TestSizePPOPosition:
 
     @staticmethod
     def _size(v=1.0, eq=1000.0, sl=15.0, ppv=10.0, risk=0.03, mx=0.5, mn=0.01):
-        return ps.size_ppo_position(
+        return rules.size_ppo_position(
             volume_norm=v, sl_pips=sl, equity=eq, pip_value=ppv,
             risk_pct=risk, max_lot=mx, min_lot=mn,
         )

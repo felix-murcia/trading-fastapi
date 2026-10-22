@@ -26,6 +26,16 @@ from config import settings
 from core.pair import LEGACY_SYMBOL, default_model_path as _core_model_path
 from services.alerting import AlertLevel, send_alert
 from services.model_registry import load_manifest, manifest_path_for, sha256_of
+try:
+    from google.api_core.exceptions import GoogleAPIError
+    from google.auth.exceptions import GoogleAuthError
+except ImportError:  # google-cloud-storage es opcional: backup local primero
+    GoogleAPIError = OSError
+    GoogleAuthError = OSError
+from services.error_taxonomy import LOOP_ERRORS
+
+# GCS es "mejor esfuerzo": sin ADC el backup local manda y se alerta.
+BACKUP_ERRORS = LOOP_ERRORS + (GoogleAPIError, GoogleAuthError)
 
 logger = logging.getLogger(__name__)
 
@@ -167,7 +177,7 @@ async def _gcs_backup(files: dict[str, str], model_sha256: str, symbol: str) -> 
             if blob.md5_hash and blob.md5_hash != _md5_b64(src):
                 raise RuntimeError(f"verificación GCS falló para {name}: md5 distinto")
         return {"gcs_path": f"gs://{MODEL_BUCKET}/{prefix}", "verified": True}
-    except Exception as exc:  # cualquier fallo GCS no debe matar el backup local
+    except BACKUP_ERRORS as exc:  # cualquier fallo GCS no debe matar el backup local
         logger.error("[MODEL-BACKUP] GCS falló: %s", exc)
         return {"error": f"{type(exc).__name__}: {exc}"}
 
@@ -192,7 +202,7 @@ async def backup_model(
 
     try:
         files = _bundle_files(model_path)
-    except Exception as exc:
+    except BACKUP_ERRORS as exc:
         msg = f"Bundle incoherente, no respaldable: {exc}"
         logger.error("[MODEL-BACKUP] %s", msg)
         send_alert(AlertLevel.ERROR, "model_backup", msg, exc=exc)
@@ -203,7 +213,7 @@ async def backup_model(
 
     try:
         result["local"] = _local_backup(files, model_sha, symbol)
-    except Exception as exc:
+    except BACKUP_ERRORS as exc:
         msg = f"Backup local falló: {type(exc).__name__}: {exc}"
         logger.error("[MODEL-BACKUP] %s", msg)
         send_alert(AlertLevel.ERROR, "model_backup", msg, exc=exc)
@@ -310,7 +320,7 @@ async def restore_latest_model(symbol: str = LEGACY_SYMBOL) -> dict:
             restored.append(name)
         logger.warning("[MODEL-BACKUP] BUNDLE restaurado desde gs://%s/%s", MODEL_BUCKET, prefix)
         return {"status": "restored", "source": f"gs://{MODEL_BUCKET}/{prefix}", "files": restored}
-    except Exception as exc:
+    except BACKUP_ERRORS as exc:
         logger.error("[MODEL-BACKUP] Restauración falló: %s", exc)
         return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
 
@@ -325,7 +335,7 @@ async def run_scheduled_backup() -> list[dict]:
 
     try:
         enabled = build_registry_from_settings().enabled()
-    except Exception as exc:
+    except BACKUP_ERRORS as exc:
         send_alert(
             AlertLevel.ERROR, "model_backup",
             f"Backup programado: registry inaccesible — {type(exc).__name__}: {exc}", exc=exc,
@@ -341,7 +351,7 @@ async def run_scheduled_backup() -> list[dict]:
         symbol = ctx.config.symbol
         try:
             results.append(await backup_model(symbol=symbol))
-        except Exception as exc:
+        except BACKUP_ERRORS as exc:
             send_alert(
                 AlertLevel.ERROR, "model_backup",
                 f"Backup programado de {symbol} falló: {type(exc).__name__}: {exc}", exc=exc,

@@ -1,6 +1,7 @@
 import httpx
 import logging
 from xml.etree import ElementTree
+from services.error_taxonomy import LOOP_ERRORS
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,6 @@ async def get_macro_news(symbol: str = "EURUSD") -> str:
     except httpx.TimeoutException:
         logger.warning("Timeout scraping news from Investing.com")
         return "Macro data temporarily unavailable (timeout)."
-    except Exception as e:
+    except LOOP_ERRORS as e:
         logger.error(f"Error scraping news: {e}")
         return "Macro data unavailable."

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+from services.error_taxonomy import LOOP_ERRORS
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +110,7 @@ def compute_volume_profile(
             profile_strength=float(profile_strength),
         )
 
-    except Exception as exc:
+    except LOOP_ERRORS as exc:
         logger.warning("[VOL-PROFILE] Error calculando: %s", exc)
         return VolumeProfileResult(poc=float(closes[-1]), vah=highs.max(), val=lows.min(), vol_area_pct=0, profile_strength=0)
 
@@ -184,7 +185,7 @@ async def fetch_orderbook(symbol: str, levels: int = 10) -> Optional[dict]:
             )
             if res.status_code == 200:
                 return res.json()
-    except Exception as e:
+    except LOOP_ERRORS as e:
         logger.warning("[MICROSTRUCTURE] Orderbook fetch falló: %s", e)
     return None
 
@@ -235,7 +236,7 @@ def compute_ob_imbalance(
             depth_imbalance=float(depth_imbalance),
         )
 
-    except Exception as exc:
+    except LOOP_ERRORS as exc:
         logger.warning("[OB-IMBALANCE] Error: %s", exc)
         return OrderbookImbalanceResult(bid_ask_ratio=1.0, pressure=0.0, depth_imbalance=0.0)
 

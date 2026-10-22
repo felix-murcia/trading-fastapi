@@ -14,6 +14,7 @@ import re
 import traceback
 from enum import Enum
 from time import monotonic
+from services.error_taxonomy import HTTP_ERRORS
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +101,7 @@ def send_alert(
     # TODO: integrar Telegram/Slack/email cuando esté configurado
     try:
         _send_to_telegram(level, message, context)
-    except Exception:
+    except HTTP_ERRORS:
         # No dejar que un fallo en el canal de notificación mate la alerta
         logger.warning(f"Alerting channel failed: {context}")
 
@@ -126,5 +127,5 @@ def _send_to_telegram(level: AlertLevel, message: str, context: dict | None) -> 
             json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
             timeout=5.0,
         )
-    except Exception as e:
+    except HTTP_ERRORS as e:
         logger.warning("[ALERTING] Telegram falló: %s", e)

@@ -16,6 +16,7 @@ Sólo lectura: no toca el sistema vivo, no abre posiciones, no escribe en la BD.
 import asyncio
 import bisect
 import logging
+from services.error_taxonomy import DB_ERRORS
 
 logger = logging.getLogger(__name__)
 
@@ -225,6 +226,6 @@ async def _llm_replay_loop(interval_s: int = 1800) -> None:
                 "[LLM-REPLAY] %s | n=%s DD=%s",
                 r.get("verdict"), r.get("n_trades"), r.get("max_dd"),
             )
-        except Exception as exc:  # noqa: BLE001 — el vigilante nunca muere
+        except DB_ERRORS as exc:  # noqa: BLE001 — el vigilante nunca muere
             logger.warning("[LLM-REPLAY] fallo del ciclo: %s", exc)
         await asyncio.sleep(interval_s)

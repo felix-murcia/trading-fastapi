@@ -26,6 +26,7 @@ import json
 import os
 
 from core.rules import MIN_WIN_EUR, is_winning_close
+from services.error_taxonomy import LOOP_ERRORS
 
 LEDGER_PATH = os.environ.get(
     "DAILY_LEDGER_PATH",
@@ -49,7 +50,7 @@ async def build_daily_entry(symbol: str = "EURUSD") -> dict:
             r = await c.get(f"{settings.mt5_http_url}/api/v1/account/info")
             r.raise_for_status()
             equity = float(r.json().get("equity", 0.0)) or None
-    except Exception:  # noqa: BLE001
+    except LOOP_ERRORS:  # noqa: BLE001
         equity = None
 
     # trades del día + descomposición dirección correcta/incorrecta
@@ -66,12 +67,12 @@ async def build_daily_entry(symbol: str = "EURUSD") -> dict:
         # NO depende de que otro módulo haya refrescado la caché.
         broker_off = await broker_offset_hours(symbol)
         day_start = utc_day_bounds(now)[0]
-    except Exception:  # noqa: BLE001
+    except LOOP_ERRORS:  # noqa: BLE001
         try:
             from services.timebase import current_broker_offset, utc_day_bounds
             broker_off = current_broker_offset()
             day_start = utc_day_bounds(now)[0]
-        except Exception:  # noqa: BLE001
+        except LOOP_ERRORS:  # noqa: BLE001
             broker_off = 0
             day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     trades = await pool.fetch(
@@ -119,7 +120,7 @@ async def build_daily_entry(symbol: str = "EURUSD") -> dict:
         if os.path.exists(man):
             with open(man) as fh:
                 bundle_sha = json.load(fh).get("model_sha256", "")[:12] or None
-    except Exception:  # noqa: BLE001
+    except LOOP_ERRORS:  # noqa: BLE001
         bundle_sha = None
 
     # autoridad del segundo cerebro
@@ -141,7 +142,7 @@ async def build_daily_entry(symbol: str = "EURUSD") -> dict:
             "measured_at": a.get("measured_at"),
             "reason": a.get("reason"),
         }
-    except Exception as exc:  # noqa: BLE001
+    except LOOP_ERRORS as exc:  # noqa: BLE001
         authority = {"granted": None, "reason": f"medición falló: {type(exc).__name__}"}
 
     return {
@@ -216,7 +217,7 @@ async def record_all(symbols: list[str] | None = None) -> list[dict]:
     for sym in (symbols if symbols is not None else active_symbols()):
         try:
             out.append(await record_now(sym))
-        except Exception as exc:  # noqa: BLE001 — el registrador nunca muere
+        except LOOP_ERRORS as exc:  # noqa: BLE001 — el registrador nunca muere
             logging.getLogger(__name__).warning(
                 "[DAILY-LEDGER] %s: no se pudo registrar la línea: %s", sym, exc
             )
@@ -229,7 +230,7 @@ async def _daily_ledger_loop(interval_s: int = 3600) -> None:
     while True:
         try:
             await record_all()
-        except Exception as exc:  # noqa: BLE001 — el registrador nunca muere
+        except LOOP_ERRORS as exc:  # noqa: BLE001 — el registrador nunca muere
             import logging
             logging.getLogger(__name__).warning(
                 "[DAILY-LEDGER] no se pudo registrar la línea: %s", exc

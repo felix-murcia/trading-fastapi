@@ -58,6 +58,7 @@ import datetime as dt
 import logging
 import os
 from typing import Optional
+from services.error_taxonomy import LOOP_ERRORS
 
 logger = logging.getLogger(__name__)
 
@@ -259,7 +260,7 @@ async def get_authority(symbol: str) -> dict:
             return entry["data"]
     try:
         data = await _measure(symbol)
-    except Exception as exc:  # noqa: BLE001 — la autoridad NUNCA tumba el ciclo
+    except LOOP_ERRORS as exc:  # noqa: BLE001 — la autoridad NUNCA tumba el ciclo
         logger.warning(
             "[QWEN-AUTH] medición falló para %s (%s: %s) → veto inerte (fail-safe explícito)",
             symbol, type(exc).__name__, exc,
@@ -313,6 +314,6 @@ async def refresh_loop(symbol: str, interval_s: int = 900) -> None:
     while True:
         try:
             await get_authority(symbol)
-        except Exception as exc:  # noqa: BLE001
+        except LOOP_ERRORS as exc:  # noqa: BLE001
             logger.warning("[QWEN-AUTH] refresh falló para %s: %s", symbol, exc)
         await asyncio.sleep(interval_s)

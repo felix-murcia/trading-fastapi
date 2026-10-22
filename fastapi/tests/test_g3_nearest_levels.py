@@ -33,7 +33,8 @@ from ml.trading_env_v2 import (
     production_tp,
     target_level_candidates,
 )
-from services.position_sizing import PIP_SIZE, size_ppo_position
+from core.rules import size_ppo_position
+from services.position_sizing import PIP_SIZE
 from services.trade_contract import evaluate_trade
 
 PIP = 0.0001
@@ -202,7 +203,8 @@ class TestVariantB:
         price = float(feats["close"].iloc[-1])
         atr_pips = float(feats["atr"].iloc[-1]) / PIP
         for side in (1, -1):
-            cands = target_level_candidates(feats, side, atr_pips, price)
+            cands = target_level_candidates(
+                feats, side, atr_pips, price, pip_size=PIP)
             assert isinstance(cands, list)
             dists = [abs(c - price) / PIP for c in cands]
             assert dists == sorted(dists), "los candidatos van de más cerca a más lejos"
@@ -211,6 +213,28 @@ class TestVariantB:
                     "un candidato a menos de mult×ATR del precio es ruido"
                 )
                 assert d >= MIN_LEVEL_PIPS - 1e-6
+
+    def test_candidates_band_is_price_not_pips(self):
+        """Regresión 2026-10-22: la banda va en PRECIO.
+
+        Con ATR=10 pips (banda 7,5 pips = 0,00075) un techo a 20 pips
+        (0,0020) DEBE aparecer. Antes se comparaba 0,0020 >= 7,5 → falso:
+        la lista salía siempre vacía, el serve caía a 2×SL y la variante B
+        (TP = nivel que paga) nunca se ejecutó. El test anterior no lo veía
+        porque una lista vacía pasaba todas sus aserciones.
+        """
+        df = pd.DataFrame({
+            "high": [1.1000] * 10,
+            "low": [1.0990] * 10,
+            "swing_high": [0.0] * 5 + [1.0] + [0.0] * 4,
+            "swing_low": [0.0] * 10,
+        })
+        df.loc[5, "high"] = 1.1020          # swing confirmado a 20 pips
+        got = target_level_candidates(df, 1, 10.0, 1.1000, pip_size=PIP)
+        assert got == [1.1020]
+        # 4 pips < MIN_LEVEL_PIPS ⇒ no es un techo utilizable
+        df.loc[5, "high"] = 1.1004
+        assert target_level_candidates(df, 1, 10.0, 1.1000, pip_size=PIP) == []
 
     def test_tp_is_the_nearest_candidate_that_pays(self):
         price = 1.1050
@@ -248,7 +272,7 @@ class TestVariantB:
         sobre las distancias candidatas. La paridad que queda que verificar
         es la de las PIEZAS compartidas: SL geométrico y candidatos de TP.
         """
-        import routers.ai as ai_router
-        assert ai_router.production_sl is production_sl
-        assert ai_router.target_level_candidates is target_level_candidates
-        assert ai_router.evaluate_trade is evaluate_trade
+        import services.trade_setup as trade_setup
+        assert trade_setup.production_sl is production_sl
+        assert trade_setup.target_level_candidates is target_level_candidates
+        assert trade_setup.evaluate_trade is evaluate_trade

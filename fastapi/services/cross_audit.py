@@ -23,6 +23,7 @@ Sólo lectura: no muta el trading. Publica su veredicto en el ledger
 import asyncio
 import datetime as dt
 import logging
+from services.error_taxonomy import LOOP_ERRORS
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ async def _mt5_alive() -> bool:
         async with httpx.AsyncClient(timeout=5.0) as c:
             r = await c.get(f"{settings.mt5_http_url}/api/v1/account/info")
             return r.status_code == 200
-    except Exception:  # noqa: BLE001
+    except LOOP_ERRORS:  # noqa: BLE001
         return False
 
 
@@ -83,7 +84,7 @@ async def run_cross_audit(symbol: str = "EURUSD") -> dict:
                 "delta": round(delta, 4), "tolerance": TOL_SKILL,
                 "n_recomputed": recomputed.get("n"), "n_published": published.get("n"),
             })
-    except Exception as exc:  # noqa: BLE001
+    except LOOP_ERRORS as exc:  # noqa: BLE001
         checks.append({"check": "llm_skill", "status": _status_error(mt5_alive),
                        "error": f"{type(exc).__name__}: {exc}"})
 
@@ -101,7 +102,7 @@ async def run_cross_audit(symbol: str = "EURUSD") -> dict:
             "expectancy_eur": live.get("expectancy_eur"),
             "pnl_eur": live.get("pnl_eur"),
         })
-    except Exception as exc:  # noqa: BLE001
+    except LOOP_ERRORS as exc:  # noqa: BLE001
         checks.append({"check": "live_track_record", "status": "error", "error": str(exc)})
 
     # ── 3) PSI de drift (recomputado sobre la ventana viva) ────────────────
@@ -134,7 +135,7 @@ async def run_cross_audit(symbol: str = "EURUSD") -> dict:
                 checks.append({"check": "drift_psi", "status": "sin_baseline"})
         else:
             checks.append({"check": "drift_psi", "status": "sin_datos"})
-    except Exception as exc:  # noqa: BLE001
+    except LOOP_ERRORS as exc:  # noqa: BLE001
         checks.append({"check": "drift_psi", "status": _status_error(mt5_alive), "error": str(exc)})
 
     # ── 4) benchmark (muestra de la serie viva, con la definición canónica) ─
@@ -196,7 +197,7 @@ async def run_cross_audit(symbol: str = "EURUSD") -> dict:
                 checks.append({"check": "benchmark_sma200", "status": "sin_datos"})
         else:
             checks.append({"check": "benchmark_sma200", "status": "sin_datos"})
-    except Exception as exc:  # noqa: BLE001
+    except LOOP_ERRORS as exc:  # noqa: BLE001
         checks.append({"check": "benchmark_sma200", "status": _status_error(mt5_alive), "error": str(exc)})
 
     # ── 5) EDGE VIVO del par (G2/mapa de edge) ──────────────────────────
@@ -229,7 +230,7 @@ async def run_cross_audit(symbol: str = "EURUSD") -> dict:
                         "sistema opera sobre una señal apagada: la expectativa "
                         "viva del sistema tenderá a decaer",
             })
-    except Exception as exc:  # noqa: BLE001
+    except LOOP_ERRORS as exc:  # noqa: BLE001
         checks.append({"check": "edge_vivo", "status": "error", "error": str(exc)})
 
     # ── 6) LATENCIA de los ciclos (C3) ───────────────────────────────────
@@ -263,7 +264,7 @@ async def run_cross_audit(symbol: str = "EURUSD") -> dict:
                         "supera 52 s hay que actuar (modelo más rápido o "
                         "prompt más corto), no al revés",
             })
-    except Exception as exc:  # noqa: BLE001
+    except LOOP_ERRORS as exc:  # noqa: BLE001
         checks.append({"check": "latencia_ciclos", "status": "error", "error": str(exc)})
 
     discrepancias = [c for c in checks if c.get("status") in ("discrepancia", "error")]
@@ -309,7 +310,7 @@ async def run_cross_audit(symbol: str = "EURUSD") -> dict:
                 f"Auditoría cruzada: {len(discrepancias)} discrepancia(s) — "
                 + ", ".join(c["check"] for c in discrepancias),
             )
-        except Exception as exc:  # noqa: BLE001
+        except LOOP_ERRORS as exc:  # noqa: BLE001
             logger.warning("[CROSS-AUDIT] alerta no enviada: %s", exc)
     else:
         logger.info("[CROSS-AUDIT] %s: %d checks sin discrepancia", veredicto["verdict"], len(checks))
@@ -324,6 +325,6 @@ async def _cross_audit_loop(interval_s: int = 1800) -> None:
     while True:
         try:
             await run_cross_audit()
-        except Exception as exc:  # noqa: BLE001 — el vigilante nunca muere
+        except LOOP_ERRORS as exc:  # noqa: BLE001 — el vigilante nunca muere
             logger.warning("[CROSS-AUDIT] fallo del ciclo: %s", exc)
         await asyncio.sleep(interval_s)

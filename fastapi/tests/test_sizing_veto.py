@@ -37,7 +37,8 @@ ACTION_FEASIBLE = [0.80, 0.18, 0.15, 0.15]
 @pytest.fixture(autouse=True)
 def fresh_sizing_warn_state(monkeypatch):
     """Estado del rate-limit por test (cada test parte de 0 avisos)."""
-    monkeypatch.setattr(ai, "_SIZING_WARN_TS", {})
+    from services import veto_chain
+    monkeypatch.setattr(veto_chain, "_SIZING_WARN_TS", {})
 
 
 def _post_predict(action, monkeypatch):

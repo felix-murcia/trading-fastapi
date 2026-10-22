@@ -35,10 +35,10 @@ sys.path.insert(0, "/home/felix/Public/n8n/fastapi")
 
 from ml.trading_env_v2 import (  # noqa: E402
     NEAREST_LEVEL_ATR_MULT,
-    SPREAD_BUFFER_PIPS,
     engineer_market_features,
 )
-from services.position_sizing import pip_value_per_lot, size_ppo_position  # noqa: E402
+from core.rules import SPREAD_BUFFER_PIPS, size_ppo_position
+from services.position_sizing import pip_value_per_lot  # noqa: E402
 
 H = 12
 EQUITY, RISK_PCT = 489.49, 0.02

@@ -24,6 +24,7 @@ import httpx
 
 from config import settings
 from db.connection import get_pool
+from services.error_taxonomy import DB_ERRORS
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +130,6 @@ async def _equity_curve_loop(interval_s: int = 60) -> None:
     while True:
         try:
             await record_snapshot()
-        except Exception as exc:  # noqa: BLE001 — el registrador nunca muere
+        except DB_ERRORS as exc:  # noqa: BLE001 — el registrador nunca muere
             logger.warning("[EQUITY] no se pudo guardar la foto: %s", exc)
         await asyncio.sleep(interval_s)

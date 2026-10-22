@@ -14,6 +14,7 @@ from routers import orders, smc, journal
 from services.performance_metrics import get_metrics, reset_metrics
 from services.risk_state_store import init_risk_state
 from services.structured_logging import StructuredLoggingMiddleware
+from services.error_taxonomy import DB_ERRORS, HTTP_ERRORS, LOOP_ERRORS, PARSE_ERRORS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -37,7 +38,7 @@ async def _mcp_health_loop():
             connected = "balance" in data
             _mcp_status["connected"] = connected
             _mcp_status["detail"] = f"equity={data.get('equity')}" if connected else data.get("detail", "unknown")
-        except Exception as exc:
+        except LOOP_ERRORS as exc:
             connected = False
             _mcp_status["connected"] = False
             _mcp_status["detail"] = str(exc)
@@ -76,7 +77,7 @@ async def _mcp_health_loop():
                         context={"url": settings.mt5_http_url,
                                  "detail": str(_mcp_status["detail"])[:200]},
                     )
-                except Exception as exc:  # noqa: BLE001 — la alerta nunca tumba el bucle
+                except HTTP_ERRORS as exc:  # noqa: BLE001 — la alerta nunca tumba el bucle
                     logger.warning("[MCP-HEALTH] no se pudo emitir la alerta: %s", exc)
             if connected and was_connected is False:
                 try:
@@ -86,7 +87,7 @@ async def _mcp_health_loop():
                         "Servidor MT5 CONECTADO de nuevo — la operativa se reanuda "
                         f"({_mcp_status['detail']})",
                     )
-                except Exception as exc:  # noqa: BLE001
+                except HTTP_ERRORS as exc:  # noqa: BLE001
                     logger.warning("[MCP-HEALTH] no se pudo emitir la alerta: %s", exc)
             was_connected = connected
 
@@ -102,7 +103,7 @@ async def lifespan(app: FastAPI):
     try:
         from services.trade_journal import init_journal_table
         await init_journal_table()
-    except Exception as exc:
+    except DB_ERRORS as exc:
         logger.warning("[JOURNAL] init_journal_table falló: %s", exc)
 
     # Curva de equity mark-to-market (2026-10-21): el DD deja de ser una
@@ -111,7 +112,7 @@ async def lifespan(app: FastAPI):
     try:
         from services.equity_curve import init_equity_table
         await init_equity_table()
-    except Exception as exc:
+    except DB_ERRORS as exc:
         logger.warning("[EQUITY] init_equity_table falló: %s", exc)
 
     # P3-1d: UN guardián POR PAR habilitado — se crea ANTES del baseline del
@@ -131,11 +132,11 @@ async def lifespan(app: FastAPI):
     try:
         async with httpx.AsyncClient(timeout=5.0) as c:
             r = await c.get(settings.mt5_http_url + "/api/v1/account/info")
-            r.raise_for_status()
-            data = r.json()
+            data = r.json() if r.status_code == 200 else {}
             equity = data.get("equity", data.get("balance", 0)) if ("balance" in data or "equity" in data) else 0
         boot_equity = float(equity) if equity and float(equity) > 0 else None
-    except Exception as exc:
+    # MCP caído o payload raro al arrancar: baseline en el primer observe().
+    except (HTTP_ERRORS + PARSE_ERRORS) as exc:
         logger.warning("[RISK-STATE] No se pudo leer equity para el baseline: %s", exc)
         boot_equity = None
     # T-31.9 (2026-10-20): el desfase del bróker se detecta ANTES de
@@ -148,7 +149,7 @@ async def lifespan(app: FastAPI):
         from services.timebase import broker_offset_hours
         off = await broker_offset_hours("EURUSD")
         logger.info("[TIMEBASE] Desfase del bróquer detectado al arrancar: %+d h", off)
-    except Exception as exc:
+    except LOOP_ERRORS as exc:
         logger.warning("[TIMEBASE] No se pudo detectar el desfase del bróquer: %s", exc)
 
     try:

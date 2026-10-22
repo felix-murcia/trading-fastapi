@@ -27,6 +27,7 @@ from services.order_validator import (
     OrderValidationError,
 )
 from services.usd_exposure import usd_conflict
+from services.error_taxonomy import DB_ERRORS, LOOP_ERRORS
 
 
 async def _audit(cycle_id: str, event: str, data: dict) -> None:
@@ -36,7 +37,7 @@ async def _audit(cycle_id: str, event: str, data: dict) -> None:
             "INSERT INTO audit_log(cycle_id, event, data) VALUES($1,$2,$3)",
             cycle_id, event, json.dumps(data),
         )
-    except Exception as exc:
+    except DB_ERRORS as exc:
         logger.warning("[ORDER-MANAGER] audit_log failed: %s", exc)
 
 
@@ -124,7 +125,7 @@ async def _total_risk_eur(open_all: list[dict], equity: float) -> tuple[float, s
         rows = await get_candles("EURUSD", "H1", 1)
         if rows:
             rate = float(rows[-1]["close"])
-    except Exception as exc:   # logueado + bloqueo explícito (no silencioso)
+    except LOOP_ERRORS as exc:   # logueado + bloqueo explícito (no silencioso)
         logger.warning(
             "[RISK] G2-5: EURUSD inaccesible para conversión USD→EUR: %r", exc
         )
@@ -251,7 +252,7 @@ async def prepare(req: OrderPrepareRequest) -> OrderPrepareResponse:
         if not can_open:
             await _audit(req.cycle_id, "order_rejected", {"reason": f"risk_guardian_blocked:{reason}", "symbol": req.symbol})
             return _reject(f"risk_guardian_blocked: {reason}")
-    except Exception as rg_err:
+    except LOOP_ERRORS as rg_err:
         logger.error("[ORDER-MANAGER] RiskGuardian check falló: %s — bloqueando orden", rg_err)
         await _audit(req.cycle_id, "order_rejected", {"reason": f"risk_guardian_error:{rg_err}", "symbol": req.symbol})
         return _reject(f"risk_guardian_error: {rg_err}")

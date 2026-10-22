@@ -159,3 +159,23 @@ hardcodeado con un comentario «aprox» (heurística dentro del dinero). Para
 quote=EUR el pip son 10,00 € exactos (0,10 × 100 oz). XAUEUR no está en
 `PAIRS`, así que hoy es inalcanzable — por eso no se toca sin orden, pero
 queda declarado.
+
+## H-N — cerrado: el filtro no paga y el bug real era de unidades (2026-10-22)
+
+**Decisión de dinero (con medición, no con opinión):** NO se añade R:R mínimo
+ni tope de SL/ATR. Sobre 29 976 velas H1 compartidas (EURUSD + USDCHF), base
+agregada **n = 114 959, E[R] = −0,068 R**: R:R ≥ 1,0 conserva 36,8 % de señales
+con **Δ+0,003 R**; SL/ATR ≤ 1,5 conserva 41,4 % con **Δ−0,004 R**; todos los
+cortes quedan en **Δ ≤ +0,007 R** (ruido) y los buckets no son monótonos.
+Niveles fijos vs 2×SL: EURUSD −0,072 (n = 57 987) vs −0,061 (n = 59 938);
+USDCHF −0,065 vs −0,069. Evidencia:
+`evidence/2026-10-22-hn-rr-gate.txt` · `scripts/measure_rr_gate.py`.
+
+**Bug real corregido (unidad):** `target_level_candidates` comparaba una banda
+en **pips** contra distancias en **precio** ⇒ 0 candidatos en producción; el
+serve caía al fallback `2×SL` mientras el env usaba el techo más cercano ⇒
+**divergencia train/serve**. La banda ahora es
+`max(atr_pips × mult, MIN_LEVEL_PIPS) × pip_size` con `pip_size` obligatorio.
+Regresión: `tests/test_g3_nearest_levels.py::test_candidates_band_is_price_not_pips`.
+La corrección es de paridad/corrección, **no de rentabilidad**: con entrada
+aleatoria el E[R] es un empate (EURUSD −0,011 R, USDCHF +0,004 R).

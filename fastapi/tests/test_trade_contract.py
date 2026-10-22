@@ -121,6 +121,7 @@ class TestConversionEUR:
         assert pip_value_eur_per_lot("EURUSD", eurusd, eurusd_price=eurusd) == pytest.approx(8.897, rel=1e-3)
 
     def test_el_serve_usa_las_mismas_funciones(self):
-        import routers.ai as ai_router
-        assert ai_router.evaluate_trade is evaluate_trade
-        assert ai_router.pip_value_eur_per_lot is pip_value_eur_per_lot
+        # El router ya no decide dinero: la unidad que lo hace es trade_setup.
+        import services.trade_setup as trade_setup
+        assert trade_setup.evaluate_trade is evaluate_trade
+        assert trade_setup.pip_value_eur_per_lot is pip_value_eur_per_lot

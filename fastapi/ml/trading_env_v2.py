@@ -10,7 +10,7 @@ ForexTradingEnv v3 — Arquitectura Óptima para RL (PPO)
   salen de `production_stops()` — MISMA fórmula que `/api/v1/ai/predict` — y el
   trailing del EA está modelado (`_apply_trailing`). El MDP entrenado es el MDP
   ejecutado: lo que el modelo aprende es exactamente lo que el sistema ejecuta.
-- P2-2: el sizing está delegado en `services.position_sizing.size_ppo_position`
+- P2-2: el sizing está delegado en `core.rules.size_ppo_position`
   (MISMA función que `/predict`): la cabeza `volume` modula el riesgo entre 0 y
   `risk_pct` del balance; volumen 0 → sin entrada (paridad con el HOLD por
   sizing inviable de `/predict`).
@@ -49,7 +49,9 @@ import pandas as pd
 from core.rules import MIN_WIN_EUR, is_winning_close
 
 # P2-2: el sizing del PPO vive en position_sizing (misma función que /predict)
-from services.position_sizing import size_ppo_position
+from core.rules import SPREAD_BUFFER_PIPS, size_ppo_position
+
+_PARSE_ERRORS = (ValueError, TypeError, KeyError, IndexError)
 
 
 MARKET_FEATURES = (
@@ -187,14 +189,11 @@ REWARD_V3_DIRECTION_HORIZON_BARS = 24
 #   ⇒ R:R 0,25 y beneficio < 3 € (ruido, no un techo). Medido: 0,75×ATR da
 #   SL 16,5-17,4 p y TP 15,1-15,8 p con P(TP) 39-40 % (vs 18 % del 3×ATR).
 # · MIN_LEVEL_PIPS: por debajo, el nivel no es un suelo/techo utilizable.
-# · SPREAD_BUFFER_PIPS: el buffer que el EA añade al colocar el SL
-#   (`MathMax(spread, 2.0*pipSize)`). El sistema debe conocer la distancia
-#   REAL ⇒ `effective_sl_pips()`. Constante ESPECJADA en el EA (v14.0) — si
-#   cambia ahí, cambia aquí (el audit y el sizing dejarían de ver el stop
-#   real: el riesgo de la operación excedería el presupuesto un 13 % medido).
+# · SPREAD_BUFFER_PIPS (core.rules): el buffer que el EA añade al SL. El
+#   sistema debe conocer la distancia REAL ⇒ `effective_sl_pips()`; con el
+#   buffer fuera del sizing, el riesgo real superaba el presupuesto un 13 %.
 NEAREST_LEVEL_ATR_MULT = 0.75
 MIN_LEVEL_PIPS = 5.0
-SPREAD_BUFFER_PIPS = 2.0
 # Ventana de búsqueda del suelo/techo (velas H1): "el más cercano" entre los
 # niveles de las últimas 120 velas (la misma ventana que el obs del modelo).
 NEAREST_LEVEL_WINDOW = 120
@@ -748,6 +747,8 @@ def target_level_candidates(
     side: int,
     atr_pips: float,
     current_price: float,
+    *,
+    pip_size: float,
     mult: float = NEAREST_LEVEL_ATR_MULT,
     window: int = NEAREST_LEVEL_WINDOW,
     max_candidates: int = 6,
@@ -768,7 +769,12 @@ def target_level_candidates(
         return []
     high = df["high"].to_numpy(dtype=float)
     low = df["low"].to_numpy(dtype=float)
-    band = atr_pips * mult
+    # 2026-10-22: la banda se calcula en PIPS y se convierte a PRECIO. Antes
+    # se comparaba `(nivel − precio) >= atr_pips × mult` (0,0012 >= 7,5):
+    # siempre falso ⇒ 0 candidatos ⇒ el TP caía al fallback 2×SL y la
+    # variante B nunca llegó a servir. El suelo MIN_LEVEL_PIPS es el mismo
+    # que exige `production_tp`, para que un nivel de 4 pips no sea "techo".
+    band = max(atr_pips * mult, MIN_LEVEL_PIPS) * pip_size
     if side > 0:
         swing = df["swing_high"].to_numpy(dtype=float)
         levels = high
@@ -1100,7 +1106,7 @@ class ForexTradingEnvV2(gym.Env):
             return {}
         try:
             time_col_ts = pd.to_datetime(self.df['time'], utc=True).apply(lambda x: x.timestamp())
-        except Exception:
+        except _PARSE_ERRORS:
             return {}
 
         indexed = {}
@@ -1121,7 +1127,7 @@ class ForexTradingEnvV2(gym.Env):
             try: return float(value)
             except ValueError:
                 try: return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
-                except Exception: return None
+                except _PARSE_ERRORS: return None
         return None
 
     def _get_observation(self) -> np.ndarray:
@@ -1369,7 +1375,7 @@ class ForexTradingEnvV2(gym.Env):
                                 if _lot_probe * self.pip_size * self.lot_size > 0 else 0.0)
             _cands = target_level_candidates(
                 self.df, 1 if target_pos == 1 else -1,
-                float(candle["atr"]) / self.pip_size, close_price,
+                float(candle["atr"]) / self.pip_size, close_price, pip_size=self.pip_size,
             )
             _, tp_pips_c = production_stops_with_paying_tp(
                 float(candle["atr"]), self.pip_size,
@@ -1380,7 +1386,7 @@ class ForexTradingEnvV2(gym.Env):
                 tp_candidates=_cands,
                 min_tp_pips=_min_tp_pips,
             )
-            # P2-2: sizing delegado en position_sizing.size_ppo_position (misma
+            # P2-2: sizing delegado en core.rules.size_ppo_position (misma
             # función que /predict): la cabeza `volume` modula el riesgo
             # (0…risk_pct del balance) y el pip_value es pip_size × lot_size
             # (la convención de dinero de este env).

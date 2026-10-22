@@ -16,6 +16,7 @@ from typing import Optional
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
+from services.error_taxonomy import DB_ERRORS
 
 trace_id_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("trace_id", default=None)
 
@@ -154,7 +155,9 @@ async def log_to_audit(audit_event: str, data: dict, pool=None, cycle_id: str | 
             audit_event,
             json.dumps(enriched),
         )
-    except Exception as exc:
+    # `get_pool()` señala "pool no inicializado" con RuntimeError, ya incluido
+    # en DB_ERRORS; la auditoría es best-effort y lo declara.
+    except DB_ERRORS as exc:
         logging.getLogger(__name__).warning(
             "[trace_id=%s] No se pudo guardar audit_log: %s", trace, exc
         )

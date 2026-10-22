@@ -31,7 +31,7 @@ class TestLogToAuditFallback:
     async def test_pool_execute_failure_logs_warning(self, caplog):
         """Should log warning when pool.execute fails."""
         mock_pool = MagicMock()
-        mock_pool.execute = AsyncMock(side_effect=Exception("DB connection lost"))
+        mock_pool.execute = AsyncMock(side_effect=OSError("DB connection lost"))
 
         with caplog.at_level(logging.WARNING):
             await log_to_audit("test_event", {"key": "value"}, pool=mock_pool)

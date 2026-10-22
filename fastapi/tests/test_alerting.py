@@ -47,7 +47,7 @@ class TestSendAlert:
     def test_send_alert_no_telegram_if_not_configured(self):
         """If Telegram not configured, should not fail."""
         with patch("services.alerting._send_to_telegram") as mock_tg:
-            mock_tg.side_effect = Exception("Telegram not configured")
+            mock_tg.side_effect = OSError("Telegram not configured")
             # _send_to_telegram catches Exception internally (except Exception: pass)
             # so send_alert itself must not propagate — it should complete normally
             try:

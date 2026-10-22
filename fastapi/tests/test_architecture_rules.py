@@ -34,10 +34,8 @@ INFRA_RAIZ = ("routers", "db", "httpx", "asyncpg", "psycopg", "fastapi")
 
 # Deuda de capas DECLARADA (hoy no se puede pagar sin tocar el env de
 # entrenamiento). Está en el punto de mira; ninguna entrada nueva se acepta.
-#   · el env usa el sizing P2-2 (misma fórmula que /predict);
 #   · el trainer promueve bundles a través del registry.
 CAPAS_DEUDA = {
-    ("ml/trading_env_v2.py", "services.position_sizing"),
     ("ml/train_ppo_v3.py", "services.model_registry"),
 }
 
@@ -103,8 +101,8 @@ def test_dinero_una_sola_puerta():
         "la conversión pips→EUR sólo puede usarla el contrato (decide) y el "
         "guardián de riesgo (lee); nadie más la reimplementa"
     )
-    assert importadores.get("evaluate_trade") == {"routers/ai.py"}, (
-        "lote+TP sólo los decide el contrato, en el serve"
+    assert importadores.get("evaluate_trade") == {"services/trade_setup.py"}, (
+        "lote+TP sólo los decide el contrato, en trade_setup"
     )
     assert not importadores.get("min_lot_for_protection"), (
         "el suelo de protección vive en el contrato (I2), no en una función aparte"

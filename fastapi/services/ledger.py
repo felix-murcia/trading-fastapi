@@ -28,6 +28,7 @@ from typing import Optional
 
 from core.rules import MIN_WIN_EUR
 from services import qwen_authority
+from services.error_taxonomy import LOOP_ERRORS
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +62,7 @@ async def _live_track_record(symbol: str = "EURUSD") -> dict:
             FROM trade_outcomes WHERE symbol = $1
             """, symbol, MIN_WIN_EUR,
         )
-    except Exception as exc:  # noqa: BLE001
+    except LOOP_ERRORS as exc:  # noqa: BLE001
         logger.warning("[LEDGER] no se pudo leer el track record vivo: %s", exc)
         return {}
     if not rows:
@@ -236,7 +237,7 @@ async def _edge_decay_map(symbols: tuple = EDGE_MAP_SYMBOLS) -> dict:
                         "edge_alive exige que el IC 95 % del skill esté por "
                         "encima de 0 (no basta con superar el 50 %)",
             }
-        except Exception as exc:  # noqa: BLE001
+        except LOOP_ERRORS as exc:  # noqa: BLE001
             out[sym] = {"error": f"{type(exc).__name__}: {exc}"}
     return out
 
@@ -293,7 +294,7 @@ async def build_ledger(symbol: str = "EURUSD") -> dict:
     # ── 2) el LLM (veto con autoridad condicionada; candidato E4) ─────────
     try:
         auth = qwen_authority.peek(symbol) or {}
-    except Exception as exc:  # noqa: BLE001
+    except LOOP_ERRORS as exc:  # noqa: BLE001
         auth = {}
         logger.warning("[LEDGER] autoridad no disponible: %s", exc)
     llm = {
@@ -339,7 +340,7 @@ async def build_ledger(symbol: str = "EURUSD") -> dict:
     try:
         from services.llm_replay import replay_llm_as_decider
         replay = await replay_llm_as_decider(symbol)
-    except Exception as exc:  # noqa: BLE001
+    except LOOP_ERRORS as exc:  # noqa: BLE001
         logger.warning("[LEDGER] replay del LLM no disponible: %s", exc)
         replay = {"error": f"{type(exc).__name__}: {exc}"}
     ledger["sources"]["llm"]["replay_as_decider"] = replay

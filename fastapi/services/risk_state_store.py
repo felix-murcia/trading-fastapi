@@ -27,6 +27,7 @@ from services.risk_guardian import (
     get_account_state,
     registered_guardians,
 )
+from services.error_taxonomy import DB_ERRORS
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +59,7 @@ async def init_risk_state(current_equity: float | None) -> None:
     try:
         from services.timebase import broker_today
         today = broker_today()
-    except Exception:  # noqa: BLE001 — degrada al día UTC, nunca rompe
+    except DB_ERRORS:  # noqa: BLE001 — degrada al día UTC, nunca rompe
         today = datetime.now(timezone.utc).date()
     row = await pool.fetchrow(
         "SELECT day, daily_start_equity, peak_equity FROM risk_account_state WHERE id = 1"
@@ -141,7 +142,7 @@ async def flush_risk_state(*, symbol: str | None = None) -> None:
                 _PAIR_UPSERT, symbol, guardian.state.consecutive_losses,
                 guardian.state.last_alert_ts,
             )
-    except Exception:
+    except DB_ERRORS:
         if acc_dirty:
             account.dirty = True
         if pair_dirty:

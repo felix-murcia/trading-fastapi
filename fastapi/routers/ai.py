@@ -19,7 +19,6 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from config import settings
 from core.container import build_registry_from_settings
 from core.pair import PairRegistry, default_model_path
-from core.rules import MIN_WIN_EUR
 from db.connection import get_pool
 from ml.trading_env_v2 import (
     CHURN_BARS,
@@ -32,13 +31,10 @@ from ml.trading_env_v2 import (
     build_v3_observation,
     decode_v3_direction,
     derive_obs_contract,
-    effective_sl_pips,
     engineer_market_features,
     get_market_features,
     join_higher_tf_channels,
-    production_sl,
     stop_geometry_kind,
-    target_level_candidates,
 )
 from services.auto_retrain import (
     approve_retrain as _approve_retrain,
@@ -57,18 +53,21 @@ from services.rule_decider import (  # G3 (2026-10-20): decisor por REGLA
     RULE_MOMENTUM24_VOLUME_NORM,
     momentum24_signal,
 )
-from services.quorum import collect_votes, detect_lateral, evaluate
 from services.memory_client import build_memory_query, fetch_relevant_memories
 from services.news_filter import get_upcoming_news, is_news_blackout
 from services.performance_metrics import record_cycle_metrics
 from services.risk_guardian import observe_equity
 from services.risk_state_store import flush_risk_state
-from services.trade_contract import evaluate_trade, pip_value_eur_per_lot
-from services.position_sizing import (
-    PIP_SIZE,
-    is_supported,
-    size_ppo_position,
+from services.trade_setup import prepare_trade
+from services.veto_chain import (
+    MechanicalInputs,
+    apply_bias_veto,
+    apply_mechanical_vetoes,
+    apply_sizing_veto,
+    bias_veto_pending,
+    evaluate_quorum,
 )
+from services.position_sizing import PIP_SIZE, is_supported
 from services.order_manager import mark_order_filled
 from services.qwen_client import query_qwen_unified
 from services.structured_logging import log_to_audit
@@ -79,6 +78,7 @@ from services.strategist import (
     fetch_last_exit,
 )
 from .deps import verify_token
+from services.error_taxonomy import DB_ERRORS, LOOP_ERRORS, PARSE_ERRORS
 
 
 class _DummyEnv(gym.Env):
@@ -133,7 +133,6 @@ TP_MAX_NORM = 0.50
 # La verdad completa (sizing_below_min + veto_reason sizing_veto) se escribe
 # en audit_log EN TODOS los ciclos — el rate-limit solo silencia el ruido de
 # `docker logs` (antes: 21 ERROR "sizing inviable" en una ventana).
-_SIZING_WARN_TS: dict[str, float] = {}
 
 # Histeresis CLOSE K=2 ciclos (ítem cierres tempranos, 2026-10-12): el
 # contrafactual con datos reales mostró que los cierres `ea` (zona muerta)
@@ -155,7 +154,6 @@ def _dead_zone_close(symbol: str, decision: str, env_position: int = 1) -> bool:
     count = _DEAD_ZONE_COUNTER.get(symbol, 0) + 1
     _DEAD_ZONE_COUNTER[symbol] = count
     return count >= 2
-_SIZING_WARN_INTERVAL_S = 600.0
 
 
 async def _qwen_veto_authorized(symbol: str, cycle_id: str) -> bool:
@@ -171,7 +169,7 @@ async def _qwen_veto_authorized(symbol: str, cycle_id: str) -> bool:
     from services import qwen_authority
     try:
         auth = await qwen_authority.get_authority(symbol)
-    except Exception as exc:  # noqa: BLE001 — el veto NUNCA tumba el ciclo
+    except DB_ERRORS as exc:  # noqa: BLE001 — el veto NUNCA tumba el ciclo
         logger.warning(
             "[%s] VETO BIAS ║ autoridad del LLM no verificable (%s: %s) → SIN veto",
             cycle_id, type(exc).__name__, exc,
@@ -276,7 +274,7 @@ def _broker_offset_hours(candles: list) -> int:
     from services.market_time import broker_offset_hours_from_candles
     try:
         return broker_offset_hours_from_candles(candles)
-    except Exception:  # noqa: BLE001
+    except PARSE_ERRORS:  # noqa: BLE001
         return 0
 
 
@@ -1278,82 +1276,34 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         decision = "HOLD"
     ml_prob = float(np.clip(abs(direction), 0.1, 0.99))
 
-    # G3-2 (2026-10-21): SL/TP de la RESPUESTA — geometría SUELO/TECHO MÁS
-    # CERCANO con la DIRECCIÓN objetivo (LONG: SL bajo el suelo, TP en el
-    # techo; SHORT: al revés). Se calcula AQUÍ, después del decode, porque
-    # depende de la dirección: antes se calculaba antes del decode y con la
-    # posición actual, lo que sólo funcionaba en la rama plana (fallback ATR)
-    # ⇒ el env entrenaba una geometría y producción otra (paridad rota 10-08).
-    # `sl_pips_geom` es lo que se envía al EA (que añade su buffer de spread);
-    # `sl_pips` es la distancia REAL del stop (geom + buffer) ⇒ es la que
-    # debe usar el sizing y el audit (si no, el riesgo real de la posición
-    # excede el presupuesto: 13 % medido el 21-10).
-    #
-    # Variante B (2026-10-22): el TP es el techo más cercano QUE PAGA (≥ el
-    # mínimo de clasificación) ⇒ el orden es SL → lote → TP. Medido: +15-17 pp
-    # de señales en EURUSD y +6-8 pp en USDCHF con la misma expectativa por
-    # operación (scripts/compare_geometry_variants.py).
-    sl_pips_geom = production_sl(
-        current_atr, pip_size,
-        direction=target_pos,
-        floor_below=floor_below or None,
-        ceiling_above=ceiling_above or None,
-        current_price=current_price,
-    )
-    sl_pips = effective_sl_pips(sl_pips_geom)
-
-    # ── CONTRATO DE DINERO (2026-10-22): lote y TP se deciden JUNTOS ────────
-    # Sustituye la cadena probe→suelo-de-protección→tope-de-riesgo→gate-de-
-    # recompensa (cuatro sitios, cuatro conversiones de dinero) por UNA
-    # función pura que verifica en EUR NETOS de costes:
-    #   I1 riesgo ≤ equity×risk_pct · I2 riesgo ≥ Safe-4 · I3 TP neto ≥ Safe-4
-    # Medido en la orden 80 (USDCHF 22-10): violaba I1 (+13,5 %), I2 e I3 a
-    # la vez (TP bruto 3,34 € < 4 €) porque cada trozo usaba su conversión.
-    # Ver services/trade_contract.py.
+    # G3-2 / H-N (2026-10-22): geometría, lote y TP se deciden en UNA unidad
+    # (`services.trade_setup.prepare_trade`, con contrato y tests). El router
+    # sólo orquesta y registra. `sl_pips_geom` es lo que se envía al EA (que
+    # añade su buffer de spread); `sl_pips` es la distancia REAL del stop
+    # (geom + buffer) ⇒ la que usan el sizing, el contrato y el audit.
     _eurusd_px = None
     if sym != "EURUSD":
         from services.position_sizing import eurusd_price
         _eurusd_px = await eurusd_price()
-    _ppl = pip_value_eur_per_lot(sym, current_price, eurusd_price=_eurusd_px)
-    head_lots = size_ppo_position(
-        volume_norm=volume_norm, sl_pips=sl_pips, equity=equity_val,
-        pip_value=_ppl, risk_pct=settings.ppo_risk_pct,
-        max_lot=settings.max_volume, min_lot=settings.min_volume,
-    )
-    _tp_cands = target_level_candidates(
-        df, 1 if target_pos == 1 else -1,
-        current_atr / pip_size, current_price,
-    )
-    _tp_dists = [abs(float(_p) - current_price) / pip_size for _p in _tp_cands]
-    if not _tp_dists:
-        # Sin nivel utilizable en la ventana: se evalúa el fallback declarado
-        # (2×SL). El contrato dirá si paga el bloqueo neto de costes; si no,
-        # la entrada no se abre.
-        _tp_dists = [2.0 * sl_pips]
-    contract = evaluate_trade(
-        symbol=sym, price=current_price, equity=equity_val, sl_pips=sl_pips,
-        head_lots=head_lots, tp_candidates_pips=_tp_dists,
+    setup = prepare_trade(
+        symbol=sym, price=current_price, equity=equity_val,
+        atr=current_atr, pip_size=pip_size, direction=target_pos,
+        floor_below=floor_below, ceiling_above=ceiling_above,
+        volume_norm=volume_norm, df=df,
         risk_pct=settings.ppo_risk_pct, min_lot=settings.min_volume,
         max_lot=settings.max_volume, min_lock_eur=settings.min_lock_eur,
         eurusd_price=_eurusd_px,
     )
-    tp_pips = contract.tp_pips if contract.tp_pips > 0 else _tp_dists[0]
-
-    # P2-2: sizing delegado en position_sizing.size_ppo_position — la cabeza
-    # `volume` modula el riesgo (0…settings.ppo_risk_pct del equity) con el
-    # pip_value centralizado por símbolo. Reemplaza: tope degenerado
-    # min(0.5, 3%·equity/dist) SIEMPRE activo (cabeza `volume` muerta) y la
-    # heurística "mín. 3€" con 0.1 €/pip/lot (error ×100 enmascarado por el
-    # clip). El mismo cálculo lo aplica el env de entrenamiento (paridad).
-    final_lots = contract.lots if contract.ok else 0.0
-
+    sl_pips_geom = setup.sl_geom_pips
+    sl_pips = setup.sl_pips
+    tp_pips = setup.tp_pips
+    final_lots = setup.lots
     sl_pips_final = sl_pips
     tp_pips_final = tp_pips
-    risk_eur = contract.risk_eur
-    # `lock_alive` ya NO es una esperanza: el contrato exige I2 (riesgo ≥
-    # min_lock_eur) y I3 (TP neto ≥ min_lock_eur) ⇒ si la entrada existe, el
-    # trailing Safe-4 puede dispararse ANTES del TP por construcción.
-    lock_alive = bool(contract.ok and risk_eur >= settings.min_lock_eur)
+    risk_eur = setup.risk_eur
+    lock_alive = setup.lock_alive
+    contract = setup.contract
+    head_lots = setup.head_lots
     if contract.ok:
         logger.info(
             "[%s] CONTRATO ║ %.2f lotes · SL %.1f p · TP %.1f p · riesgo %.2f€ "
@@ -1421,7 +1371,7 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         from services.trade_journal import get_recent_insights
         try:
             recent_insights = await get_recent_insights(req.symbol, limit=5)
-        except Exception as e:
+        except DB_ERRORS as e:
             logger.warning("[%s] get_recent_insights falló: %s", cycle_id, e)
             recent_insights = []
 
@@ -1522,256 +1472,69 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             memories=memories,
         )
 
-    final_decision = decision
-    # P1 / H4 (Félix 2026-10-08): TIME-STOP — posición abierta ≥ 12 velas H1
-    # (edad convertida a H1, ver _M5_PER_H1) → cierre forzado. Es una SALIDA
-    # mecánica: va POR DELANTE de toda la cadena de vetos (en el env sólo
-    # SL/TP —precio intra-vela— compiten antes, secciones 1/1b). El EA ya
-    # sabe ejecutar `CLOSE` (L358 → CloseAllPositions).
-    time_stop = env_position != 0 and steps_h1 >= TIME_STOP_BARS
-    if time_stop:
-        logger.warning(
-            "[%s] TIME-STOP ║ posición abierta %d H1 ≥ %d → CLOSE",
-            cycle_id, steps_h1, TIME_STOP_BARS,
+    mech = apply_mechanical_vetoes(
+        MechanicalInputs(
+            cycle_id=cycle_id,
+            symbol=req.symbol,
+            decision=decision,
+            env_position=env_position,
+            position_raw=req.position,
+            steps_h1=steps_h1,
+            time_stop_bars=TIME_STOP_BARS,
+            contract=contract,
+            lots=final_lots,
+            tp_pips=tp_pips_final,
+            min_lock_eur=settings.min_lock_eur,
+            reentry_window=reentry_window,
+            bars_since_close=bars_since_close,
+            churn_bars=CHURN_BARS,
+            qwen_ok=bool(qwen.get("ok", True)),
+            qwen_reentry_ok=qwen.get("reentry_ok"),
+            min_entry_confidence=settings.min_entry_confidence,
+            effective_prob=qwen["effective_prob"],
         )
-        final_decision = "CLOSE"
-    # R1 (Félix 2026-10-09): JUICIO DE RE-ENTRADA — el veto duro
-    # `churn_cooldown` (constante de 2 velas) se sustituyó por el cerebro:
-    # Qwen decide `reentry_ok` con el contexto del cierre (pnl, dirección,
-    # razón, movimiento). La VENTANA (≤ CHURN_BARS, paridad con la fricción
-    # del env) queda intacta: lo único que cambia es QUIÉN decide.
-    # Con Qwen degradado manda la red de emergencia documentada (no lógica
-    # primaria): sólo se bloquea la 1ª vela tras el cierre (bars=0), el
-    # mínimo vital mientras el cerebro no responde — el fail-closed de
-    # calidad (quality=0) bloquea la entrada de todas formas.
-    reentry_ok: Optional[bool] = None
-    if reentry_window:
-        if qwen.get("ok", True):
-            reentry_ok = bool(qwen.get("reentry_ok", True))
-        else:
-            reentry_ok = bars_since_close > 0
-            logger.warning(
-                "[%s] REENTRY-DEFAULT (Qwen degradado) → reentry_ok=%s (bars=%d)",
-                cycle_id, reentry_ok, bars_since_close,
-            )
-    # P0 / H1 (Félix 2026-10-09): GATE DE CONFIANZA DE ENTRADA — mecanismo
-    # construido DESARMADO: `settings.min_entry_confidence = 0.0` (default)
-    # → la rama de abajo no se evalúa jamás (no-op, cero cambio de
-    # comportamiento). Evidencia EN CONTRA pre-registrada en README (n=18,
-    # bandas inversas); armar solo con revisión N≥50 post-fix Qwen o orden
-    # explícita (env MIN_ENTRY_CONFIDENCE).
-    low_confidence = False
-    # Opción A (Félix 2026-10-12): GATE DE RECOMPENSA MÍNIMA — si el TP del
-    # trade no alcanza MIN_WIN_EUR (3 €) al tamaño elegido, la entrada es
-    # imposible de ganar por CONSTRUCCIÓN: el TP sella la salida por debajo
-    # de la regla (ni CLOSE del modelo ni un manual pueden superar 3 € sin
-    # rellenar el TP antes). Evidencia: trade #255 (09-12) quality 9.0 /
-    # ml_prob 0.99 con sizing 0.01 lot → TP 21.6 p = 1.93 € máx → LOSS por
-    # la propia regla; gate simulado sobre las 48 órdenes rellenadas = 1
-    # bloqueo (no degrada entradas sanas). `reward_eur` se audita SIEMPRE
-    # que hay entrada propuesta (snapshot replayable, patrón
-    # min_entry_confidence). Mutuamente excluyente con sizing (exige
-    # final_lots > 0 → el veto de abajo se queda la atribución si no cabe
-    # lote). La conversión es honesta por diseño: expected_close_eur lanza
-    # ValueError para símbolos sin tasa EUR definible (nunca tasas
-    # inventadas).
-    # B1 (G2): para los pares con quote=USD y base≠EUR (GBPUSD…) el P/L está
-    # en USD y se convierte con el precio EURUSD (el convenio del bróker, el
-    # mismo que usa el risk_guardian). El precio se pide SÓLO cuando hace
-    # falta (hay entrada propuesta) y sólo para esos símbolos.
-    # El importe ya lo calculó el CONTRATO (EUR netos de costes): aquí no se
-    # vuelve a convertir. Éste era el cuarto sitio donde se calculaba dinero
-    # y de donde salían las discrepancias de la orden 80 (SL/TP en USD, gate
-    # en EUR, sizing en USD, redondeo de lote aparte).
-    reward_eur: Optional[float] = (
-        contract.reward_net_eur
-        if (contract.ok and final_decision in ("BUY", "SELL") and final_lots > 0.0)
-        else None
     )
-    reward_below_min = False
-    contract_rejected = (not contract.ok) and contract.reason != "sizing_inviable"
-    # A-1: flip con posición abierta → el EA lo rechaza siempre en ejecución
-    # (L407/L440/L475: rejected_position_open) porque la salida es exclusiva
-    # SL/TP. El backend lo declara AQUÍ, antes de la cadena Qwen y del sizing,
-    # con la MISMA información pre-request (req.position) que usa el EA: misma
-    # decisión, misma traza, 0 rejected_position_open. CLOSE/HOLD intactos.
-    position_rejected = env_position != 0 and final_decision in ("BUY", "SELL")
-    if position_rejected:
-        logger.warning(
-            "[%s] VETO POSICION ║ flip %s con posición abierta (pos=%d) → HOLD "
-            "(coherente con EA: salida solo SL/TP)",
-            cycle_id, final_decision, req.position,
-        )
-        final_decision = "HOLD"
-    elif contract_rejected and final_decision in ("BUY", "SELL"):
-        # CONTRATO DE DINERO (2026-10-22): mecánico y previo a todo juicio.
-        # `contract.reason` dice QUÉ invariante lo hace imposible (riesgo,
-        # Safe-4 o TP neto) — nunca "unknown_veto".
-        reward_below_min = contract.reason in ("tp_no_paga_bloqueo", "tp_no_cubre_costes")
-        logger.warning(
-            "[%s] VETO CONTRATO ║ %s · TP %.1f p × %.2f lot · riesgo %.2f€ "
-            "(tope %.2f€) · TP neto %.2f€ < exigido %.2f€ → HOLD",
-            cycle_id, contract.reason, tp_pips_final, final_lots,
-            contract.risk_eur, contract.cap_eur, contract.reward_net_eur,
-            max(MIN_WIN_EUR, settings.min_lock_eur),
-        )
-        final_decision = "HOLD"
-    elif reentry_window and reentry_ok is False and final_decision in ("BUY", "SELL"):
-        logger.warning(
-            "[%s] VETO RE-ENTRADA (cerebro) ║ reentry_ok=false, %d velas H1 desde el "
-            "último cierre ≤ CHURN_BARS=%d → HOLD",
-            cycle_id, bars_since_close, CHURN_BARS,
-        )
-        final_decision = "HOLD"
-    elif (
-        settings.min_entry_confidence > 0.0
-        and qwen["effective_prob"] < settings.min_entry_confidence
-        and final_decision in ("BUY", "SELL")
-    ):
-        # P0 / H1: solo con el umbral ARMADO (> 0.0). `effective_prob` es
-        # ml_prob × confidence_modifier (Qwen): el modificador dejó de ser
-        # constante 1.0 con el fix anti-ancla H2 (2026-10-09), así que este
-        # número es el candidato con poder discriminador real. Solo BUY/SELL
-        # (entradas): FLAT/HOLD/CLOSE y los vetos mecánicos de arriba mandan.
-        low_confidence = True
-        logger.warning(
-            "[%s] VETO CONFIANZA ║ effective_prob %.3f < umbral %.2f → HOLD",
-            cycle_id, qwen["effective_prob"], settings.min_entry_confidence,
-        )
-        final_decision = "HOLD"
-    # 2026-10-21 (Opción B): el veto de CALIDAD por score se retiró (no
-    # demostró skill). Se conserva el FAIL-CLOSED de degradación: si el
-    # cerebro no responde (`ok=False`), no se abre nada — es seguridad
-    # mecánica, no un juicio de calidad.
-    elif not qwen.get("ok", True) and final_decision in ("BUY", "SELL"):
-        logger.warning("[%s] VETO QWEN-DEGRADADO ║ cerebro no disponible → HOLD", cycle_id)
-        final_decision = "HOLD"
-    # 2026-10-21 (Opción B): los vetos RANGING y CALIDAD se retiraron — no
-    # demostraron skill contra la base (ver constante QUALITY_THRESHOLD y
-    # README). `reentry_ok` sigue mandando arriba.
-    bias_veto_fired = False
-    if final_decision == "BUY" and qwen["bias"] == "BEARISH" and qwen.get("bias_prob", 0.5) <= 0.3:
-        # T-31: el veto direccional sólo tiene autoridad si el juez la ha
-        # demostrado con datos reales (services/qwen_authority.py). Un juez
-        # que dice «0.85» y acierta el 22 % NO puede revertir señales.
-        if not await _qwen_veto_authorized(sym, cycle_id):
-            pass  # sin autoridad → la señal pasa (log explícito en el helper)
-        else:
-            logger.warning("[%s] VETO BIAS ║ BUY revertido por LLM BEARISH (conf=%.2f)", cycle_id, qwen.get("bias_prob", 0.5))
-            final_decision = "HOLD"
-            bias_veto_fired = True
-    elif final_decision == "SELL" and qwen["bias"] == "BULLISH" and qwen.get("bias_prob", 0.5) >= 0.7:
-        if not await _qwen_veto_authorized(sym, cycle_id):
-            pass  # sin autoridad → la señal pasa (log explícito en el helper)
-        else:
-            logger.warning("[%s] VETO BIAS ║ SELL revertido por LLM BULLISH (conf=%.2f)", cycle_id, qwen.get("bias_prob", 0.5))
-            final_decision = "HOLD"
-            bias_veto_fired = True
+    final_decision = mech.decision
+    time_stop = mech.time_stop
+    reentry_ok = mech.reentry_ok
+    reward_eur = mech.reward_eur
+    reward_below_min = mech.reward_below_min
+    contract_rejected = mech.contract_rejected
+    position_rejected = mech.position_rejected
+    low_confidence = mech.low_confidence
 
-    # T-31 (orden Félix 2026-10-19) — QUÓRUM ENTRE MODELOS EN MERCADO
-    # LATERAL. En rango, una entrada direccional sostenida por un solo
-    # modelo es una moneda al aire (el PPO se entrenó en un contexto
-    # tendencial y su edge en lateral NO está demostrado). El régimen se
-    # detecta de forma DETERMINISTA (ADX + bb_pos/atr_pct/macd_hist) — nunca
-    # con la opinión del LLM (su campo `regime` es una salida copiada por
-    # plantilla, RCA T-31). Fuentes de voto independientes: PPO, LLM (sólo
-    # con evidencia) y estructura SMA200. Se exigen 2 de 3 coincidentes.
-    # En régimen NO lateral el quorum NO se aplica (cero cambios de
-    # comportamiento fuera del lateral).
+    # T-31: el veto direccional sólo tiene autoridad si el juez la ha
+    # demostrado con datos reales (services/qwen_authority.py). La llamada
+    # (I/O) se hace SÓLO si el sesgo pide revertir; el resto es puro.
+    bias_veto_fired = False
+    if bias_veto_pending(final_decision, qwen) is not None:
+        if await _qwen_veto_authorized(sym, cycle_id):
+            final_decision, bias_veto_fired = apply_bias_veto(
+                final_decision, qwen, authorized=True, cycle_id=cycle_id,
+            )
+
+    # T-31 — QUÓRUM ENTRE MODELOS EN MERCADO LATERAL. Se detecta de forma
+    # DETERMINISTA (ADX + bb_pos/atr_pct/macd_hist); el LLM sólo vota.
     quorum_audit: Optional[dict] = None
     quorum_rejected = False
     if decision in ("BUY", "SELL"):
-        _adx_val = float(df['adx'].iloc[-1]) if 'adx' in df.columns else None
-        # T-31: desplazamiento por TIEMPO (24 h reales, no 24 barras: la
-        # serie tiene huecos de fin de semana) normalizado por ATR14.
         _disp24_atr = _displacement_24h_atr(df)
-        # Confirmación del marco superior: el ADX de H4 (el marco que ve el
-        # LLM). Se calcula sobre la serie H4 ya normalizada a UTC.
         _adx_h4 = _adx_higher_tf(h4_res, "H4", offset_h=_offset_h)
-        # Pendiente de la estructura H1 en RATIO (ΔSMA200/close) — la misma
-        # escala que REWARD_V2_S0_SLOPE (0,0002) del env. `sma200_slope` viene
-        # como diferencia ABSOLUTA de precio (routers._sma200_context).
-        _slope_ratio = (sma200_slope / current_price) if (
-            sma200_slope is not None and current_price) else None
-        _dist_ratio = (sma200_dist / current_price) if (
-            sma200_dist is not None and current_price) else None
-        _lateral = detect_lateral(
-            bb_pos=float(df['bb_pos'].iloc[-1]) if 'bb_pos' in df.columns else None,
-            atr_pct=(current_atr / current_price) if current_price else None,
-            macd_hist=float(df['macd_hist'].iloc[-1]) if 'macd_hist' in df.columns else None,
-            adx=_adx_val,
-            disp24_atr=_disp24_atr,
-            adx_h4=_adx_h4,
-            slope_h1_ratio=_slope_ratio,
+        quorum_audit, final_decision, quorum_rejected = evaluate_quorum(
+            decision=decision, final_decision=final_decision, qwen=qwen, df=df,
+            current_price=current_price, current_atr=current_atr,
+            disp24_atr=_disp24_atr, adx_h4=_adx_h4,
+            sma200_dist=sma200_dist, sma200_slope=sma200_slope,
+            cycle_id=cycle_id,
         )
-        if _lateral:
-            _collected = collect_votes(
-                ppo_direction=decision,
-                llm_bias=qwen.get("bias"),
-                llm_bias_prob=qwen.get("bias_prob"),
-                llm_abstained=bool(qwen.get("abstained", False)),
-                sma200_dist=_dist_ratio,
-                sma200_slope=_slope_ratio,
-            )
-            _verdict = evaluate(_collected, direction=decision)
-            quorum_audit = {
-                "lateral": True,
-                "granted": _verdict["granted"],
-                "direction": _verdict["direction"],
-                "votes": _verdict["votes"],
-                "tally": _verdict["tally"],
-                "required": _verdict["required"],
-                "reason": _verdict["reason"],
-                "adx_h1": _adx_val,
-                "adx_h4": _adx_h4,
-                "disp24_atr": _disp24_atr,
-                "slope_h1_ratio": _slope_ratio,
-            }
-            # Sólo bloquea si la decisión final sigue siendo direccional (si
-            # un veto previo ya la dejó en HOLD, el quórum se declara pero no
-            # añade nada).
-            if final_decision in ("BUY", "SELL") and not _verdict["granted"]:
-                logger.warning(
-                    "[%s] QUÓRUM ║ mercado lateral sin consenso (%s) → HOLD",
-                    cycle_id, _verdict["reason"],
-                )
-                final_decision = "HOLD"
-                quorum_rejected = True
-        else:
-            # T-31: la trazabilidad del veredicto — aunque NO sea lateral se
-            # declaran las ENTRADAS del detector (si no, un "no lateral" sin
-            # números es indescifrable: fue la duda que Surge el 19-10).
-            quorum_audit = {
-                "lateral": False,
-                "granted": None,
-                "reason": "régimen no lateral: quorum no aplica",
-                "adx_h1": _adx_val,
-                "adx_h4": _adx_h4,
-                "disp24_atr": _disp24_atr,
-                "slope_h1_ratio": _slope_ratio,
-            }
 
-    # P2-2/S-1: sizing no operable (ni el lote mínimo cabe en el tope de riesgo)
-    # → no existe orden válida que enviar: degrada a HOLD y SE DECLARA en la
-    # auditoría (`sizing_below_min` + `veto_reason=sizing_veto`). S-2: el ruido
-    # pasa de 21 ERROR "sizing inviable" a 1 WARNING / 600 s por símbolo (el
-    # literal prohibido ya no se emite en ningún nivel). La respuesta se queda
-    # en HOLD: es el único valor no-comprado que el EA entiende (un valor nuevo
-    # como "WAIT" caería en silencio en el EA y no reportaría ea_decision).
-    sizing_below_min = False
-    if final_lots <= 0.0 and final_decision in ("BUY", "SELL"):
-        sizing_below_min = True
-        final_decision = "HOLD"
-        now_ts = time.time()
-        if now_ts - _SIZING_WARN_TS.get(req.symbol, 0.0) >= _SIZING_WARN_INTERVAL_S:
-            _SIZING_WARN_TS[req.symbol] = now_ts
-            logger.warning(
-                "[%s] sizing_below_min: vol_norm=%s sl=%s pips equity=%s → HOLD declarado "
-                "(veto sizing, 1 aviso/%ss por símbolo)",
-                cycle_id, volume_norm, sl_pips_final, equity_val, int(_SIZING_WARN_INTERVAL_S),
-            )
-        else:
-            logger.debug("[%s] sizing_below_min (rate-limited) → HOLD", cycle_id)
+    # P2-2/S-1: sizing no operable ⇒ HOLD declarado. Va después del quórum:
+    # su flag sólo manda si ningún otro veto revirtió la señal.
+    final_decision, sizing_below_min = apply_sizing_veto(
+        decision=final_decision, lots=final_lots, cycle_id=cycle_id,
+        symbol=req.symbol, volume_norm=volume_norm, sl_pips=sl_pips_final,
+        equity=equity_val,
+    )
 
     # Fase 2 / D-5: CAPA ESTRATEGA (shadow) — estado narrativo + criterios
     # C1–C8 (config versionada, TODOS OFF) evaluados en CADA ciclo y trazados
@@ -1808,7 +1571,7 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             equity=equity_val,
             quality_threshold=QUALITY_THRESHOLD,
         )
-    except Exception as exc:
+    except LOOP_ERRORS as exc:
         # Contención TESTEADA (test_strategist_shadow): la capa es shadow con
         # cero poder de decisión — su fallo no tumba el ciclo de decisión; la
         # verdad se propaga A LA TRAZA (verdict=ERROR) + WARNING en log.
@@ -1855,7 +1618,7 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             else {"granted": False, "n": 0, "acc": None, "reason": "sin medir",
                   "calibration": {}}
         )
-    except Exception as exc:  # noqa: BLE001 — telemetría NUNCA tumba el ciclo
+    except DB_ERRORS as exc:  # noqa: BLE001 — telemetría NUNCA tumba el ciclo
         logger.warning(
             "[%s] T-31 snapshot de autoridad falló (%s: %s) → declarado en audit",
             cycle_id, type(exc).__name__, exc,
@@ -1863,7 +1626,7 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         qwen_authority_snapshot = {"granted": False, "n": 0, "acc": None, "reason": "error"}
     try:
         t28_rolling = await rolling_alignment(req.symbol)
-    except Exception as exc:
+    except DB_ERRORS as exc:
         logger.warning(
             "[%s] T-28 rolling alignment falló (%s: %s) → error declarado en audit",
             cycle_id, type(exc).__name__, exc,

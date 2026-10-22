@@ -78,14 +78,16 @@ class TestUsdChfCanaryRegistration:
             with patch("main.init_pool", AsyncMock()), \
                  patch("main.close_pool", AsyncMock()), \
                  patch("routers.ai.load_inference_artifacts", MagicMock()), \
-                 patch("routers.ai.is_news_blackout", news), \
-                 patch("httpx.AsyncClient", _ExplodingClient):
+                 patch("routers.ai.is_news_blackout", news):
                 with TestClient(app) as client:
-                    r = client.post(
-                        "/api/v1/ai/predict",
-                        json={"symbol": "USDCHF", "timeframe": "H1", "position": 0},
-                        headers={**TOKEN, "x-cycle-id": "g3-u1-usdchf"},
-                    )
+                    # El parche va DESPUÉS del arranque: el gate se mide en
+                    # la petición, no en el bootstrap (que lee equity).
+                    with patch("httpx.AsyncClient", _ExplodingClient):
+                        r = client.post(
+                            "/api/v1/ai/predict",
+                            json={"symbol": "USDCHF", "timeframe": "H1", "position": 0},
+                            headers={**TOKEN, "x-cycle-id": "g3-u1-usdchf"},
+                        )
         finally:
             settings.pairs = original
             ai._REGISTRY = None

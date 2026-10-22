@@ -91,11 +91,11 @@ class TestProductionStopsSingleSource:
         # umbral en EUR (Safe-4 neto de costes) que el entorno NO puede
         # reproducir (su balance es ficticio, no EUR): la diferencia de umbral
         # es una regla de la capa de EJECUCIÓN, declarada, no una deriva.
-        import routers.ai as ai_router
-        assert ai_router.production_sl is production_sl
-        assert ai_router.target_level_candidates is target_level_candidates
-        assert ai_router.evaluate_trade is evaluate_trade
-        assert ai_router.pip_value_eur_per_lot is pip_value_eur_per_lot
+        import services.trade_setup as trade_setup
+        assert trade_setup.production_sl is production_sl
+        assert trade_setup.target_level_candidates is target_level_candidates
+        assert trade_setup.evaluate_trade is evaluate_trade
+        assert trade_setup.pip_value_eur_per_lot is pip_value_eur_per_lot
 
     def test_env_open_uses_production_stops_not_the_action(self):
         env = _env()

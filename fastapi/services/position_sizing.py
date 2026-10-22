@@ -1,11 +1,9 @@
-"""Primitivas de dinero: pip por símbolo, pip value, conversión a EUR y sizing.
+"""Primitivas de dinero: pip por símbolo, pip value y conversión a EUR.
 
 Este módulo NO decide operaciones (eso es `services/trade_contract.py`): aquí
 solo viven las cuentas que el contrato, el guardián de riesgo y el entorno de
 entrenamiento comparten. Una sola conversión pips→EUR (`expected_close_eur`).
 """
-
-import math
 
 PIP_SIZE = {
     # Forex majors (quote=USD → pip_value fijo $10)
@@ -146,55 +144,3 @@ def expected_close_eur(
     raise ValueError(
         f"expected_close_eur sin conversión EUR definida para {symbol}"
     )
-
-
-def size_ppo_position(
-    volume_norm: float,
-    sl_pips: float,
-    equity: float,
-    pip_value: float,
-    *,
-    risk_pct: float,
-    max_lot: float,
-    min_lot: float = 0.01,
-) -> float:
-    """P2-2: sizing del PPO — riesgo fraccional por equity, delegado.
-
-    La cabeza `volume` de la política (Box(2,)_[1], rango [0,1]) modula el
-    riesgo entre 0 y ``risk_pct`` del equity::
-
-        lots = equity × risk_pct × clip(volume_norm, 0, 1) / (sl_pips × pip_value)
-
-    Los lotes se redondean HACIA ABAJO al paso ``min_lot`` (nunca se supera el
-    tope de riesgo) y se devuelven 0.0 —sin entrada— cuando ni el lote mínimo
-    cabe en el presupuesto de riesgo.
-
-    Contrato train/serve (auditoría P2-2): lo usan `/api/v1/ai/predict` (con
-    ``pip_value_per_lot(symbol, price)`` centralizado) y el entorno de
-    entrenamiento (con ``pip_size × lot_size``, la convención de dinero del
-    env). Antes: tope degenerado ``min(0.5, 3%·equity/dist)`` siempre activo y
-    una heurística "mín. 3€" con 0.1 €/pip/lot (error ×100 enmascarado por el
-    clip) — la cabeza `volume` estaba muerta.
-    """
-    if equity <= 0.0 or sl_pips <= 0.0 or pip_value <= 0.0 or risk_pct <= 0.0:
-        return 0.0
-    scale = min(1.0, max(0.0, float(volume_norm)))
-    risk_usd = float(equity) * float(risk_pct) * scale
-    if risk_usd <= 0.0:
-        return 0.0
-    lots_raw = risk_usd / (float(sl_pips) * float(pip_value))
-    # Epsilon RELATIVO al cociente (no absoluto): el `volume_norm` viene de
-    # una cabeza float32 del PPO (p.ej. 0.03999999910593033) ⇒ el riesgo
-    # sale con ruido de ~1e-8 RELATIVO. Con un epsilon absoluto de 1e-9 el
-    # floor tumbaba un lote que SÍ cabía al borde del mínimo (medido
-    # 2026-10-21: 0.00999999977 lote con min_lot 0.01 ⇒ 0 lotes ⇒
-    # "sizing inviable" en una entrada válida). El epsilon relativo (1e-6
-    # del cociente) es 2 órdenes de magnitud mayor que ese ruido y 4
-    # órdenes menor que el paso de lote ⇒ nunca promueve un lote
-    # genuinamente inviable.
-    lots = math.floor(lots_raw / min_lot + 1e-6) * min_lot
-    lots = round(lots, 2)
-    if lots < min_lot:
-        return 0.0
-    return float(min(lots, max_lot))
-

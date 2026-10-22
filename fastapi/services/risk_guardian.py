@@ -48,7 +48,7 @@ def _utc_today() -> date:
     try:
         from services.timebase import broker_today
         return broker_today()
-    except Exception:  # noqa: BLE001
+    except (OSError, ValueError, TypeError, RuntimeError):  # noqa: BLE001
         return datetime.now(timezone.utc).date()
 
 

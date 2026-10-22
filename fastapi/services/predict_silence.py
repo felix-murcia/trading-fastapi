@@ -32,6 +32,7 @@ import logging
 from datetime import datetime, timezone
 
 from services.alerting import AlertLevel, send_alert
+from services.error_taxonomy import LOOP_ERRORS
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +116,7 @@ async def _enabled_pairs() -> list:
     try:
         from core.container import build_registry_from_settings
         return list(build_registry_from_settings().enabled())
-    except Exception as exc:  # noqa: BLE001
+    except LOOP_ERRORS as exc:  # noqa: BLE001
         logger.warning("[SILENCE] no se pudo leer el registro de pares: %s", exc)
         return []
 
@@ -146,7 +147,7 @@ async def _predict_silence_loop() -> None:
                     logger.debug("[SILENCE] edad del último ciclo=%ss", age_s)
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
+        except LOOP_ERRORS as exc:
             send_alert(
                 AlertLevel.ERROR, "PREDICT-SILENCE",
                 f"Watchdog de silencio falló: {type(exc).__name__}: {exc}",

@@ -1,7 +1,7 @@
 """
 P2-2: sizing del PPO delegado — paridad train/serve del sizing (auditoría).
 
-- UNA función: `position_sizing.size_ppo_position` la usan `/api/v1/ai/predict`
+- UNA función: `core.rules.size_ppo_position` la usan `/api/v1/ai/predict`
   y el env de entrenamiento (identidad de objeto, igual que `production_stops`
   en P2-1). Si alguien la copia a otro módulo, estos tests fallan.
 - La heurística "mín. 3€" (0.1 €/pip/lot, error ×100) y el tope degenerado
@@ -16,6 +16,7 @@ import pandas as pd
 import pytest
 
 from config import settings
+from core import rules
 from ml import trading_env_v2
 from ml.trading_env_v2 import ForexTradingEnvV2, engineer_market_features
 from services import position_sizing as ps
@@ -71,9 +72,9 @@ class TestSharedSizingFunction:
     """Paridad: mismo objeto de función y misma cadena de parámetros en serve y env."""
 
     def test_predict_and_env_share_the_same_function_object(self):
-        from routers import ai
-        assert ai.size_ppo_position is ps.size_ppo_position
-        assert trading_env_v2.size_ppo_position is ps.size_ppo_position
+        from services import trade_setup
+        assert trade_setup.size_ppo_position is rules.size_ppo_position
+        assert trading_env_v2.size_ppo_position is rules.size_ppo_position
 
     def test_env_defaults_match_settings_serve_contract(self):
         # serve usa settings.ppo_risk_pct / max_volume; el env debe construir
@@ -90,7 +91,7 @@ class TestSharedSizingFunction:
         env.reset()
         env.step(OPEN)
 
-        serve_lots = ps.size_ppo_position(
+        serve_lots = rules.size_ppo_position(
             volume_norm=0.4,
             sl_pips=17.0,
             equity=INITIAL,

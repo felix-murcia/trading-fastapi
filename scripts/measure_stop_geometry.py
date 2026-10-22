@@ -41,7 +41,8 @@ from ml.trading_env_v2 import (  # noqa: E402
     engineer_market_features,
     production_stops,
 )
-from services.position_sizing import pip_value_per_lot, size_ppo_position  # noqa: E402
+from core.rules import SPREAD_BUFFER_PIPS, size_ppo_position
+from services.position_sizing import pip_value_per_lot  # noqa: E402
 
 H = 12               # TIME_STOP_BARS (velas H1)
 EQUITY = 491.64

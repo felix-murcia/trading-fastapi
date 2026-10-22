@@ -36,6 +36,7 @@ from config import settings
 from core.pair import LEGACY_SYMBOL, default_model_path
 from services.alerting import AlertLevel, send_alert
 from services.feed_patcher import fill_feed_hole
+from services.error_taxonomy import LOOP_ERRORS
 
 logger = logging.getLogger(__name__)
 
@@ -297,7 +298,7 @@ async def run_drift_check(symbol: str = LEGACY_SYMBOL) -> dict:
                 report["level"] = "critical"
             elif "warning" in levels:
                 report["level"] = "warning"
-        except Exception as exc:
+        except LOOP_ERRORS as exc:
             report["features_error"] = f"{type(exc).__name__}: {exc}"
             report["level"] = "warning"
             send_alert(
@@ -307,7 +308,7 @@ async def run_drift_check(symbol: str = LEGACY_SYMBOL) -> dict:
 
     try:
         report["decay"] = evaluate_decay(await _recent_pnl())
-    except Exception as exc:
+    except LOOP_ERRORS as exc:
         report["decay"] = {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
         send_alert(
             AlertLevel.ERROR, "drift_monitor",
@@ -358,7 +359,7 @@ async def run_drift_check(symbol: str = LEGACY_SYMBOL) -> dict:
             "drift_report",
             json.dumps(report, default=float, ensure_ascii=False),
         )
-    except Exception as exc:
+    except LOOP_ERRORS as exc:
         send_alert(
             AlertLevel.ERROR, "drift_monitor",
             f"Insert de drift_report en audit_log falló: {type(exc).__name__}: {exc}",
@@ -391,7 +392,7 @@ async def _drift_monitor_loop() -> None:
                 )
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
+        except LOOP_ERRORS as exc:
             send_alert(
                 AlertLevel.ERROR, "drift_monitor",
                 f"Drift check programado falló: {type(exc).__name__}: {exc}", exc=exc,

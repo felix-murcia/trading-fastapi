@@ -30,6 +30,8 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
+_FETCH_ERRORS = (OSError, ValueError, TypeError, KeyError)
+
 MT5_HTTP_URL = os.getenv("MT5_HTTP_URL")
 TOKEN = os.getenv("INTERNAL_TOKEN")
 FEATURE_NAMES = list(MARKET_FEATURES)
@@ -56,7 +58,7 @@ def fetch_mt5_candles(symbol: str = "EURUSD", timeframe: str = "H1", count: int 
         df = df.sort_values('time').reset_index(drop=True)
         print(f"[Train V3] {len(df)} velas cargadas ({df['time'].min()} → {df['time'].max()})")
         return df
-    except Exception as e:
+    except _FETCH_ERRORS as e:
         print(f"[Train V3] Error fetching candles: {e}")
         sys.exit(1)
 

@@ -156,3 +156,97 @@ GET); openapi expone sólo `close`, `news-check`, `audit`, `news`, `analytics`;
 11:45:41 (`contract_ok=true`, `reentry_veto`) y USDCHF 11:47:01
 (`contract_ok=true`, `ppl_eur` 10,861, `risk_eur` 9,38 ≤ 9,89 = 2 % de
 494,47 €); `/health` OK.
+
+
+## 7. H-I / H-K / H-N — cierre de la deuda congelada (2026-10-22, tercera pasada)
+
+**Suite final: 1276 passed + 2 xfailed.** Sin EA (v14.1). El diff rastreado
+suma **54 ficheros, +472/−1652**, con 3 módulos nuevos (35 + 116 + 349 líneas)
+y la evidencia de la medición (115 líneas).
+
+**Corrección de §6:** `/close` y `/news-check` ya NO existen. Se retiraron en
+esta pasada junto con `services/position_ownership.py` y
+`tests/test_p24b_selective_close.py`: con el motor SMC retirado sólo actuaban
+sobre el ledger `smc_` heredado (**1 orden cancelada** en toda la historia).
+También se borraron los 6 scripts legacy de `ml/` (`retrain_agent`,
+`trading_env`, `train_hgboost`, `train_model`, `train_ppo`, `train_xgboost`),
+sin llamadores en runtime.
+
+### H-N — el filtro de R:R / SL no paga: NO se añade
+
+Medición con el motor real sobre 29 976 velas H1 compartidas (2021-12-23 →
+2026-10-20/21, EURUSD + USDCHF), entradas aleatorias y geometría de producción:
+**n = 114 959, E[R] = −0,068 R**.
+
+| Filtro | Señales que conserva | Δ E[R] |
+|---|---:|---:|
+| R:R ≥ 1,0 | 36,8 % | +0,003 R |
+| SL/ATR ≤ 1,5 | 41,4 % | −0,004 R |
+
+Todos los cortes medidos quedan en **Δ ≤ +0,007 R** (ruido); los buckets no son
+monótonos (mejor 1,25–1,50; peor ≥ 2,0). Niveles fijos contra 2×SL tampoco
+separan: EURUSD −0,072 R (n = 57 987) vs −0,061 R (n = 59 938); USDCHF −0,065
+vs −0,069. **Decisión: no se añade R:R mínimo ni tope de SL**; I1/I2/I3 del
+contrato siguen siendo la única puerta (`riesgo_no_cabe`,
+`safe4_no_cabe_en_riesgo`, `tp_no_paga_bloqueo`, `tp_no_cubre_costes`).
+Evidencia: `evidence/2026-10-22-hn-rr-gate.txt` · `scripts/measure_rr_gate.py`.
+
+**Bug real corregido (unidad, no filtro):** `target_level_candidates` comparaba
+una banda en **pips** contra distancias en **precio** ⇒ en producción devolvía
+**0 candidatos** siempre; el serve caía al fallback `2×SL` y el entorno de
+entrenamiento usaba el techo más cercano ⇒ **divergencia train/serve**. La banda
+ahora es `max(atr_pips × mult, MIN_LEVEL_PIPS) × pip_size`, con `pip_size`
+obligatorio. Regresión:
+`tests/test_g3_nearest_levels.py::test_candidates_band_is_price_not_pips`. Se
+justifica por paridad/corrección, **no por rentabilidad** (entrada aleatoria:
+EURUSD −0,011 R, USDCHF +0,004 R).
+
+### H-I — `predict_direction` 1230 → 994 líneas (−19,2 %)
+
+- `services/trade_setup.py` (116 l.): `TradeSetup` + `prepare_trade` (67 l.),
+  geometría → lote → TP → contrato; puro, sin I/O.
+- `services/veto_chain.py` (349 l., 9 funciones, máx. 76 l.): time-stop →
+  contrato → posición → reentrada → confianza → Qwen degradado → sesgo →
+  quórum → **sizing al final**; orden y atribución idénticos a producción.
+  `_SIZING_WARN_TS` se movió con su rate-limit.
+
+El router conserva **994 líneas** (fetch/validación, bloque Qwen, payload de
+auditoría, constructor de respuesta): deuda declarada, no oculta. Ratchet:
+`tests/architecture_baseline.py::BIG_FUNCS` fija 994, no puede crecer.
+
+### H-K — 72 `except Exception` → 0
+
+`services/error_taxonomy.py` define la frontera de cada degradación:
+
+| Tupla | Contenido |
+|---|---|
+| `DB_ERRORS` | `asyncpg.PostgresError`, `InterfaceError`, `OSError`, `RuntimeError` (contrato de `get_pool()`) |
+| `HTTP_ERRORS` | `httpx.HTTPError`, `OSError` (urllib) |
+| `PARSE_ERRORS` | `ValueError`, `TypeError`, `KeyError`, `IndexError`, `JSONDecodeError` |
+| `MODEL_ERRORS` | errores de modelo/artefacto ya declarados |
+| `LOOP_ERRORS` | unión de DB + HTTP + PARSE + MODEL |
+
+**Los bugs ya no se degradan**: `AttributeError`, `NameError`, `ImportError` y
+`AssertionError` propagan. Fronteras corregidas al medir: `main.py` (equity de
+arranque = HTTP + PARSE, `status_code` explícito), `timebase` (los dos fetch por
+`status_code`), `qwen_authority` (DB + MT5 ⇒ LOOP), `model_backup`
+(`GoogleAuthError`), `structured_logging` (DB), `order_manager._total_risk_eur`
+(LOOP ⇒ `RISK_RATE_UNAVAILABLE`), y tuplas locales en `ml/trading_env_v2.py`
+(`_PARSE_ERRORS`) y `ml/train_ppo_v3.py` (`_FETCH_ERRORS`) para no abrir una
+arista `ml → services`.
+
+Dos tests simulaban caídas externas con `Exception` genérica (corregidos a
+`OSError`); dos tests parcheaban `httpx` durante el arranque y usaban
+`AssertionError` como fallo externo (`test_p31b_pair_gate`,
+`test_g3_usdchf_canary`): el parche se movió **después** del arranque para medir
+el gate en la petición. `tests/architecture_baseline.py` fija
+`EXCEPT_EXCEPTION = {}`.
+
+### Deuda restante (declarada)
+
+- `predict_direction` 994 líneas (fetch/Qwen/audit/response): siguiente corte
+  natural, sin cambio de comportamiento.
+- `ml/ → services`: cerrada; quedan aristas `services → ml` intencionales
+  (`drift_monitor`, `auto_retrain`, `cross_audit`).
+- R:R / tope de SL: **decidido NO** con la medición de §7.
+- `MIN_ENTRY_REWARD_EUR`: clave muerta en `.env`, pendiente de borrar.

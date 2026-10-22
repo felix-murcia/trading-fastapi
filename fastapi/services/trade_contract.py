@@ -56,13 +56,12 @@ import math
 from dataclasses import dataclass, field
 from typing import Optional, Sequence
 
-from core.rules import MIN_WIN_EUR
-from ml.trading_env_v2 import SPREAD_BUFFER_PIPS
+from core.rules import MIN_WIN_EUR, SPREAD_BUFFER_PIPS
 from services.position_sizing import expected_close_eur
 
 # Coste de ejecución declarado, en pips: es el MISMO buffer de spread que el
-# EA suma al stop (mql5/AI_Quant_Terminal.mq5, constante espejo de
-# `SPREAD_BUFFER_PIPS`). No se inventa un spread: se usa el que el sistema
+# EA suma al stop (mql5/AI_Quant_Terminal.mq5; `SPREAD_BUFFER_PIPS` vive en
+# `core.rules`). No se inventa un spread: se usa el que el sistema
 # ya asume al colocar el SL.
 EXEC_COST_PIPS = SPREAD_BUFFER_PIPS
 

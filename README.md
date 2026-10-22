@@ -3800,3 +3800,103 @@ MQL5 (EA v14.1).
   USDCHF 11:47:01 (`contract_ok=true`, `ppl_eur` 10,861, `risk_eur` 9,38 ≤
   9,89 = 2 % de 494,47 €). `/health` OK (equity 494,47 €).
 - Único ERROR: backup GCS sin ADC (conocido, sin impacto).
+
+## 2026-10-22 (3) · H-I / H-K / H-N — el router baja de 1230 a 994 líneas, cero `except Exception` y la medición que dice NO al filtro de R:R
+
+**Suite: 1276 passed + 2 xfailed.** Sin cambios en MQL5 (EA **v14.1**). La
+deuda que estaba congelada se cobró en tres frentes, con una regla: nada de
+dinero se cambia sin medición y nada se «arregla» tapando errores.
+
+### H-N — el filtro de R:R / SL no paga: NO se añade (medido, no opinado)
+
+Se midieron 29 976 velas H1 compartidas (2021-12-23 → 2026-10-20/21, EURUSD +
+USDCHF) con el motor real, entradas aleatorias y la geometría de producción.
+**Base agregada: n = 114 959, E[R] = −0,068 R.** Los filtros candidatos no
+mejoran la expectativa:
+
+| Filtro | Señales que conserva | Δ E[R] |
+|---|---:|---:|
+| R:R ≥ 1,0 | 36,8 % | **+0,003 R** |
+| SL/ATR ≤ 1,5 | 41,4 % | **−0,004 R** |
+
+Todos los cortes medidos quedan en **Δ ≤ +0,007 R** (ruido); los buckets no
+son monótonos (el mejor es 1,25–1,50; el peor ≥ 2,0). Enfrentar niveles fijos
+contra 2×SL tampoco separa: EURUSD −0,072 R (n = 57 987) vs −0,061 R
+(n = 59 938); USDCHF −0,065 vs −0,069. **Decisión: no se añade R:R mínimo ni
+tope de SL**; se mantienen I1/I2/I3 del contrato (`riesgo_no_cabe`,
+`safe4_no_cabe_en_riesgo`, `tp_no_paga_bloqueo`, `tp_no_cubre_costes`).
+Evidencia reproducible: `fastapi/ops/evidence/2026-10-22-hn-rr-gate.txt` ·
+`scripts/measure_rr_gate.py`.
+
+**Bug real de H-N corregido (no era el filtro, era la unidad):**
+`target_level_candidates` comparaba una banda en **pips** contra distancias en
+**precio** ⇒ en producción devolvía **0 candidatos** siempre; el serve caía al
+fallback `2×SL` mientras el entorno de entrenamiento usaba el techo más
+cercano ⇒ **divergencia train/serve**. La banda ahora es
+`max(atr_pips × mult, MIN_LEVEL_PIPS) × pip_size` y `pip_size` es obligatorio.
+Regresión: `tests/test_g3_nearest_levels.py::test_candidates_band_is_price_not_pips`.
+La corrección se justifica por paridad y corrección, **no por rentabilidad**:
+con entrada aleatoria el E[R] es un empate (EURUSD −0,011 R, USDCHF +0,004 R).
+
+### H-I — `predict_direction`: 1230 → 994 líneas (−236, −19,2 %)
+
+Dos piezas nuevas, puras y con tests de paridad:
+
+- **`services/trade_setup.py`** — `TradeSetup` + `prepare_trade` (67 líneas):
+  geometría → lote → TP → contrato. Sin I/O.
+- **`services/veto_chain.py`** — 9 funciones (máx. 76 líneas): time-stop →
+  contrato → posición → reentrada → confianza → Qwen degradado → sesgo →
+  quórum → **sizing al final** (el orden y la atribución son los de producción;
+  `_SIZING_WARN_TS` se movió con su rate-limit). La autoridad de Qwen sigue en
+  el router (I/O); la cadena recibe `authorized: bool` y `cycle_id`.
+
+El router conserva aún **994 líneas** (fetch/validación de datos, bloque Qwen,
+payload de auditoría y constructor de respuesta): deuda declarada, no oculta.
+El ratchet queda en 994 (`tests/architecture_baseline.py`), así que no puede
+volver a crecer.
+
+### H-K — 72 capturas genéricas → **0** `except Exception`
+
+`services/error_taxonomy.py` define la frontera de cada degradación:
+`DB_ERRORS` (asyncpg + `InterfaceError` + `OSError` + `RuntimeError` del
+contrato de `get_pool()`), `HTTP_ERRORS` (httpx + `OSError`), `PARSE_ERRORS`,
+`MODEL_ERRORS` y `LOOP_ERRORS`. **Los bugs ya no se degradan**:
+`AttributeError`, `NameError`, `ImportError` y `AssertionError` propagan.
+Correcciones de frontera que salieron al medir:
+
+- `main.py` arranque: el fetch de equity es **HTTP + PARSE**, no BD; se
+  comprueba `status_code` en vez de depender de `raise_for_status()` de un doble.
+- `timebase`: los dos fetch usan `status_code` (un doble sin
+  `raise_for_status` ya no rompe el arranque).
+- `qwen_authority`: la medición toca DB **y** MT5 por HTTP ⇒ `LOOP_ERRORS`
+  (sigue sin tumbar el ciclo).
+- `model_backup`: `GoogleAuthError` incluido (sin ADC el backup local manda; ya
+  no revienta).
+- `structured_logging`: `DB_ERRORS` (auditoría best-effort declarada).
+- `order_manager._total_risk_eur`: `LOOP_ERRORS` (feed caído ⇒
+  `RISK_RATE_UNAVAILABLE`, bloqueo explícito).
+- `ml/trading_env_v2.py` y `ml/train_ppo_v3.py`: tuplas locales
+  `_PARSE_ERRORS` / `_FETCH_ERRORS` para no abrir una arista `ml → services`.
+
+Dos tests simulaban caídas externas con `Exception` genérica y se corrigieron a
+`OSError`; dos tests (`test_p31b_pair_gate`, `test_g3_usdchf_canary`) parcheaban
+`httpx` durante el arranque y usaban `AssertionError` como fallo externo: el
+parche se movió **después** del arranque para medir el gate en la petición.
+`tests/architecture_baseline.py` fija `EXCEPT_EXCEPTION = {}`.
+
+### Retirada de endpoints inertes y scripts legacy
+
+`/v1/smc/close` y `/v1/smc/news-check` (más `services/position_ownership.py` y
+`tests/test_p24b_selective_close.py`) se han borrado: con el motor SMC retirado
+sólo actuaban sobre el ledger `smc_` heredado (**1 orden cancelada** en toda la
+historia). `/v1/smc` queda en `audit`, `news` y `analytics` (dashboard). También
+se borraron los 6 scripts legacy de `ml/` (`retrain_agent`, `trading_env`,
+`train_hgboost`, `train_model`, `train_ppo`, `train_xgboost`), sin llamadores
+en runtime.
+
+### Cierre
+
+`pytest tests/ -q` → **1276 passed + 2 xfailed**; reglas de arquitectura (6)
+verdes; **0** literales `except Exception` en runtime. Sin EA: v14.1 no cambia.
+Evidencia: `fastapi/ops/2026-10-22-consolidacion-arquitectura.md` §7 ·
+`fastapi/ops/2026-10-22-hallazgos-motor-dinero.md`.

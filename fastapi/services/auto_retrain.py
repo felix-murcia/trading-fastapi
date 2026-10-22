@@ -34,6 +34,7 @@ from services.walk_forward import (
     evaluate_walk_forward,
     gate_walk_forward,
 )
+from services.error_taxonomy import LOOP_ERRORS
 
 logger = logging.getLogger(__name__)
 
@@ -1518,7 +1519,7 @@ async def check_scheduled_retrain() -> bool:
 
     try:
         symbols = [ctx.config.symbol for ctx in build_registry_from_settings().enabled()]
-    except Exception as exc:  # noqa: BLE001
+    except LOOP_ERRORS as exc:  # noqa: BLE001
         logger.warning("[RETRAIN-SCHED] no se pudo leer el registro de pares: %s", exc)
         symbols = [TRAINING_SYMBOL]
 
@@ -1573,7 +1574,7 @@ async def _retrain_schedule_loop() -> None:
             await check_scheduled_retrain()
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
+        except LOOP_ERRORS as exc:
             send_alert(
                 AlertLevel.ERROR, "auto_retrain",
                 f"Check de retrain programado falló: {type(exc).__name__}: {exc}",
