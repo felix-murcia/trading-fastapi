@@ -39,8 +39,10 @@ from ml.trading_env_v2 import (
     engineer_market_features,
     get_market_features,
     join_higher_tf_channels,
-    production_stops,
+    production_sl,
+    production_stops_with_paying_tp,
     stop_geometry_kind,
+    target_level_candidates,
 )
 from services.auto_retrain import (
     approve_retrain as _approve_retrain,
@@ -1281,13 +1283,18 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     # CERCANO con la DIRECCIÓN objetivo (LONG: SL bajo el suelo, TP en el
     # techo; SHORT: al revés). Se calcula AQUÍ, después del decode, porque
     # depende de la dirección: antes se calculaba antes del decode y con la
-    # posición actual, lo que sólo daba la rama plana (fallback ATR) ⇒ el
-    # env entrenaba una geometría y producción otra (paridad rota 10-08).
+    # posición actual, lo que sólo funcionaba en la rama plana (fallback ATR)
+    # ⇒ el env entrenaba una geometría y producción otra (paridad rota 10-08).
     # `sl_pips_geom` es lo que se envía al EA (que añade su buffer de spread);
     # `sl_pips` es la distancia REAL del stop (geom + buffer) ⇒ es la que
     # debe usar el sizing y el audit (si no, el riesgo real de la posición
     # excede el presupuesto: 13 % medido el 21-10).
-    sl_pips_geom, tp_pips = production_stops(
+    #
+    # Variante B (2026-10-22): el TP es el techo más cercano QUE PAGA (≥ el
+    # mínimo de clasificación) ⇒ el orden es SL → lote → TP. Medido: +15-17 pp
+    # de señales en EURUSD y +6-8 pp en USDCHF con la misma expectativa por
+    # operación (scripts/compare_geometry_variants.py).
+    sl_pips_geom = production_sl(
         current_atr, pip_size,
         direction=target_pos,
         floor_below=floor_below or None,
@@ -1295,6 +1302,30 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         current_price=current_price,
     )
     sl_pips = effective_sl_pips(sl_pips_geom)
+    # Lote provisional para saber qué TP paga (el definitivo sale justo
+    # debajo con la MISMA fórmula ⇒ idéntico).
+    _pip_value = pip_value_per_lot(sym, current_price)
+    _lot_probe = size_ppo_position(
+        volume_norm=volume_norm, sl_pips=sl_pips, equity=equity_val,
+        pip_value=_pip_value, risk_pct=settings.ppo_risk_pct,
+        max_lot=settings.max_volume, min_lot=settings.min_volume,
+    )
+    _min_tp_pips = 0.0
+    if _lot_probe > 0 and _pip_value > 0:
+        _min_tp_pips = MIN_ENTRY_REWARD_EUR / (_lot_probe * _pip_value)
+    _tp_cands = target_level_candidates(
+        df, 1 if target_pos == 1 else -1,
+        current_atr / pip_size, current_price,
+    )
+    _, tp_pips = production_stops_with_paying_tp(
+        current_atr, pip_size,
+        direction=target_pos,
+        floor_below=floor_below or None,
+        ceiling_above=ceiling_above or None,
+        current_price=current_price,
+        tp_candidates=_tp_cands,
+        min_tp_pips=_min_tp_pips,
+    )
 
     # P2-2: sizing delegado en position_sizing.size_ppo_position — la cabeza
     # `volume` modula el riesgo (0…settings.ppo_risk_pct del equity) con el

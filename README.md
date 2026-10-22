@@ -3587,3 +3587,46 @@ confirman: entrada 22:45:39 del bróker = 19:45:39 UTC, que es exactamente el
 `created_at` de la orden 76). La etiqueta del servidor es 1 h engañosa; el
 `time_msc` de los deals y el `entry_time` de `trade_outcomes` sí son
 coherentes.
+
+### 8. Variante B desplegada (22-10) + DOS hallazgos de ALTA severidad en el motor de dinero
+
+**Variante B — "el TP es el techo más cercano QUE PAGA" (≥ 3 € al lote
+elegido).** Decidida por Félix ("aplica la opción que más beneficio obtenga")
+tras medir las cuatro variantes con el motor real
+(`scripts/compare_geometry_variants.py`, 29 981 velas H1 × 2 pares × 2
+ventanas disjuntas, con el edge direccional incluido en el criterio):
+
+| | A (actual) | **B (elegida)** | C (fallback por lado) | D (B+C) |
+|---|---|---|---|---|
+| EURUSD TREN · eficiencia de capital | 3,24 | **3,53** | 3,14 | 3,35 |
+| EURUSD TEST | 3,40 | **3,64** | 3,32 | 3,49 |
+| USDCHF TREN | 3,07 | **3,24** | 3,01 | 3,15 |
+| USDCHF TEST | 2,95 | **3,11** | 2,86 | 2,97 |
+
+⇒ B gana en las cuatro combinaciones; C (el fallback por lado) **mide peor**
+⇒ **no se implementa**. El umbral de edge para que B supere a A es de sólo
+**0,09 ATR** (el sistema lo tiene muy por encima). Implementación: el orden
+es **SL → lote → TP** (el TP se elige entre los candidatos del lado objetivo,
+el primero cuyo valor en € llega al mínimo de clasificación); train y serve
+comparten las MISMAS funciones (`production_sl`, `production_tp`,
+`production_stops_with_paying_tp`, `target_level_candidates` — el test de
+paridad comprueba la identidad de objeto de las cuatro).
+
+**⚠️ DOS HALLAZGOS DE ALTA SEVERIDAD detectados al auditar la primera
+operación de USDCHF con G3-2** (`fastapi/ops/2026-10-22-hallazgos-motor-dinero.md`,
+**NO corregidos** — cambian el motor de dinero y son decisión de Félix):
+
+- **H-A — el tope de riesgo se VIOLA en los pares con base USD.** El sizing
+  mezcla un presupuesto en **EUR** con un pip value en **USD**
+  (`pip_value_per_lot` = 10 USD sin conversión) ⇒ el lote sale un `1/precio`
+  más grande de lo permitido ⇒ **medido: riesgo € real 11,04 € con tope de
+  9,74 € (+13 %)** en la orden 80 (USDCHF). En USDJPY (precio ~150) sería
+  **+600 %**. La inconsistencia es interna: `expected_close_eur` (la
+  recompensa) SÍ convierte a € y el sizing NO. En EURUSD el error va al
+  revés (riesgo 12 % por debajo del tope: seguro, pero infrautilizado).
+- **H-B — la cola del SL**: con el precio en el extremo de su rango, el
+  "nivel más cercano" puede estar a 39 pips (3,5 ATR) ⇒ SL de 43 pips y
+  **R:R 0,32** (hace falta un 76 % de acierto) con un lote mínimo. El filtro
+  de significancia garantiza que el nivel no es ruido, pero **no acota su
+  distancia**. Fix candidatos: tope de distancia del SL (≤ 2×ATR) o no operar
+  sin estructura utilizable — **pendiente de medición**.

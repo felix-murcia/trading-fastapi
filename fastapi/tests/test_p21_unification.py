@@ -23,7 +23,10 @@ from ml.trading_env_v2 import (
     ForexTradingEnvV2,
     engineer_market_features,
     effective_sl_pips,
+    production_sl,
     production_stops,
+    production_stops_with_paying_tp,
+    target_level_candidates,
 )
 
 PIP = 0.0001
@@ -80,8 +83,13 @@ class TestProductionStopsSingleSource:
     def test_predict_imports_the_same_function_object(self):
         # Si /predict dejara de importar esta función (p.ej. una copia local),
         # la paridad train/serve se rompería en silencio → este test la bloquea.
+        # G3-2 (2026-10-22): la geometría se compone de DOS funciones (el SL y
+        # el TP) ⇒ las DOS tienen que ser el MISMO objeto en el router y en el
+        # env (una copia local en cualquiera de los dos lados rompe la paridad).
         import routers.ai as ai_router
-        assert ai_router.production_stops is production_stops
+        assert ai_router.production_sl is production_sl
+        assert ai_router.production_stops_with_paying_tp is production_stops_with_paying_tp
+        assert ai_router.target_level_candidates is target_level_candidates
 
     def test_env_open_uses_production_stops_not_the_action(self):
         env = _env()

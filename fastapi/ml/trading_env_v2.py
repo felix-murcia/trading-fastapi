@@ -46,7 +46,7 @@ from gymnasium import spaces
 import numpy as np
 import pandas as pd
 
-from core.rules import is_winning_close
+from core.rules import MIN_WIN_EUR, is_winning_close
 
 # P2-2: el sizing del PPO vive en position_sizing (misma función que /predict)
 from services.position_sizing import size_ppo_position
@@ -743,6 +743,124 @@ def stop_geometry_kind(
     return "atr_fallback"
 
 
+def target_level_candidates(
+    df: pd.DataFrame,
+    side: int,
+    atr_pips: float,
+    current_price: float,
+    mult: float = NEAREST_LEVEL_ATR_MULT,
+    window: int = NEAREST_LEVEL_WINDOW,
+    max_candidates: int = 6,
+) -> list:
+    """Niveles CONFIRMADOS del lado OBJETIVO, del más cercano al más lejos.
+
+    `side`: +1 = techos (objetivo de un LONG), −1 = suelos (objetivo de un SHORT).
+    Filtro de significancia: el nivel debe estar a ≥ mult×ATR del precio (si
+    no, es ruido, no un nivel). Sólo usa swings CONFIRMADOS (i ≤ t−2 ⇒ sin
+    mirada al futuro).
+
+    Sirve para elegir el TP que SÍ PAGA: el más cercano cuyo valor en € (al
+    lote elegido) alcance el mínimo de clasificación (G3-2, 2026-10-22:
+    variante B, medida en `scripts/compare_geometry_variants.py`).
+    """
+    n = len(df)
+    if n == 0 or atr_pips <= 0:
+        return []
+    high = df["high"].to_numpy(dtype=float)
+    low = df["low"].to_numpy(dtype=float)
+    band = atr_pips * mult
+    if side > 0:
+        swing = df["swing_high"].to_numpy(dtype=float)
+        levels = high
+    else:
+        swing = df["swing_low"].to_numpy(dtype=float)
+        levels = low
+    lo_i = max(0, n - 2 - window)
+    hi_i = n - 2                      # el swing de la vela n-1 aún no se conoce
+    out = []
+    if hi_i <= lo_i:
+        return out
+    cand = levels[lo_i:hi_i + 1]
+    ok = swing[lo_i:hi_i + 1] == 1.0
+    cand = cand[ok]
+    if side > 0:
+        cand = cand[(cand > current_price) & ((cand - current_price) >= band)]
+        cand = np.sort(cand)
+    else:
+        cand = cand[(cand < current_price) & ((current_price - cand) >= band)]
+        cand = np.sort(cand)[::-1]
+    return [float(x) for x in cand[:max_candidates]]
+
+
+def production_sl(
+    atr_norm: float,
+    pip_size: float,
+    direction: int = 0,
+    floor_below: Optional[float] = None,
+    ceiling_above: Optional[float] = None,
+    current_price: Optional[float] = None,
+) -> float:
+    """Distancia REAL del SL (geometría suelo/techo más cercano, con el buffer
+    de spread del EA dentro). Ver `production_stops` para la justificación.
+    """
+    atr_pips = atr_norm / pip_size
+    sl_pips = max(10.0, min(50.0, atr_pips * 1.5))     # fallback ATR
+    if direction in (1, -1) and floor_below is not None and ceiling_above is not None \
+            and current_price is not None and current_price > 0 \
+            and float(floor_below) > 0 and float(ceiling_above) > 0:
+        if direction == 1:      # LONG: SL bajo el suelo
+            sl_px = floor_below - SPREAD_BUFFER_PIPS * pip_size
+        else:                  # SHORT: SL sobre el techo
+            sl_px = ceiling_above + SPREAD_BUFFER_PIPS * pip_size
+        sl_c = abs(current_price - sl_px) / pip_size
+        if sl_c >= MIN_LEVEL_PIPS:
+            sl_pips = max(10.0, min(50.0, sl_c))
+    return sl_pips
+
+
+def production_tp(
+    atr_norm: float,
+    pip_size: float,
+    direction: int = 0,
+    floor_below: Optional[float] = None,
+    ceiling_above: Optional[float] = None,
+    current_price: Optional[float] = None,
+    sl_pips: Optional[float] = None,
+    tp_candidates: Optional[list] = None,
+    min_tp_pips: float = 0.0,
+) -> float:
+    """Distancia del TP.
+
+    Variante B (G3-2, 2026-10-22): si `tp_candidates` y `min_tp_pips` vienen
+    dados, el TP es el candidato más cercano **a distancia ≥ min_tp_pips**
+    (o sea: el más cercano que PAGA el mínimo de clasificación) — si ningún
+    candidato llega, se cae al fallback ATR (2×SL) y el gate de recompensa
+    Bloqueará la entrada, que es lo correcto.
+    """
+    atr_pips = atr_norm / pip_size
+    sl = sl_pips if sl_pips else max(10.0, min(50.0, atr_pips * 1.5))
+    tp_pips = sl * 2.0
+    if direction in (1, -1) and floor_below is not None and ceiling_above is not None \
+            and current_price is not None and current_price > 0 \
+            and float(floor_below) > 0 and float(ceiling_above) > 0:
+        tp_pips = None
+        if tp_candidates:
+            for lvl in tp_candidates:
+                d = abs(lvl - current_price) / pip_size
+                if d >= MIN_LEVEL_PIPS and d >= min_tp_pips:
+                    tp_pips = d
+                    break
+        if tp_pips is None:
+            # el nivel más cercano (si hay) pero sin paging: fallback ATR
+            near = None
+            if direction == 1 and float(ceiling_above) > 0:
+                near = abs(float(ceiling_above) - current_price) / pip_size
+            elif direction == -1 and float(floor_below) > 0:
+                near = abs(float(floor_below) - current_price) / pip_size
+            tp_pips = near if (near is not None and near >= MIN_LEVEL_PIPS) else sl * 2.0
+    return max(10.0, min(200.0, tp_pips))
+
+
 def production_stops(
     atr_norm: float,
     pip_size: float,
@@ -778,27 +896,56 @@ def production_stops(
     stop: el sistema debe conocer la distancia REAL (misma constante
     espejada en mql5/AI_Quant_Terminal.mq5) ⇒ `effective_sl_pips()`.
     """
-    atr_pips = atr_norm / pip_size
-    # Fallback ATR (geometría anterior) — se usa si no hay niveles utilizables
-    sl_pips = max(10.0, min(50.0, atr_pips * 1.5))
-    tp_pips = sl_pips * 2.0
+    # UNA SOLA IMPLEMENTACIÓN: el SL y el TP salen de `production_sl` /
+    # `production_tp` (las mismas funciones que usa `/predict`) ⇒ la paridad
+    # train↔serve es por construcción, no por convención.
+    sl_pips = production_sl(
+        atr_norm, pip_size, direction=direction, floor_below=floor_below,
+        ceiling_above=ceiling_above, current_price=current_price,
+    )
+    tp_pips = production_tp(
+        atr_norm, pip_size, direction=direction, floor_below=floor_below,
+        ceiling_above=ceiling_above, current_price=current_price,
+        sl_pips=sl_pips,
+    )
+    return sl_pips, tp_pips
 
-    if direction in (1, -1) and floor_below is not None and ceiling_above is not None \
-            and current_price is not None and current_price > 0:
-        if direction == 1:      # LONG: SL bajo el suelo, TP en el techo
-            sl_px = floor_below - SPREAD_BUFFER_PIPS * pip_size
-            tp_px = ceiling_above
-        else:                  # SHORT: SL sobre el techo, TP en el suelo
-            sl_px = ceiling_above + SPREAD_BUFFER_PIPS * pip_size
-            tp_px = floor_below
-        sl_c = abs(current_price - sl_px) / pip_size
-        tp_c = abs(tp_px - current_price) / pip_size
-        # Un nivel a menos de MIN_LEVEL_PIPS del precio es ruido, no un
-        # suelo/techo → se descarta el par y se cae al fallback ATR.
-        if sl_c >= MIN_LEVEL_PIPS and tp_c >= MIN_LEVEL_PIPS:
-            sl_pips = max(10.0, min(50.0, sl_c))
-            tp_pips = max(10.0, min(200.0, tp_c))
 
+def production_stops_with_paying_tp(
+    atr_norm: float,
+    pip_size: float,
+    direction: int = 0,
+    floor_below: Optional[float] = None,
+    ceiling_above: Optional[float] = None,
+    current_price: Optional[float] = None,
+    tp_candidates: Optional[list] = None,
+    min_tp_pips: float = 0.0,
+) -> Tuple[float, float]:
+    """Variante B (G3-2, 2026-10-22): el TP es el techo más cercano que PAGA.
+
+    El SL se calcula igual (suelo/techo más cercano con el buffer del EA) y el
+    TP se elige entre los niveles candidatos del lado objetivo: el más
+    cercano a distancia ≥ `min_tp_pips` (o sea, el más cercano cuyo valor en
+    € al lote elegido alcanza el mínimo de clasificación).
+
+    Medido (29 981 velas H1 × 2 pares × 2 ventanas disjuntas,
+    `scripts/compare_geometry_variants.py`): recupera 15-17 pp de señales en
+    EURUSD y 6-8 pp en USDCHF, con la MISMA expectativa por operación (±0,01 R)
+    y una eficiencia de capital +5-9 % (con el edge que tiene el sistema:
+    el umbral de edge para que B supere a A es de sólo 0,09 ATR).
+
+    El fallback (sin nivel pagable) es el ATR 2×SL ⇒ el gate de recompensa
+    mínima bloqueará la entrada, que es lo correcto: no hay techo que pague.
+    """
+    sl_pips = production_sl(
+        atr_norm, pip_size, direction=direction, floor_below=floor_below,
+        ceiling_above=ceiling_above, current_price=current_price,
+    )
+    tp_pips = production_tp(
+        atr_norm, pip_size, direction=direction, floor_below=floor_below,
+        ceiling_above=ceiling_above, current_price=current_price,
+        sl_pips=sl_pips, tp_candidates=tp_candidates, min_tp_pips=min_tp_pips,
+    )
     return sl_pips, tp_pips
 
 
@@ -1199,14 +1346,40 @@ class ForexTradingEnvV2(gym.Env):
             # rama ATR). `floor_below`/`ceiling_above` vienen CONFIRMADOS
             # (sin mirada al futuro) y el SL incluye el buffer de spread del
             # EA (la distancia real del stop).
-            sl_pips_c, tp_pips_c = production_stops(
+            # Variante B (2026-10-22): el TP es el techo más cercano QUE PAGA
+            # (≥ min_tp_pips) ⇒ el orden es SL → lote → TP.
+            sl_geom = production_sl(
                 float(candle["atr"]), self.pip_size,
                 direction=target_pos,
                 floor_below=float(candle.get("floor_below", 0)) or None,
                 ceiling_above=float(candle.get("ceiling_above", 0)) or None,
                 current_price=close_price,
             )
-            sl_pips_c = effective_sl_pips(sl_pips_c)
+            sl_pips_c = effective_sl_pips(sl_geom)
+            # Lote provisional (para saber qué TP paga) — el DEFINITIVO se
+            # calcula justo debajo con la misma fórmula (idéntica).
+            _lot_probe = size_ppo_position(
+                volume_norm=vol_norm, sl_pips=sl_pips_c, equity=self.balance,
+                pip_value=self.pip_size * self.lot_size, risk_pct=self.risk_pct,
+                max_lot=self.max_lot,
+            )
+            _min_tp_pips = 0.0
+            if _lot_probe > 0:
+                _min_tp_pips = (MIN_WIN_EUR / (_lot_probe * self.pip_size * self.lot_size)
+                                if _lot_probe * self.pip_size * self.lot_size > 0 else 0.0)
+            _cands = target_level_candidates(
+                self.df, 1 if target_pos == 1 else -1,
+                float(candle["atr"]) / self.pip_size, close_price,
+            )
+            _, tp_pips_c = production_stops_with_paying_tp(
+                float(candle["atr"]), self.pip_size,
+                direction=target_pos,
+                floor_below=float(candle.get("floor_below", 0)) or None,
+                ceiling_above=float(candle.get("ceiling_above", 0)) or None,
+                current_price=close_price,
+                tp_candidates=_cands,
+                min_tp_pips=_min_tp_pips,
+            )
             # P2-2: sizing delegado en position_sizing.size_ppo_position (misma
             # función que /predict): la cabeza `volume` modula el riesgo
             # (0…risk_pct del balance) y el pip_value es pip_size × lot_size

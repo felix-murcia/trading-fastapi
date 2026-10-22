@@ -28,7 +28,11 @@ from ml.trading_env_v2 import (
     effective_sl_pips,
     engineer_market_features,
     nearest_significant_levels,
+    production_sl,
     production_stops,
+    production_stops_with_paying_tp,
+    production_tp,
+    target_level_candidates,
 )
 from services.position_sizing import PIP_SIZE, size_ppo_position
 
@@ -181,3 +185,77 @@ class TestRealStopDistance:
         geom = size_ppo_position(sl_pips=15.0, **kw)
         real = size_ppo_position(sl_pips=effective_sl_pips(15.0), **kw)
         assert real <= geom
+
+
+class TestVariantB:
+    """G3-2 (2026-10-22): el TP es el techo más cercano QUE PAGA.
+
+    Medido (29 981 velas H1 × 2 pares × 2 ventanas disjuntas,
+    `scripts/compare_geometry_variants.py`): +15-17 pp de señales en EURUSD y
+    +6-8 pp en USDCHF con la misma expectativa por operación (±0,01 R) y
+    +5-9 % de eficiencia de capital (el umbral de edge para que B supere a
+    la variante A es de sólo 0,09 ATR).
+    """
+
+    def test_candidates_are_ordered_and_significance_filtered(self):
+        feats = engineer_market_features(_candles(200))
+        price = float(feats["close"].iloc[-1])
+        atr_pips = float(feats["atr"].iloc[-1]) / PIP
+        for side in (1, -1):
+            cands = target_level_candidates(feats, side, atr_pips, price)
+            assert isinstance(cands, list)
+            dists = [abs(c - price) / PIP for c in cands]
+            assert dists == sorted(dists), "los candidatos van de más cerca a más lejos"
+            for d in dists:
+                assert d >= NEAREST_LEVEL_ATR_MULT * atr_pips - 1e-6, (
+                    "un candidato a menos de mult×ATR del precio es ruido"
+                )
+                assert d >= MIN_LEVEL_PIPS - 1e-6
+
+    def test_tp_is_the_nearest_candidate_that_pays(self):
+        price = 1.1050
+        atr_pips = 10.0
+        sl_pips = 15.0
+        # techo a 6 pips (no paga con min_tp_pips=20) y a 25 pips (sí paga)
+        cands = [price + 0.0006, price + 0.0025]
+        tp = production_tp(
+            atr_pips * PIP, PIP, direction=1,
+            floor_below=price - 0.0020, ceiling_above=price + 0.0025,
+            current_price=price, sl_pips=sl_pips,
+            tp_candidates=cands, min_tp_pips=20.0,
+        )
+        assert tp == pytest.approx(25.0), "el TP debe ser el techo que PAGA, no el más cercano"
+
+    def test_without_a_paying_candidate_it_falls_back(self):
+        price = 1.1050
+        tp = production_tp(
+            10.0 * PIP, PIP, direction=1,
+            floor_below=price - 0.0020, ceiling_above=price + 0.0006,
+            current_price=price, sl_pips=15.0,
+            tp_candidates=[price + 0.0006], min_tp_pips=20.0,
+        )
+        # ningún techo paga ⇒ el TP es el nivel MÁS CERCANO (con el suelo
+        # mínimo de 10 pips del contrato): su valor en € queda por debajo del
+        # mínimo de clasificación ⇒ el gate de recompensa bloquea la entrada
+        # (es el comportamiento de la variante A para esa clase).
+        assert tp == pytest.approx(10.0)
+
+    def test_train_and_serve_agree(self):
+        """La geometría es la MISMA función en los dos lados (paridad real)."""
+        import routers.ai as ai_router
+        assert ai_router.production_sl is production_sl
+        assert ai_router.production_stops_with_paying_tp is production_stops_with_paying_tp
+        atr = 0.0009
+        price = 1.1050
+        floor_b = 1.1020
+        ceil_a = 1.1080
+        cands = [ceil_a]
+        a = production_stops_with_paying_tp(
+            atr, PIP, direction=1, floor_below=floor_b, ceiling_above=ceil_a,
+            current_price=price, tp_candidates=cands, min_tp_pips=0.0,
+        )
+        b = ai_router.production_stops_with_paying_tp(
+            atr, PIP, direction=1, floor_below=floor_b, ceiling_above=ceil_a,
+            current_price=price, tp_candidates=cands, min_tp_pips=0.0,
+        )
+        assert a == b
