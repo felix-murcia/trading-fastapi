@@ -7,7 +7,6 @@ Entrenamiento PPO v3 — ACCIÓN CONTINUA AUTÓNOMA (Refactorizado)
 - Backtest completo post-entrenamiento sobre todo el dataset de validación.
 """
 
-from datetime import datetime
 import json
 import os
 import pickle
@@ -26,11 +25,10 @@ from trading_env_v2 import (
     MARKET_FEATURES,
     ForexTradingEnvV2,
     engineer_market_features,
-    get_market_features,
 )
 
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import EvalCallback, BaseCallback
+from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 MT5_HTTP_URL = os.getenv("MT5_HTTP_URL")

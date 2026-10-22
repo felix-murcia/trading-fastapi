@@ -25,7 +25,6 @@ import datetime as dt
 import json
 import os
 import time
-from typing import Optional
 
 from core.rules import MIN_WIN_EUR, is_winning_close
 

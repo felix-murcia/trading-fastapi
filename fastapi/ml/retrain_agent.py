@@ -6,7 +6,6 @@ import os
 import time
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
-from stable_baselines3.common.callbacks import EvalCallback
 from train_ppo import load_data, ForexTradingEnv
 
 MODEL_PATH = "/app/ml/ppo_trading_bot.zip"

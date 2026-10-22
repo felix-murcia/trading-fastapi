@@ -25,7 +25,6 @@ from datetime import datetime, timezone
 from db.connection import get_pool
 from services.risk_guardian import (
     get_account_state,
-    get_risk_guardian,
     registered_guardians,
 )
 

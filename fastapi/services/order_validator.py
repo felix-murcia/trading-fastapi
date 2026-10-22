@@ -4,7 +4,6 @@ Order validation logic — extracted from order_manager.prepare.
 Follows Single Responsibility Principle: each validator does one thing.
 """
 import logging
-from typing import Optional
 
 from config import settings
 from models.orders import OrderPrepareRequest

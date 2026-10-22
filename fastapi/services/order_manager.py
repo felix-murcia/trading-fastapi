@@ -97,8 +97,11 @@ async def _total_risk_eur(open_all: list[dict], equity: float) -> tuple[float, s
     """G2-5/D2 (orden Félix 2026-10-17): riesgo-1R agregado de las posiciones
     abiertas de la cuenta, en EUR (moneda de la cuenta).
 
-    Convenio B1: USD→EUR dividiendo por el precio EURUSD — lo mismo que hace
-    el bróker con el P/L flotante (posición_sizing.py comentario §61-69).
+    Convenio: la conversión USD/CHF→EUR es la MISMA que la del contrato de
+    dinero (`expected_close_eur`, la función que usa `/predict` y el ledger)
+    — antes este módulo dividía por EURUSD a mano y para USDCHF daba −17,8 %
+    de riesgo frente al bróker (medido con el deal 58603377390). Una sola
+    conversión ⇒ el guardián y el contrato no pueden volver a discrepar.
 
     Fail-closed en dos niveles:
     - Posición sin SL o símbolo sin convención de pip → se cuenta a su
@@ -112,7 +115,7 @@ async def _total_risk_eur(open_all: list[dict], equity: float) -> tuple[float, s
         return 0.0, ""
     from services.mt5_client import get_candles
     from services.position_sizing import (
-        PIP_SIZE, is_supported, pip_value_per_lot,
+        PIP_SIZE, expected_close_eur, is_supported,
     )
     rate = 0.0
     try:
@@ -144,7 +147,16 @@ async def _total_risk_eur(open_all: list[dict], equity: float) -> tuple[float, s
             risk_eur += worst_case
             continue
         pips = abs(entry - sl) / PIP_SIZE[sym]
-        risk_eur += pips * pip_value_per_lot(sym, entry) * vol / rate
+        try:
+            risk_eur += expected_close_eur(
+                sym, pips, vol, entry, eurusd_price=rate
+            )
+        except ValueError as exc:   # símbolo sin conversión EUR declarada
+            logger.warning(
+                "[RISK] G2-5: %s sin conversión EUR (%s) — riesgo contado al "
+                "máximo teórico %.2f EUR", sym, exc, worst_case,
+            )
+            risk_eur += worst_case
     return risk_eur, ""
 
 

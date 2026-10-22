@@ -42,9 +42,12 @@ PIP_SIZE = {
 # cordura de la convención (test_g3_rule_decider.py).
 _USD_BASE = {"USDJPY", "USDCAD", "USDCNH", "USDSEK"}
 
-# G3 (2026-10-20): pares base=USD con quote=CHF ⇒ el P/L del bróker llega
-# en la moneda de la cuenta (EUR) y la conversión USD→EUR se hace con el
-# precio del PROPIO par (1 USD = 1/precio EUR en USDCHF).
+# G3 (2026-10-20), corregido 2026-10-22 con evidencia del bróker: base=USD,
+# quote=CHF (USDCHF). 1 pip = 0,0001 CHF × 100 000 USD = **10 CHF** (no 10
+# USD). CHF→EUR exige EURCHF = USDCHF × EURUSD (dos conversiones, no una).
+# Medido en el deal 58603377390 (trade_outcomes id 285, TP 10,0 p × 0,04 lot,
+# +4,33 €) ⇒ 10,825 €/pip/lote; 10/(0,82197 × 1,1236) = 10,828 (+0,03 %).
+# Con 10/precio salían 12,166 (+12,4 %) y con 10/EURUSD 8,900 (−17,8 %).
 _USD_BASE_CHF_QUOTE = {"USDCHF"}
 
 # B1 (G2): pares con QUOTE=USD y BASE≠EUR ⇒ su P/L está en USD y la
@@ -77,7 +80,9 @@ def pip_value_per_lot(symbol: str, price: float) -> float:
     if symbol == "XAUEUR":
         return 10.90            # Aprox 10💶 to 💵. Quote=EUR → 10 EUR * (EURUSD aprox 1.09)
     # quote=USD (EURUSD, GBPUSD, AUDUSD, NZDUSD, XAUUSD) y base=USD con
-    # nocional fijo de 10 USD por pip (USDCHF, G3).
+    # nocional fijo de 10 unidades de la divisa de cotización por pip
+    # (USDCHF: 10 CHF — la conversión CHF→EUR la hace `expected_close_eur`,
+    # no esta función: aquí el pip sigue en la divisa de cotización).
     return 10.0
 
 
@@ -105,6 +110,10 @@ def expected_close_eur(
     el P/L en USD se divide por el precio EURUSD (1 EUR = price USD).
     Sin el precio EURUSD NO hay conversión honesta definible ⇒ ValueError
     (fracaso ruidoso, nunca silencioso) — no se inventan tasas.
+
+    USDCHF (2026-10-22): quote=CHF ⇒ el pip son 10 CHF y CHF→EUR exige
+    EURCHF = USDCHF × EURUSD (divide por los DOS precios). Medido contra el
+    deal 58603377390: 10,828 calculado vs 10,825 real (+0,03 %).
     """
     if pips <= 0.0 or volume <= 0.0 or price <= 0.0:
         raise ValueError(
@@ -115,11 +124,20 @@ def expected_close_eur(
         # del bróker, exacta).
         return float(pips) * float(volume) * pip_value_per_lot(symbol, price) / float(price)
     if symbol in _USD_BASE_CHF_QUOTE:
-        # base=USD, quote=CHF (USDCHF): 1 pip (0,0001 CHF) × 100 000 USD =
-        # 10 USD de nocional fijo; el P/L del bróker llega en EUR ⇒
-        # 1 USD = 1/precio USDCHF EUR (convención del bróker, misma forma
-        # que el caso EURUSD pero con el precio del par).
-        return float(pips) * float(volume) * 10.0 / float(price)
+        # base=USD, quote=CHF (USDCHF): 1 pip = 0,0001 CHF × 100 000 USD =
+        # 10 CHF. CHF→EUR = EURCHF = precio USDCHF × precio EURUSD ⇒ divide
+        # por AMBOS. Sin EURUSD no hay conversión honesta definible ⇒
+        # ValueError (nunca se inventa la tasa). Verificado contra el deal
+        # 58603377390 (ver `_USD_BASE_CHF_QUOTE`).
+        if not eurusd_price or float(eurusd_price) <= 0.0:
+            raise ValueError(
+                f"expected_close_eur para {symbol} exige el precio EURUSD "
+                "(EURCHF = USDCHF × EURUSD); sin él no hay conversión honesta"
+            )
+        return (
+            float(pips) * float(volume) * 10.0
+            / (float(price) * float(eurusd_price))
+        )
     if symbol in _USD_QUOTE_NON_EUR_BASE:
         if not eurusd_price or float(eurusd_price) <= 0.0:
             raise ValueError(
@@ -134,34 +152,6 @@ def expected_close_eur(
     raise ValueError(
         f"expected_close_eur sin conversión EUR definida para {symbol}"
     )
-
-
-def min_lot_for_protection(
-    sl_pips: float,
-    pip_value: float,
-    price: float,
-    min_protection_eur: float,
-    min_lot: float = 0.01,
-) -> float:
-    """Lote mínimo para que el trailing "Safe-4" del EA pueda proteger.
-
-    El EA (input `SL_LockSafetyNetEur`, v14.0) sólo mueve el SL al bloquear
-    el beneficio si el RIESGO EN € de la posición es ≥ ese valor: con un lote
-    más pequeño el trailing queda APAGADO (hace `return` antes de tocar el
-    stop) y la posición nunca asegura nada. Félix lo pidió explícitamente el
-    2026-10-21 ("un lote que permita el trailing del SL a +4 €").
-
-    Devuelve el lote (redondeado AL ALZA al paso) cuyo riesgo en € es
-    ≥ `min_protection_eur`, o 0.0 si es imposible (precio/pip inválidos).
-    """
-    if sl_pips <= 0.0 or pip_value <= 0.0 or price <= 0.0 or min_protection_eur <= 0.0:
-        return 0.0
-    eur_per_pip_per_lot = pip_value / price
-    if eur_per_pip_per_lot <= 0.0:
-        return 0.0
-    lots_raw = min_protection_eur / (sl_pips * eur_per_pip_per_lot)
-    lots = math.ceil(lots_raw / min_lot - 1e-9) * min_lot
-    return round(lots, 2)
 
 
 def size_ppo_position(
@@ -326,34 +316,3 @@ def derive_order_from_candle_open(
     )
     return entry, sl, tp, volume
 
-
-def derive_order(direction: str, symbol: str, price: float) -> tuple[float, float, float, float]:
-    """Devuelve (entry, sl, tp, volume). SL proporcional al precio, riesgo ~sl_risk_usd."""
-    pip  = PIP_SIZE[symbol]
-    ppv  = pip_value_per_lot(symbol, price)
-
-    sl_dist = price * settings.sl_pct
-    sl_pips = sl_dist / pip
-    volume  = settings.sl_risk_usd / (sl_pips * ppv)
-    volume  = max(settings.min_volume, round(volume, 2))
-
-    sl_dist = round(sl_pips * pip, 5)
-    tp_dist = round(sl_dist * settings.rr_min, 5)
-
-    entry = price
-    if direction == "buy":
-        sl = round(entry - sl_dist, 5)
-        tp = round(entry + tp_dist, 5)
-    else:
-        sl = round(entry + sl_dist, 5)
-        tp = round(entry - tp_dist, 5)
-
-    actual_risk   = round(volume * sl_pips * ppv, 2)
-    actual_reward = round(actual_risk * settings.rr_min, 2)
-
-    logger.info(
-        "[SIZING] %s %s entry=%.5f sl_pips=%.1f sl_dist=%.5f vol=%.2f risk=$%.2f reward=$%.2f",
-        symbol, direction, entry, sl_pips, sl_dist, volume, actual_risk, actual_reward,
-    )
-
-    return entry, sl, tp, volume

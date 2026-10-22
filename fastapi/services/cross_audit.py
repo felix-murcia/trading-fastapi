@@ -23,7 +23,6 @@ Sólo lectura: no muta el trading. Publica su veredicto en el ledger
 import asyncio
 import datetime as dt
 import logging
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 

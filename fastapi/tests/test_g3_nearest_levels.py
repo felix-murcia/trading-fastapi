@@ -30,11 +30,11 @@ from ml.trading_env_v2 import (
     nearest_significant_levels,
     production_sl,
     production_stops,
-    production_stops_with_paying_tp,
     production_tp,
     target_level_candidates,
 )
 from services.position_sizing import PIP_SIZE, size_ppo_position
+from services.trade_contract import evaluate_trade
 
 PIP = 0.0001
 
@@ -241,21 +241,14 @@ class TestVariantB:
         assert tp == pytest.approx(10.0)
 
     def test_train_and_serve_agree(self):
-        """La geometría es la MISMA función en los dos lados (paridad real)."""
+        """La geometría es la MISMA función en los dos lados (paridad real).
+
+        2026-10-22: el TP ya no lo elige `production_stops_with_paying_tp`
+        en el serve — lo elige el contrato de dinero (`evaluate_trade`)
+        sobre las distancias candidatas. La paridad que queda que verificar
+        es la de las PIEZAS compartidas: SL geométrico y candidatos de TP.
+        """
         import routers.ai as ai_router
         assert ai_router.production_sl is production_sl
-        assert ai_router.production_stops_with_paying_tp is production_stops_with_paying_tp
-        atr = 0.0009
-        price = 1.1050
-        floor_b = 1.1020
-        ceil_a = 1.1080
-        cands = [ceil_a]
-        a = production_stops_with_paying_tp(
-            atr, PIP, direction=1, floor_below=floor_b, ceiling_above=ceil_a,
-            current_price=price, tp_candidates=cands, min_tp_pips=0.0,
-        )
-        b = ai_router.production_stops_with_paying_tp(
-            atr, PIP, direction=1, floor_below=floor_b, ceiling_above=ceil_a,
-            current_price=price, tp_candidates=cands, min_tp_pips=0.0,
-        )
-        assert a == b
+        assert ai_router.target_level_candidates is target_level_candidates
+        assert ai_router.evaluate_trade is evaluate_trade

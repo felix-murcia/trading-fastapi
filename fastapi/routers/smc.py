@@ -1,7 +1,7 @@
 import json
 import logging
 import time
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from core.rules import is_winning_close
 from db.connection import get_pool

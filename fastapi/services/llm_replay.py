@@ -17,7 +17,6 @@ import asyncio
 import bisect
 import datetime as dt
 import logging
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 

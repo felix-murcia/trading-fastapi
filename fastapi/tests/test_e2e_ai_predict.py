@@ -14,7 +14,6 @@ from gymnasium.spaces import Box
 sys.path.insert(0, str(Path(__file__).parents[1] / "ml"))
 
 from ml.trading_env_v2 import (
-    effective_sl_pips,
     MARKET_FEATURES,
     build_v3_observation,
     decode_v3_direction,
@@ -22,15 +21,10 @@ from ml.trading_env_v2 import (
 )
 from ml.train_ppo_v3 import FEATURE_NAMES
 from config import settings
-from core.rules import MIN_ENTRY_REWARD_EUR
+from core.rules import MIN_WIN_EUR
 from main import app
 import routers.ai
 from routers.ai import Brain, PredictRequest, PredictResponse, TradeFilledRequest
-from services.position_sizing import (
-    min_lot_for_protection,
-    pip_value_per_lot,
-    size_ppo_position,
-)
 
 
 class FakeAsyncClient:
@@ -165,6 +159,7 @@ def test_ai_predict_e2e_flow():
          patch("routers.ai.fetch_bars_since_close", AsyncMock(return_value=None)), \
          patch("routers.ai.get_pool", return_value=MagicMock(execute=AsyncMock())), \
          patch("routers.ai.PPO.load", return_value=model), \
+         patch("routers.ai.log_to_audit", AsyncMock()) as audit_log, \
          patch("services.news_scraper.get_macro_news", AsyncMock(return_value="No macro news")), \
          patch("httpx.AsyncClient", FakeAsyncClient):
         with TestClient(app) as client:
@@ -185,36 +180,27 @@ def test_ai_predict_e2e_flow():
             assert payload["tp_pips"] is not None
             assert payload["sl_pips"] > 0
             assert payload["tp_pips"] > 0
-            # 2026-10-22: la geometría ya no es "ATR 2×SL" fija — el TP se elige
-            # entre los niveles del lado objetivo y el CONTRATO de dinero exige
-            # que pague el bloqueo Safe-4 neto de costes. La aserción correcta
-            # es el invariante, no una fórmula vieja.
-            # P2-2: el volumen numérico sale del sizing delegado cableado con
-            # el equity mockeado (1000), la vol_norm del modelo (acción[1]=0.18)
-            # y settings — ni constante ni la heurística "3€" previa.
-            expected_lots = size_ppo_position(
-                volume_norm=0.18,
-                sl_pips=payload["sl_pips"],
-                equity=1000.0,
-                pip_value=pip_value_per_lot("EURUSD", 1.1),
-                risk_pct=settings.ppo_risk_pct,
-                max_lot=settings.max_volume,
-                min_lot=settings.min_volume,
-            )
-            # G3-2: el SL que se manda al EA es el GEOMÉTRICO; el sizing usa la
-            # distancia REAL (geom + buffer de spread) y el lote tiene un suelo
-            # de protección (el trailing Safe-4 del EA exige ≥ min_lock_eur de
-            # riesgo en la posición).
-            _eff_sl = effective_sl_pips(payload["sl_pips"])
-            _lock_lot = min_lot_for_protection(
-                _eff_sl, pip_value_per_lot("EURUSD", 1.1), 1.1,
-                settings.min_lock_eur, min_lot=settings.min_volume,
-            )
-            if _lock_lot > expected_lots:
-                _lock_risk = _lock_lot * _eff_sl * pip_value_per_lot("EURUSD", 1.1) / 1.1
-                if _lock_risk <= 1000.0 * settings.ppo_risk_pct:
-                    expected_lots = _lock_lot
-            assert abs(payload["volume"] - expected_lots) < 1e-9
+            # 2026-10-22 (consolidación): lote, SL y TP los decide UN solo
+            # sitio (`services/trade_contract.evaluate_trade`), que verifica
+            # I1/I2/I3 en EUR netos. El test NO replica la aritmética — esa
+            # réplica era la cadena parcheada que produjo la orden 80 — sino
+            # los invariantes del snapshot de auditoría del propio ciclo.
+            cycle_audits = [
+                call.args[1]
+                for call in audit_log.await_args_list
+                if call.args and call.args[0] == "ai_predict_cycle"
+            ]
+            assert len(cycle_audits) == 1
+            audit = cycle_audits[0]
+            assert audit["contract_ok"] is True
+            assert audit["contract_reason"] == ""
+            assert audit["volume"] == payload["volume"]
+            assert payload["volume"] >= settings.min_volume
+            assert audit["risk_eur"] <= audit["cap_eur"] + 1e-6           # I1
+            assert audit["risk_eur"] >= audit["lock_eur"] - 1e-6          # I2
+            assert audit["reward_net_eur"] >= max(
+                MIN_WIN_EUR, audit["lock_eur"]
+            ) - 1e-6                                                      # I3
 
 
 def test_predict_memory_contract_adds_normalized_bars_since_close(monkeypatch):
@@ -1069,7 +1055,7 @@ class TestRewardGate(_ServeHarness):
         assert trace["lock_alive"] is True
         # el TP vale ahora suficiente ⇒ el gate de recompensa no se dispara
         assert trace["reward_below_min"] is False
-        assert trace["reward_eur"] >= MIN_ENTRY_REWARD_EUR
+        assert trace["reward_eur"] >= MIN_WIN_EUR
 
     def test_pass_when_tp_reward_reaches_min_win(self):
         """Candles por defecto (ATR ~25 p → TP ≥ 60 p) + vol head 0.18 →

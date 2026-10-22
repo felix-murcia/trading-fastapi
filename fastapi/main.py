@@ -11,10 +11,9 @@ from fastapi.responses import JSONResponse
 from config import settings
 from db.connection import init_pool, close_pool
 from routers import orders, smc, journal
-from routers.deps import verify_token
 from services.performance_metrics import get_metrics, reset_metrics
 from services.risk_state_store import init_risk_state
-from services.structured_logging import StructuredLoggingMiddleware, log_to_audit
+from services.structured_logging import StructuredLoggingMiddleware
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
 logger = logging.getLogger(__name__)

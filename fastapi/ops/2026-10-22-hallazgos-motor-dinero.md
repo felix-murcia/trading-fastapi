@@ -18,6 +18,10 @@ G3-2 (orden 80, 10:02 UTC).
   pendiente de medición y de la orden de Félix.
 - La orden 80 se cerró el 22-10 a las 10:22:46 UTC (0,8209) con **−0,52 €**;
   quedó persistida en `trade_outcomes` id 288 con `exit_reason=ea`.
+- **H-C (nuevo, 22-10 tarde): CORREGIDO.** Al consolidar se midió la
+  conversión de H-A contra el P/L real del bróker y **también estaba mal**:
+  1 pip USDCHF = 10 CHF y CHF→EUR exige EURCHF = USDCHF × EURUSD. Ver H-C al
+  final; `expected_close_eur` corregido y `order_manager` delegando en ella.
 
 ---
 
@@ -54,7 +58,8 @@ sería **+600 %** ⇒ un lote 7× mayor del permitido.
 
 **Fix propuesto (1 función, 2 call sites):** que el sizing use el pip value
 **en €**:
-- EURUSD, USDCHF: `10 / price` (el P/L del bróker en USD → EUR al precio del par);
+- EURUSD: `10 / price` (el P/L ya está en USD → EUR al precio del par);
+- USDCHF: ~~`10 / price`~~ ⇒ **corregido en H-C: `10 / (price × eurusd)`**;
 - GBPUSD, AUDUSD, NZDUSD, XAUUSD: `10 / eurusd_price` (P/L en USD → EUR al EURUSD);
 - USDJPY & co: `10 / price` (P/L en JPY → EUR vía el propio par).
 ⇒ El sizing y `expected_close_eur` deben usar la MISMA función (fuente única).
@@ -114,3 +119,43 @@ B elige el techo más cercano **que paga**, pero el **SL** sigue siendo "el
 nivel más cercano, por lejos que esté" ⇒ H-B sigue vivo. Y B sólo puede
 mirar candidatos en la ventana de 120 velas: si el techo pagador está más
 lejos, no lo ve (y cae al fallback ⇒ el gate bloquea la entrada).
+
+---
+
+## H-C — La conversión de USDCHF estaba mal en LOS DOS sitios (22-10, tarde)
+
+**Cómo se detectó:** al consolidar, `order_manager._total_risk_eur` convertía
+`pips × pip_value_per_lot(...) / EURUSD` mientras el contrato usaba
+`10 / USDCHF`. Dos fórmulas para el mismo par ⇒ una (o las dos) mal.
+
+**La física:** 1 pip de USDCHF = 0,0001 CHF × 100 000 USD = **10 CHF**. Para
+llegar a EUR hacen falta DOS conversiones: `EURCHF = USDCHF × EURUSD`.
+
+**La medida (P/L real del bróker, no teoría):**
+
+```
+trade_outcomes 285 · deal 58603377390 · SELL 0,04 lot · TP 10,0 p ⇒ +4,33 €
+realizado = 4,33 / (10,0 × 0,04) = 10,825 €/pip/lote
+  · 10/precio            (contrato)   12,166   +12,4 %
+  · 10/EURUSD            (guardián)    8,900   −17,8 %
+  · 10/(precio × EURUSD) (correcto)   10,828    +0,0 %
+```
+
+**Impacto:** el contrato (I3) aprobaba TPs que pagaban ~11 % menos de lo
+calculado — el modo de fallo de la orden 80, más pequeño — y el guardián
+infravaloraba un 17,8 % la exposición en USDCHF (el tope de riesgo agregado
+no veía la posición completa).
+
+**Corregido:** `expected_close_eur` (fuente única) exige `eurusd_price` para
+USDCHF y divide por ambos precios; `order_manager._total_risk_eur` delegó en
+ella (se borró la tercera conversión). Test con el deal citado:
+`tests/test_g3_rule_decider.py::TestUsdChfCurrencyConvention`.
+
+**En vivo (11:12:39 UTC, primer ciclo post-deploy):** `ppl_eur` 12,179 →
+**10,866** (bróker 10,825); `risk_eur` a 0,02 lot 9,69 → **8,30** €.
+
+**Pendiente derivado:** `pip_value_per_lot("XAUEUR")` devuelve **10,90**
+hardcodeado con un comentario «aprox» (heurística dentro del dinero). Para
+quote=EUR el pip son 10,00 € exactos (0,10 × 100 oz). XAUEUR no está en
+`PAIRS`, así que hoy es inalcanzable — por eso no se toca sin orden, pero
+queda declarado.

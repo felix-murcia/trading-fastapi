@@ -21,14 +21,13 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from config import settings
 from core.container import build_registry_from_settings
 from core.pair import PairRegistry, default_model_path
-from core.rules import MIN_ENTRY_REWARD_EUR, MIN_WIN_EUR
+from core.rules import MIN_WIN_EUR
 from db.connection import get_pool
 from ml.trading_env_v2 import (
     CHURN_BARS,
     EXTRA_STATE_FEATURES,
     FOREX_MARKET_FEATURE_COUNT,
     HIGHER_TF_MARKET_FEATURES,
-    MARKET_FEATURES,
     TIME_STOP_BARS,
     TREND_FEATURE_WINDOW_MIN,
     TREND_MARKET_FEATURES,
@@ -40,7 +39,6 @@ from ml.trading_env_v2 import (
     get_market_features,
     join_higher_tf_channels,
     production_sl,
-    production_stops_with_paying_tp,
     stop_geometry_kind,
     target_level_candidates,
 )
@@ -70,10 +68,7 @@ from services.risk_state_store import flush_risk_state
 from services.trade_contract import evaluate_trade, pip_value_eur_per_lot
 from services.position_sizing import (
     PIP_SIZE,
-    expected_close_eur,
     is_supported,
-    min_lot_for_protection,
-    pip_value_per_lot,
     size_ppo_position,
 )
 from services.order_manager import mark_order_filled

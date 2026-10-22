@@ -165,7 +165,7 @@ async def normalize_candles(candles: list, symbol: str = "EURUSD",
     def _to_ts(t) -> int:
         if isinstance(t, (int, float)):
             return int(t)
-        from datetime import datetime, timezone
+        from datetime import datetime
         return int(datetime.fromisoformat(str(t).replace("Z", "+00:00")).timestamp())
 
     offset_h = await _resolve_offset(symbol, timeframe, candles)

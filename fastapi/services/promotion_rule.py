@@ -60,8 +60,6 @@ un motivo que no dice nada de la calidad del PPO. El estado de T-28 se
 registra SIEMPRE en el manifiesto, en la auditoría y en el log de la
 promoción: es evidencia, no obstáculo.
 """
-from typing import Optional
-
 # Suelo absoluto de riesgo en el holdout (fracción del equity).
 MAX_HOLDOUT_DD = 0.10
 # El drawdown del candidato debe ser como máximo la mitad del del vivo.

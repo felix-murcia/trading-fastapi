@@ -77,20 +77,28 @@ class TestPairConfigDecisionSource:
 
 
 class TestUsdChfCurrencyConvention:
-    """G3: USDCHF es base=USD / quote=CHF ⇒ su convención de P/L es
-    DISTINTA de la de GBPUSD (quote=USD). Chequeo de cordura: el P/L
-    esperado de 20 pips × 0,01 lot debe ser comparable al de EURUSD
-    (si la convención estuviera mal, saldría ~13,6 % desviado)."""
+    """USDCHF es base=USD / quote=CHF ⇒ 1 pip = 10 CHF y CHF→EUR exige
+    EURCHF = USDCHF × EURUSD (dos conversiones).
 
-    def test_expected_close_eur_is_comparable_across_pairs(self):
+    Evidencia del bróker (2026-10-22): `trade_outcomes` id 285 / deal
+    58603377390 — SELL 0,04 lot, TP a 10,0 pips ⇒ +4,33 € ⇒ 10,825
+    €/pip/lote. `10/(precio × EURUSD)` = 10,828 (+0,03 %). Las dos variantes
+    anteriores estaban mal: `10/precio` +12,4 % y `10/EURUSD` −17,8 % (esta
+    última era la del guardián de riesgo total)."""
+
+    def test_reproduce_el_pnl_real_del_bróker(self):
         from services.position_sizing import expected_close_eur
 
-        eur = expected_close_eur("EURUSD", 20, 0.01, 1.1234, eurusd_price=1.1234)
-        chf = expected_close_eur("USDCHF", 20, 0.01, 0.8800, eurusd_price=1.1234)
-        assert 1.5 < eur < 2.1, eur
-        assert 1.8 < chf < 2.8, chf
-        # la desviación entre pares es sólo el precio (no un factor de 100)
-        assert 0.8 < chf / eur < 1.6, (chf, eur)
+        eur = expected_close_eur(
+            "USDCHF", 10.0, 0.04, 0.82197, eurusd_price=1.1236
+        )
+        assert eur == pytest.approx(4.33, abs=0.01)   # pagado por el bróker
+
+    def test_sin_eurusd_falla_ruidosamente(self):
+        from services.position_sizing import expected_close_eur
+
+        with pytest.raises(ValueError, match="EURUSD"):
+            expected_close_eur("USDCHF", 20.0, 0.01, 0.8800)
 
     def test_pip_value_of_usdchf_is_the_fixed_usd_notional(self):
         from services.position_sizing import pip_value_per_lot

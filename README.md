@@ -3679,3 +3679,66 @@ más cercano, por lejos que esté" ⇒ una operación con R:R malo pero posible
 (SL 45 p / TP 40 p ⇒ R:R 0,89) todavía pasa. Acotar el SL (≤2×ATR) o exigir un
 R:R mínimo es una decisión de dinero, pendiente de medición. Suite:
 **1293 passed + 2 xfailed**.
+
+## 2026-10-22 · CONSOLIDACIÓN — un solo motor de dinero, la conversión USDCHF corregida contra el bróker y las reglas de `CLAUDE.md` ejecutables
+
+Orden de Félix: «parar y revisar toda la lógica parcheada, caminos muertos,
+complejidad… volver a CLEAN CODE, SOLID y HEXAGONAL». Informe completo con
+tabla de hallazgos, método y falsos positivos:
+`fastapi/ops/2026-10-22-consolidacion-arquitectura.md`.
+
+### El hallazgo grave: USDCHF se convertía con TRES fórmulas
+
+El contrato de dinero y el guardián de riesgo total no sólo discrepaban entre
+sí: **los dos estaban mal**. 1 pip de USDCHF son 10 **CHF**, y CHF→EUR exige
+`EURCHF = USDCHF × EURUSD` (dos conversiones). Medido con el deal real del
+bróker (`trade_outcomes` 285 = deal 58603377390, SELL 0,04 lot, TP 10,0 p ⇒
++4,33 € ⇒ **10,825 €/pip/lote**):
+
+| Fórmula | €/pip/lote | Error |
+|---|---|---|
+| `10/precio` — contrato | 12,166 | **+12,4 %** |
+| `10/EURUSD` — guardián | 8,900 | **−17,8 %** |
+| `10/(precio × EURUSD)` — correcta | 10,828 | +0,0 % |
+
+Efecto: el contrato aprobaba TPs que pagaban ~11 % menos de lo calculado (el
+modo de fallo de la orden 80, más pequeño) y el guardián **infravaloraba un
+17,8 %** la exposición en USDCHF. Corregido en la fuente única
+(`expected_close_eur`), con el deal citado en el código y en el test; el
+guardián ahora **lee** esa función en vez de reimplementarla (era el tercer
+motor de conversión). **Verificado en vivo** (primer ciclo post-deploy,
+11:12:39 UTC): `ppl_eur` 12,179 → **10,866** (bróker: 10,825), `risk_eur` a
+0,02 lot 9,69 → **8,30**.
+
+### Código muerto de dinero, borrado
+
+| Pieza | Por qué estaba muerta |
+|---|---|
+| `position_sizing.min_lot_for_protection` (27 l.) | el contrato cumple I2 (riesgo ≥ 4 €) al decidir el lote |
+| `position_sizing.derive_order` (30 l.) | segundo motor de sizing; sólo lo llamaban 2 tests |
+| `core.rules.MIN_ENTRY_REWARD_EUR` | el mínimo de entrada es I3 del contrato (EUR netos); dos mínimos eran dos verdades |
+| 25 imports sin uso | dependencias que no existen |
+
+### Las reglas de `CLAUDE.md`, ejecutables
+
+`fastapi/tests/test_architecture_rules.py` (6 tests) + baseline congelada en
+`tests/architecture_baseline.py`. No arregla la deuda histórica: **la congela
+y exige que sólo encoja**: (1) una sola puerta de dinero; (2) una sola
+definición de la conversión y del contrato; (3) `core/` sin infraestructura y
+`ml/` sin `routers`/`db`; (4) ninguna función nueva de 80+ líneas y las 31
+existentes no crecen; (5) ningún `except Exception` nuevo (base 82); (6) cero
+imports sin uso.
+
+### Lo que queda (declarado, no maquillado)
+
+- **Dos pipelines vivos con dos motores de dinero** (`/api/v1/ai` con el
+  contrato y `/v1/smc` → `simple_pipeline` con riesgo fijo `sl_risk_usd`).
+  Evidencia: `smc_signals` = **0 filas** y ninguna orden de ese camino. Es
+  superficie pública documentada ⇒ retirar el camino de señal o unificarlo es
+  **decisión de Félix**.
+- `predict_direction()` 1230 líneas (congelado, no crece), 82
+  `except Exception` (congelados), `ml/trading_env_v2.py` → `services`
+  (deuda de capas declarada), `pip_value_per_lot("XAUEUR")=10,90` «aprox»
+  (par deshabilitado), R:R malo permitido (decisión de dinero).
+
+Suite: **1298 passed + 2 xfailed**. Sin cambios MQL5 (EA v14.1).

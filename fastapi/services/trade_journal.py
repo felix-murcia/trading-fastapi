@@ -12,13 +12,11 @@ Flujo:
 import asyncio
 import json
 import logging
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+from datetime import datetime, timezone
 
 import httpx
 import pandas as pd
 
-from config import settings
 from core.rules import is_winning_close
 from db.connection import get_pool
 # T-02 (2026-10-15): el journal comparte el PRESUPUESTO de latencia del

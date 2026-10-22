@@ -109,14 +109,16 @@ class TestInvariantes:
 class TestConversionEUR:
     def test_pip_value_eurgun_las_mismas_funciones(self):
         # una sola conversión: la del gate/ledger
-        for sym, px in (("EURUSD", 1.12391), ("USDCHF", 0.82066)):
-            assert pip_value_eur_per_lot(sym, px) == pytest.approx(
-                expected_close_eur(sym, 1.0, 1.0, px)
+        eurusd = 1.12391
+        for sym, px in (("EURUSD", eurusd), ("USDCHF", 0.82066)):
+            assert pip_value_eur_per_lot(sym, px, eurusd_price=eurusd) == pytest.approx(
+                expected_close_eur(sym, 1.0, 1.0, px, eurusd_price=eurusd)
             )
-        # USDCHF: 10 USD/pip/lote ÷ 0,82066 = 12,18 € ⇒ el sizing ya no
-        # mezcla unidades (era el +13,5 % de riesgo)
-        assert pip_value_eur_per_lot("USDCHF", 0.82066) == pytest.approx(12.185, rel=1e-3)
-        assert pip_value_eur_per_lot("EURUSD", 1.12391) == pytest.approx(8.897, rel=1e-3)
+        # USDCHF (2026-10-22): 10 CHF/pip/lote ÷ EURCHF, con
+        # EURCHF = 0,82066 × 1,12391 ⇒ 10,842 €/pip/lote. Verificado contra
+        # el deal 58603377390 (10,825 real, +0,03 %).
+        assert pip_value_eur_per_lot("USDCHF", 0.82066, eurusd_price=eurusd) == pytest.approx(10.842, rel=1e-3)
+        assert pip_value_eur_per_lot("EURUSD", eurusd, eurusd_price=eurusd) == pytest.approx(8.897, rel=1e-3)
 
     def test_el_serve_usa_las_mismas_funciones(self):
         import routers.ai as ai_router

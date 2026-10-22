@@ -172,26 +172,6 @@ class TestDeriveOrderFromCandleOpen:
         assert volume * sl_pips * 10.0 <= settings.sl_risk_usd + 0.005 * sl_pips * 10.0 + 1e-9
 
 
-class TestDeriveOrderSimple:
-    def test_numeric_case(self):
-        entry, sl, tp, volume = ps.derive_order("buy", "EURUSD", 1.10)
-        sl_dist = 1.10 * settings.sl_pct            # 0.1% → 0.0011
-        sl_pips = sl_dist / 0.0001                  # 11
-        expected_volume = max(
-            settings.min_volume,
-            round(settings.sl_risk_usd / (sl_pips * 10.0), 2),
-        )
-        assert entry == 1.10
-        assert sl == pytest.approx(1.10 - sl_dist, abs=1e-9)
-        assert tp == pytest.approx(1.10 + round(sl_dist * settings.rr_min, 5), abs=1e-9)
-        assert volume == expected_volume
-        assert volume >= settings.min_volume
-
-    def test_sell_direction(self):
-        _, sl, tp, _ = ps.derive_order("sell", "EURUSD", 1.10)
-        assert sl > 1.10 > tp
-
-
 class TestSizePPOPosition:
     """P2-2: sizing del PPO — riesgo fraccional por equity (fórmula verificada).
 
