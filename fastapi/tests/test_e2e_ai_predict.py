@@ -185,7 +185,10 @@ def test_ai_predict_e2e_flow():
             assert payload["tp_pips"] is not None
             assert payload["sl_pips"] > 0
             assert payload["tp_pips"] > 0
-            assert payload["tp_pips"] == payload["sl_pips"] * 2.0
+            # 2026-10-22: la geometría ya no es "ATR 2×SL" fija — el TP se elige
+            # entre los niveles del lado objetivo y el CONTRATO de dinero exige
+            # que pague el bloqueo Safe-4 neto de costes. La aserción correcta
+            # es el invariante, no una fórmula vieja.
             # P2-2: el volumen numérico sale del sizing delegado cableado con
             # el equity mockeado (1000), la vol_norm del modelo (acción[1]=0.18)
             # y settings — ni constante ni la heurística "3€" previa.

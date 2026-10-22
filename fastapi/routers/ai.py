@@ -67,6 +67,7 @@ from services.news_filter import get_upcoming_news, is_news_blackout
 from services.performance_metrics import record_cycle_metrics
 from services.risk_guardian import observe_equity
 from services.risk_state_store import flush_risk_state
+from services.trade_contract import evaluate_trade, pip_value_eur_per_lot
 from services.position_sizing import (
     PIP_SIZE,
     expected_close_eur,
@@ -319,6 +320,7 @@ def _veto_reason(
     qwen: dict,
     sizing_rejected: bool = False,
     position_rejected: bool = False,
+    contract_rejected: str = "",
     time_stop: bool = False,
     reentry_rejected: bool = False,
     low_confidence: bool = False,
@@ -340,6 +342,11 @@ def _veto_reason(
     # construcción (se activa antes de la cadena → final_decision ya es HOLD).
     if position_rejected:
         return "position_veto"
+    # CONTRATO DE DINERO (2026-10-22): mecánico y más específico que sizing
+    # (dice QUÉ invariante falla: riesgo, Safe-4 o TP neto). Exige
+    # final_decision en (BUY,SELL) ⇒ mutuamente excluyente con sizing.
+    if contract_rejected:
+        return contract_rejected
     # S-1/S-2: el bloque de sizing solo se activa con final_decision en
     # (BUY, SELL), es decir, cuando NINGÚN otro veto ya había revertido la
     # decisión → el flag es autoridad: se declara ANTES que cualquier otro
@@ -1302,30 +1309,43 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         current_price=current_price,
     )
     sl_pips = effective_sl_pips(sl_pips_geom)
-    # Lote provisional para saber qué TP paga (el definitivo sale justo
-    # debajo con la MISMA fórmula ⇒ idéntico).
-    _pip_value = pip_value_per_lot(sym, current_price)
-    _lot_probe = size_ppo_position(
+
+    # ── CONTRATO DE DINERO (2026-10-22): lote y TP se deciden JUNTOS ────────
+    # Sustituye la cadena probe→suelo-de-protección→tope-de-riesgo→gate-de-
+    # recompensa (cuatro sitios, cuatro conversiones de dinero) por UNA
+    # función pura que verifica en EUR NETOS de costes:
+    #   I1 riesgo ≤ equity×risk_pct · I2 riesgo ≥ Safe-4 · I3 TP neto ≥ Safe-4
+    # Medido en la orden 80 (USDCHF 22-10): violaba I1 (+13,5 %), I2 e I3 a
+    # la vez (TP bruto 3,34 € < 4 €) porque cada trozo usaba su conversión.
+    # Ver services/trade_contract.py.
+    _eurusd_px = None
+    if sym != "EURUSD":
+        from services.position_sizing import eurusd_price
+        _eurusd_px = await eurusd_price()
+    _ppl = pip_value_eur_per_lot(sym, current_price, eurusd_price=_eurusd_px)
+    head_lots = size_ppo_position(
         volume_norm=volume_norm, sl_pips=sl_pips, equity=equity_val,
-        pip_value=_pip_value, risk_pct=settings.ppo_risk_pct,
+        pip_value=_ppl, risk_pct=settings.ppo_risk_pct,
         max_lot=settings.max_volume, min_lot=settings.min_volume,
     )
-    _min_tp_pips = 0.0
-    if _lot_probe > 0 and _pip_value > 0:
-        _min_tp_pips = MIN_ENTRY_REWARD_EUR / (_lot_probe * _pip_value)
     _tp_cands = target_level_candidates(
         df, 1 if target_pos == 1 else -1,
         current_atr / pip_size, current_price,
     )
-    _, tp_pips = production_stops_with_paying_tp(
-        current_atr, pip_size,
-        direction=target_pos,
-        floor_below=floor_below or None,
-        ceiling_above=ceiling_above or None,
-        current_price=current_price,
-        tp_candidates=_tp_cands,
-        min_tp_pips=_min_tp_pips,
+    _tp_dists = [abs(float(_p) - current_price) / pip_size for _p in _tp_cands]
+    if not _tp_dists:
+        # Sin nivel utilizable en la ventana: se evalúa el fallback declarado
+        # (2×SL). El contrato dirá si paga el bloqueo neto de costes; si no,
+        # la entrada no se abre.
+        _tp_dists = [2.0 * sl_pips]
+    contract = evaluate_trade(
+        symbol=sym, price=current_price, equity=equity_val, sl_pips=sl_pips,
+        head_lots=head_lots, tp_candidates_pips=_tp_dists,
+        risk_pct=settings.ppo_risk_pct, min_lot=settings.min_volume,
+        max_lot=settings.max_volume, min_lock_eur=settings.min_lock_eur,
+        eurusd_price=_eurusd_px,
     )
+    tp_pips = contract.tp_pips if contract.tp_pips > 0 else _tp_dists[0]
 
     # P2-2: sizing delegado en position_sizing.size_ppo_position — la cabeza
     # `volume` modula el riesgo (0…settings.ppo_risk_pct del equity) con el
@@ -1333,61 +1353,30 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     # min(0.5, 3%·equity/dist) SIEMPRE activo (cabeza `volume` muerta) y la
     # heurística "mín. 3€" con 0.1 €/pip/lot (error ×100 enmascarado por el
     # clip). El mismo cálculo lo aplica el env de entrenamiento (paridad).
-    final_lots = size_ppo_position(
-        volume_norm=volume_norm,
-        sl_pips=sl_pips,
-        equity=equity_val,
-        pip_value=pip_value_per_lot(sym, current_price),
-        risk_pct=settings.ppo_risk_pct,
-        max_lot=settings.max_volume,
-        min_lot=settings.min_volume,
-    )
+    final_lots = contract.lots if contract.ok else 0.0
 
     sl_pips_final = sl_pips
     tp_pips_final = tp_pips
-
-    # G3-2 (2026-10-21): el trailing "Safe-4" del EA sólo mueve el SL si el
-    # RIESGO EN € de la posición es ≥ SL_LockSafetyNetEur (4 €): con un lote
-    # pequeño el trailing queda APAGADO (el EA hace `return` antes de tocar
-    # nada) y la posición nunca asegura el beneficio. Félix lo pidió el
-    # 2026-10-21 ("un lote que permita el trailing del SL a +4 €").
-    #
-    # CON LA GEOMETRÍA NUEVA ESTO ES OBLIGATORIO, NO COSMÉTICO (medido con el
-    # motor real sobre 30 000 velas H1 × 2 pares, 2026-10-21): el SL en el
-    # suelo más cercano es más ANCHO que 1,5×ATR (17,7 p vs 15,1 p) ⇒ a
-    # riesgo constante el lote BAJA (0,04 → 0,02) ⇒ el riesgo real cae a
-    # 3,15 € < 4 € ⇒ el trailing se apaga. Con el suelo de lote el riesgo
-    # vuelve a 4,36 € (Safe-4 VIVO) y el beneficio al TP sube de 3,86 € a
-    # 5,79 € (regla de 3 € cumplida).
-    # El suelo NUNCA excede el tope de riesgo del equity (settings.ppo_risk_pct):
-    # si el stop es tan ancho que proteger 4 € no cabe en el tope ⇒ la
-    # operación NO se abre (se protege o no se opera).
-    pip_value = pip_value_per_lot(sym, current_price)
-    risk_eur = 0.0
-    lock_alive = False
-    if final_lots > 0.0 and sl_pips_final > 0.0:
-        _lock_lot = min_lot_for_protection(
-            sl_pips_final, pip_value, current_price, settings.min_lock_eur,
-            min_lot=settings.min_volume,
+    risk_eur = contract.risk_eur
+    # `lock_alive` ya NO es una esperanza: el contrato exige I2 (riesgo ≥
+    # min_lock_eur) y I3 (TP neto ≥ min_lock_eur) ⇒ si la entrada existe, el
+    # trailing Safe-4 puede dispararse ANTES del TP por construcción.
+    lock_alive = bool(contract.ok and risk_eur >= settings.min_lock_eur)
+    if contract.ok:
+        logger.info(
+            "[%s] CONTRATO ║ %.2f lotes · SL %.1f p · TP %.1f p · riesgo %.2f€ "
+            "(tope %.2f€) · TP neto %.2f€ (coste %.2f€) · Safe-4 %.2f€ VIVO",
+            cycle_id, contract.lots, contract.sl_pips, contract.tp_pips,
+            contract.risk_eur, contract.cap_eur, contract.reward_net_eur,
+            contract.cost_eur, contract.lock_eur,
         )
-        _lock_risk = (_lock_lot * sl_pips_final * pip_value / current_price
-                      if _lock_lot > 0 else 0.0)
-        _risk_cap = equity_val * settings.ppo_risk_pct
-        if _lock_lot > final_lots and _lock_risk <= _risk_cap:
-            logger.info(
-                "[%s] LOTE-PROTECCION ║ %.3f → %.3f lotes: el trailing Safe-4 "
-                "(%.2f€) queda VIVO (riesgo %.2f€ ≤ tope %.2f€)",
-                cycle_id, final_lots, _lock_lot, settings.min_lock_eur, _lock_risk, _risk_cap,
-            )
-            final_lots = _lock_lot
-        risk_eur = final_lots * sl_pips_final * pip_value / current_price
-        lock_alive = risk_eur >= settings.min_lock_eur
-        if not lock_alive:
-            logger.warning(
-                "[%s] TRAILING-SAFE4 ║ el trailing del EA NO puede mover el SL: "
-                "riesgo %.2f€ < mínimo %.2f€ (lote %.3f × SL %.1f pips).",
-                cycle_id, risk_eur, settings.min_lock_eur, final_lots, sl_pips_final,
-            )
+    elif contract.reason != "sizing_inviable":
+        logger.warning(
+            "[%s] CONTRATO ║ entrada RECHAZADA (%s) · SL %.1f p · TP cand. %.1f p "
+            "· lote cabeza %.2f · tope %.2f€ · %s",
+            cycle_id, contract.reason, sl_pips_final, tp_pips_final,
+            head_lots, contract.cap_eur, contract.detail,
+        )
 
     # ── LR-1 (Félix 2026-10-14): SKIP DE QWEN CON POSICIÓN ABIERTA ──────────
     # Con `env_position != 0` el juicio del LLM es decisionalmente neutro:
@@ -1598,17 +1587,17 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     # en USD y se convierte con el precio EURUSD (el convenio del bróker, el
     # mismo que usa el risk_guardian). El precio se pide SÓLO cuando hace
     # falta (hay entrada propuesta) y sólo para esos símbolos.
-    reward_eur: Optional[float] = None
+    # El importe ya lo calculó el CONTRATO (EUR netos de costes): aquí no se
+    # vuelve a convertir. Éste era el cuarto sitio donde se calculaba dinero
+    # y de donde salían las discrepancias de la orden 80 (SL/TP en USD, gate
+    # en EUR, sizing en USD, redondeo de lote aparte).
+    reward_eur: Optional[float] = (
+        contract.reward_net_eur
+        if (contract.ok and final_decision in ("BUY", "SELL") and final_lots > 0.0)
+        else None
+    )
     reward_below_min = False
-    if final_decision in ("BUY", "SELL") and final_lots > 0.0 and tp_pips_final > 0.0:
-        _eurusd_px = None
-        if req.symbol != "EURUSD":
-            from services.position_sizing import eurusd_price
-            _eurusd_px = await eurusd_price()
-        reward_eur = expected_close_eur(
-            req.symbol, tp_pips_final, final_lots, current_price,
-            eurusd_price=_eurusd_px,
-        )
+    contract_rejected = (not contract.ok) and contract.reason != "sizing_inviable"
     # A-1: flip con posición abierta → el EA lo rechaza siempre en ejecución
     # (L407/L440/L475: rejected_position_open) porque la salida es exclusiva
     # SL/TP. El backend lo declara AQUÍ, antes de la cadena Qwen y del sizing,
@@ -1622,15 +1611,17 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             cycle_id, final_decision, req.position,
         )
         final_decision = "HOLD"
-    elif reward_eur is not None and reward_eur < MIN_ENTRY_REWARD_EUR and final_decision in ("BUY", "SELL"):
-        # Opción A: mecánico (la regla 3€ ya lo decide) → va ANTES del
-        # juicio de re-entrada y de los inferidos de Qwen, detrás de los
-        # mecánicos superiores (time-stop/position, vía cadena + _veto_reason).
-        reward_below_min = True
+    elif contract_rejected and final_decision in ("BUY", "SELL"):
+        # CONTRATO DE DINERO (2026-10-22): mecánico y previo a todo juicio.
+        # `contract.reason` dice QUÉ invariante lo hace imposible (riesgo,
+        # Safe-4 o TP neto) — nunca "unknown_veto".
+        reward_below_min = contract.reason in ("tp_no_paga_bloqueo", "tp_no_cubre_costes")
         logger.warning(
-            "[%s] VETO RECOMPENSA ║ TP %.1f pips × %.3f lot = %.2f€ < minimo de entrada=%.2f → HOLD "
-            "(imposible de ganar: el TP sella por debajo de la regla 3€)",
-            cycle_id, tp_pips_final, final_lots, reward_eur, MIN_ENTRY_REWARD_EUR,
+            "[%s] VETO CONTRATO ║ %s · TP %.1f p × %.2f lot · riesgo %.2f€ "
+            "(tope %.2f€) · TP neto %.2f€ < exigido %.2f€ → HOLD",
+            cycle_id, contract.reason, tp_pips_final, final_lots,
+            contract.risk_eur, contract.cap_eur, contract.reward_net_eur,
+            max(MIN_WIN_EUR, settings.min_lock_eur),
         )
         final_decision = "HOLD"
     elif reentry_window and reentry_ok is False and final_decision in ("BUY", "SELL"):
@@ -1799,6 +1790,7 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         decision, final_decision, qwen,
         sizing_rejected=sizing_below_min,
         position_rejected=position_rejected,
+        contract_rejected=contract.reason if contract_rejected else "",
         time_stop=time_stop,
         reentry_rejected=reentry_window and reentry_ok is False,
         low_confidence=low_confidence,
@@ -1973,6 +1965,7 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             "risk_eur": round(risk_eur, 2) if risk_eur else None,
             "lock_min_eur": settings.min_lock_eur,
             "lock_alive": lock_alive,
+            **contract.audit(),
             "latency_ms": round((time.time() - t_start) * 1000, 2),
             "veto": decision != final_decision,
             "veto_reason": veto_reason,

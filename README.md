@@ -3630,3 +3630,52 @@ operación de USDCHF con G3-2** (`fastapi/ops/2026-10-22-hallazgos-motor-dinero.
   de significancia garantiza que el nivel no es ruido, pero **no acota su
   distancia**. Fix candidatos: tope de distancia del SL (≤ 2×ATR) o no operar
   sin estructura utilizable — **pendiente de medición**.
+
+
+### 9. CONTRATO DE DINERO — la orden 80 violaba TRES reglas y ahora es imposible (22-10)
+
+**Qué pasó (orden 80, USDCHF, 10:02 UTC).** Lote 0,02 · SL 45,4 p · TP 13,7 p:
+
+| Regla | Valor real | Veredicto |
+|---|---|---|
+| Cierre < 3 € = PÉRDIDA | TP bruto **3,34 €** (y el neto es menor) | el TP sellaba una pérdida |
+| Trailing Safe-4 exige +4 € | TP 3,34 € < 4 € | **el bloqueo no podía dispararse nunca** |
+| Tope de riesgo 2 % | riesgo **11,06 €** > 9,73 € | **+13,5 % sobre el tope** |
+
+No eran tres bugs: era uno. Lote, SL, TP y recompensa se decidían en CUATRO
+sitios con CUATRO conversiones distintas (pip en USD vs presupuesto en EUR;
+`expected_close_eur` sí convertía, el sizing no). Resultado: `lock_alive=true`
+en el audit mientras el trailing era físicamente imposible.
+
+**La corrección (una sola pieza): `services/trade_contract.py`.**
+`evaluate_trade()` decide **lote y TP juntos** y verifica en EUR **netos de
+costes** (2 pips de spread, el mismo buffer que el EA suma al stop):
+
+```
+I1  riesgo_eur          ≤ equity × risk_pct
+I2  riesgo_eur          ≥ min_lock_eur        (el EA enciende el Safe-4)
+I3  beneficio_neto_eur  ≥ max(3 €, min_lock_eur)   (el bloqueo cabe antes del TP)
+```
+
+Si no existe lote que cumpla las tres, **la entrada no se abre** y el veto dice
+cuál falla (`riesgo_no_cabe`, `safe4_no_cabe_en_riesgo`, `tp_no_paga_bloqueo`,
+`tp_no_cubre_costes`) — nunca `unknown_veto`. El pip value en EUR sale de
+`expected_close_eur` (una sola conversión), así que **H-A queda corregido de
+raíz**: sizing y recompensa ya no pueden discrepar.
+
+**Verificación en producción (primer ciclo con el contrato, 10:25:41):**
+EURUSD SELL 0,04 lotes · SL 13,5 p · TP 27,0 p · riesgo **4,81 €** (≥4 y
+≤9,73) · TP neto **8,91 €** · coste 0,71 € · `lock_alive=true` **de verdad**
+(orden 81: SL 1.12364 / TP 1.11959). El caso de la orden 80 se reproduce en
+`tests/test_trade_contract.py::TestOrden80::test_usdchf_debe_rechazarse`:
+rechazado, y con un techo que sí paga (40 p) se vuelve viable **con menos
+lote** (0,01) — la coherencia lote↔geometría que faltaba.
+
+**La orden 80 se cerró** el 22-10 a las 10:22:46 UTC a 0,8209 (−0,52 €),
+persistida en `trade_outcomes` id 288.
+
+**Lo que este contrato NO arregla (declarado):** el SL sigue siendo "el nivel
+más cercano, por lejos que esté" ⇒ una operación con R:R malo pero posible
+(SL 45 p / TP 40 p ⇒ R:R 0,89) todavía pasa. Acotar el SL (≤2×ATR) o exigir un
+R:R mínimo es una decisión de dinero, pendiente de medición. Suite:
+**1293 passed + 2 xfailed**.

@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from services.trade_contract import evaluate_trade, pip_value_eur_per_lot
 from ml.trading_env_v2 import (
     ForexTradingEnvV2,
     engineer_market_features,
@@ -81,15 +82,20 @@ class TestProductionStopsSingleSource:
         assert production_stops(0.01, PIP) == (50.0, 100.0)
 
     def test_predict_imports_the_same_function_object(self):
-        # Si /predict dejara de importar esta función (p.ej. una copia local),
-        # la paridad train/serve se rompería en silencio → este test la bloquea.
-        # G3-2 (2026-10-22): la geometría se compone de DOS funciones (el SL y
-        # el TP) ⇒ las DOS tienen que ser el MISMO objeto en el router y en el
-        # env (una copia local en cualquiera de los dos lados rompe la paridad).
+        # Si /predict dejara de importar estas funciones (p.ej. una copia
+        # local), la paridad train/serve se rompería en silencio → este test
+        # la bloquea.
+        #
+        # 2026-10-22: la paridad REAL es la GEOMETRÍA (qué niveles y en qué
+        # orden) + el CONTRATO de dinero. El TP lo elige el contrato con un
+        # umbral en EUR (Safe-4 neto de costes) que el entorno NO puede
+        # reproducir (su balance es ficticio, no EUR): la diferencia de umbral
+        # es una regla de la capa de EJECUCIÓN, declarada, no una deriva.
         import routers.ai as ai_router
         assert ai_router.production_sl is production_sl
-        assert ai_router.production_stops_with_paying_tp is production_stops_with_paying_tp
         assert ai_router.target_level_candidates is target_level_candidates
+        assert ai_router.evaluate_trade is evaluate_trade
+        assert ai_router.pip_value_eur_per_lot is pip_value_eur_per_lot
 
     def test_env_open_uses_production_stops_not_the_action(self):
         env = _env()

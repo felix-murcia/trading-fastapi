@@ -1,8 +1,23 @@
 # Backlog 2026-10-22 — Dos hallazgos de ALTA severidad en el motor de dinero
 
 Ambos los detecté al auditar la primera operación de USDCHF con la geometría
-G3-2 (orden 80, 10:02 UTC). **NO están corregidos**: los dos cambian el motor
-de dinero y son decisión de Félix (ver §3).
+G3-2 (orden 80, 10:02 UTC).
+
+## ESTADO 2026-10-22 10:30 UTC — tras la orden de Félix
+
+- **H-A: CORREGIDO** por `services/trade_contract.py`. El sizing ya no usa el
+  pip en USD: deriva el pip value en EUR de `expected_close_eur` (la MISMA
+  conversión que el gate y el ledger) ⇒ una sola conversión en todo el
+  camino. Verificado en producción: ciclo EURUSD 10:25:41 → riesgo 4,81 €
+  con tope 9,73 €.
+- **H-B: PARCIALMENTE CORREGIDO.** El contrato **rechaza** las operaciones
+  imposibles (si el TP más cercano que existe no paga 4 € netos con un lote
+  que quepa en el tope ⇒ no se opera). Lo que **NO** hace es impedir una
+  operación con R:R malo pero posible (SL 45 p / TP 40 p ⇒ R:R 0,89): acotar
+  el SL (≤2×ATR) o exigir un R:R mínimo es una decisión de dinero y sigue
+  pendiente de medición y de la orden de Félix.
+- La orden 80 se cerró el 22-10 a las 10:22:46 UTC (0,8209) con **−0,52 €**;
+  quedó persistida en `trade_outcomes` id 288 con `exit_reason=ea`.
 
 ---
 
