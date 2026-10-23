@@ -1714,7 +1714,7 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             # buffer). Con ambos, el audit y la gráfica son comparables.
             "sl_pips": round(sl_pips_final, 1) if final_decision in ("BUY", "SELL") else None,
             "tp_pips": round(tp_pips_final, 1) if final_decision in ("BUY", "SELL") else None,
-            "sl_pips_geom": round(sl_pips_geom, 1) if final_decision in ("BUY", "SELL") else None,
+            "sl_pips_geom": round(sl_pips_geom, 1) if final_decision in ("BUY", "SELL") else None, **setup.audit_fields(),
             "sl_geometry": stop_geometry_kind(target_pos, floor_below, ceiling_above),
             "floor_below": round(floor_below, 5) if floor_below else None,
             "ceiling_above": round(ceiling_above, 5) if ceiling_above else None,

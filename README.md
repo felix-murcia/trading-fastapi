@@ -3961,3 +3961,46 @@ pruebas de predicción/veto vinculadas a rutas que ya tenían cambios locales y
 no se editaron en este trabajo. Antes del auditor eran **22 failed, 1254
 passed, 2 xfailed**. El auditor no está conectado al retrain ni habilita
 candidatos.
+
+---
+
+## 2026-10-23 — H-B ejecutado: tope de SL 1,5×ATR (orden de Félix)
+
+**Síntoma vivo:** las órdenes 89 (EURUSD SELL 0,03) y 88 (USDCHF BUY 0,03)
+estaban abiertas con SL 29,9 p (**3,9×ATR**) / TP 59,8 p (**7,8×ATR**) y SL
+29,0 p (2,5×ATR) / TP 26,6 p. La 89 había caído al fallback `2×SL` porque no
+había candidato pagador; con SL 29,9 el tope de riesgo 10,32 € sólo permitía
+0,03 lotes. La causa era H-B: `production_sl` anclaba el SL al suelo/techo más
+cercano **sin tope de volatilidad**. No era un fallo nuevo.
+
+**Medición (30.000 velas H1 × EURUSD/USDCHF, horizonte 12 velas, motor real):**
+
+| Política | n | E[R] | P(TP) | SL medio | TP medio | ≥0,05 lotes |
+|---|---:|---:|---:|---:|---:|---:|
+| actual | 113.985 | −0,069 | 38 % | 22,3 p | 25,8 p | 25 % |
+| **tope 1,5×ATR** | 117.944 | **−0,077** | 39 % | 18,7 p | **24,0 p** | **35 %** |
+| tope 2,0×ATR | 116.382 | −0,071 | 39 % | 20,9 p | 24,9 p | 27 % |
+| 1,5×ATR + TP ≤3×ATR | 117.387 | −0,077 | 40 % | 18,7 p | 21,9 p | 35 % |
+
+El tope 1,5×ATR es el que cumple la preferencia de Félix (~0,06 lotes y stops
+cercanos): la orden 89 pasa a SL 12 p efectivos / TP 24 p / lote 0,06 y la 88 a
+SL 17,1 p / TP 26,6 p / lote 0,05. **No mejora el E[R]** (Δ −0,008 R, borde del
+ruido de H-N) y ninguna variante lo vuelve positivo: es forma de riesgo, no
+edge. No se añade R:R mínimo (H-N lo midió neutro) ni tope de TP (sin mejora
+medida). Las posiciones 88/89 **se dejan como están** (orden de Félix).
+
+**Cambio:** `SL_MAX_ATR_MULT = 1.5` + `sl_cap_geom_pips()` en
+`fastapi/ml/trading_env_v2.py`; `production_sl` acota el geométrico a
+`1,5×ATR_físico − buffer` (el EA añade el buffer ⇒ stop efectivo 1,5×ATR). El
+ATR es físico (`atr_norm×precio/pip`), no la unidad relativa antigua. Sin
+precio, el tope no aplica (compatibilidad con `production_stops(atr, pip)`).
+`services/trade_setup.py` expone `atr_pips`/`sl_cap_geom_pips` y el audit los
+registra (`setup.audit_fields()`), sin alargar `predict_direction`. El contrato
+de observación `(20,25)` no cambia ⇒ no requiere retrain del bundle activo; el
+próximo retrain aprenderá la geometría nueva. **EA sin cambios (sin bump).**
+
+**Tests:** TDD `fastapi/tests/test_hb_sl_cap.py` (7) + actualización de
+`test_p21_unification.py`, `test_g3_nearest_levels.py`,
+`test_trading_env_step.py`. `pytest fastapi/tests/ -q` → **1291 passed,
+2 xfailed** (2026-10-23). Evidencia ampliada:
+`fastapi/ops/2026-10-22-hallazgos-motor-dinero.md` § H-B.

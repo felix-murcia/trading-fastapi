@@ -31,6 +31,7 @@ from ml.trading_env_v2 import (
     production_sl,
     production_stops,
     production_tp,
+    sl_cap_geom_pips,
     target_level_candidates,
 )
 from core.rules import size_ppo_position
@@ -133,24 +134,28 @@ class TestParityTrainServe:
     def test_same_inputs_give_same_stops(self):
         """La función es UNA: el env y /predict la importan (paridad por
         construcción). Este test fija que con los mismos datos da lo mismo
-        y que el SL cae bajo el suelo y el TP en el techo."""
-        atr = 0.0009          # 9 pips
+        y que el SL cae bajo el suelo (hasta el tope H-B) y el TP en el techo."""
+        atr = 0.0009          # 9 pips relativos ⇒ 9,945 pips físicos a 1,105
         price = 1.1050
         floor_b = 1.1020      # suelo 30 pips abajo
         ceil_a = 1.1080      # techo 30 pips arriba
+        cap = sl_cap_geom_pips(atr, PIP, price)
         sl_long, tp_long = production_stops(
             atr, PIP, direction=1, floor_below=floor_b, ceiling_above=ceil_a,
             current_price=price,
         )
-        # LONG: SL = suelo − buffer ; TP = techo
-        assert sl_long == pytest.approx((price - (floor_b - SPREAD_BUFFER_PIPS * PIP)) / PIP)
+        # H-B (2026-10-23): el suelo a 30 p se acota a 1,5×ATR físico (geométrico
+        # 12,9 p; efectivo 14,9 p). El TP sigue en el techo (30 p).
+        assert cap is not None
+        assert sl_long == pytest.approx(cap)
+        assert effective_sl_pips(sl_long) <= 1.5 * (atr * price / PIP) + 1e-9
         assert tp_long == pytest.approx((ceil_a - price) / PIP)
         # SHORT: simétrico
         sl_short, tp_short = production_stops(
             atr, PIP, direction=-1, floor_below=floor_b, ceiling_above=ceil_a,
             current_price=price,
         )
-        assert sl_short == pytest.approx(((ceil_a + SPREAD_BUFFER_PIPS * PIP) - price) / PIP)
+        assert sl_short == pytest.approx(cap)
         assert tp_short == pytest.approx((price - floor_b) / PIP)
 
     def test_fallback_is_the_atr_geometry_when_no_levels(self):

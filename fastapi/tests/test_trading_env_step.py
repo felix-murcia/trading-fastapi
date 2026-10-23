@@ -44,14 +44,16 @@ COMM = 7.0
 # G3-2 (2026-10-21): el SL REAL incluye el buffer de spread que añade el EA
 # al colocarlo (SPREAD_BUFFER_PIPS = 2.0) ⇒ el env simula el stop que se
 # ejecuta, no el geométrico. Contract change declarado (README + PROTOCOLO).
-# sizing por riesgo — 1000 equity × 3% × vol_norm 0.4 / (SL 17 × ppv 10)
+# sizing por riesgo — 1000 equity × 3% × vol_norm 0.4 / (SL 16,5 × ppv 10)
 VOL_OPEN = 0.07
-SL_PIPS = 17.0          # production_stops: ATR 10 pips × 1.5 + buffer 2 pips
-TP_PIPS = 30.0          # TP = 2 × SL geométrico (el buffer es del SL)
+# H-B (2026-10-23): ATR 10 p relativos a 1,10 = 11 p físicos ⇒ tope 1,5×ATR
+# = 16,5 p efectivos; geométrico = 16,5 − 2 (buffer del EA) = 14,5 p.
+SL_PIPS = 16.5
+TP_PIPS = 29.0          # TP = 2 × SL geométrico (14,5 p)
 HALF_SPREAD = 1.5 * 0.0001 / 2   # 7.5e-5
 
 OPEN = np.array([0.5, 0.4], dtype=np.float32)    # long, vol_norm=0.4 → 0.07 lots
-OPEN_BIG = np.array([0.5, 1.0], dtype=np.float32)  # vol_norm=1.0 → 0.14 lots
+OPEN_BIG = np.array([0.5, 1.0], dtype=np.float32)  # vol_norm=1.0 (lote según equity)
 FLAT = np.array([0.0, 0.0], dtype=np.float32)
 
 
@@ -136,8 +138,8 @@ class TestOpenAppliesSpreadAndCommission:
 class TestIntraCandleExits:
     def test_sl_has_priority_over_tp_when_both_hit(self):
         env, entry = _make_opened_env()
-        sl = entry - SL_PIPS * 0.0001          # entry − 0.0017
-        tp = entry + TP_PIPS * 0.0001          # entry + 0.0030
+        sl = entry - SL_PIPS * 0.0001          # entry − 0.00165
+        tp = entry + TP_PIPS * 0.0001          # entry + 0.0029
         # Vela que toca AMBOS: gap adverso (low ≤ sl) y favorable (high ≥ tp)
         env.df.loc[6, ["high", "low", "close"]] = [entry + 0.021, entry - 0.0018, entry]
         balance_before = env.balance                                # 999.44
@@ -196,10 +198,10 @@ class TestIntraCandleExits:
         # P2-2: sizing por riesgo → el SL de una operación NO puede llevar a
         # la quiebra. initial=100, vol_norm=1.0 (G3-2: SL real = 17 pips):
         #   lots = 100 × 3% × 1.0 / (17 pips × 10) = 0.01 (no 0.5)
-        #   pérdida = 0.01 × 100000 × 0.0017 = 1.7 € (no 75 €)
+        #   pérdida = 0.01 × 100000 × 0.00165 = 1.65 € (no 75 €)
         env, entry = _make_opened_env(action=OPEN_BIG, initial_balance=100.0)
         assert env.volume == pytest.approx(0.01, abs=1e-9)
-        sl = entry - SL_PIPS * 0.0001                            # entry − 0.0017
+        sl = entry - SL_PIPS * 0.0001                            # entry − 0.00165
         env.df.loc[6, ["high", "low", "close"]] = [entry, entry - 0.011, entry - 0.005]
 
         _, _, terminated, _, info = env.step(FLAT)
@@ -702,8 +704,8 @@ class TestP1TimeStopAndBreakeven:
         # y riskDist queda ≤ 0 → el breakeven no lo rebaja a la entrada.
         # G3-2: el SL del trailing lo fija `trailing_min_pips` (15), NO el SL
         # inicial (el antiguo test coincidía porque SL_PIPS == 15; con el
-        # buffer de spread el SL inicial son 17 y los dos términos ya no
-        # coinciden — el mínimo del trailing manda).
+        # buffer de spread y el tope H-B el SL inicial son 16,5 y los dos
+        # términos ya no coinciden — el mínimo del trailing manda).
         env = _env(
             engineer_market_features(_df_step_move(0.0020)),
             trailing_atr_mult=0.0,

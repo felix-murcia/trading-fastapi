@@ -4,6 +4,19 @@
 
 El backlog PPO/LLM se reordena: misma pregunta direccional, horizonte de **20 horas transcurridas**, información de mercado común y edge medible de cada modelo por separado. La autoridad de producción queda **NO-GO** para este objetivo hasta superar los gates de datos, evaluación OOS y alineación. T-28 y C1–C8 no sustituyen esos gates; C1–C8 siguen apagados. Plan canónico: [`fastapi/ops/2026-10-22-punto-inflexion-ppo-llm-20h.md`](fastapi/ops/2026-10-22-punto-inflexion-ppo-llm-20h.md).
 
+## Estado 2026-10-23 — H-B cerrado (orden de Félix)
+
+- **Tope de SL 1,5×ATR** en `production_sl` (`SL_MAX_ATR_MULT`), medido antes
+  de tocar el motor: 30.000 velas H1 × EURUSD/USDCHF, E[R] −0,069 → −0,077
+  (Δ −0,008 R, borde del ruido de H-N), lotes ≥0,05 de 25 % a 35 %. Es forma
+  de riesgo, **no edge**: el E[R] sigue negativo en todas las variantes.
+- Sin precio, el tope no aplica (compatibilidad con `production_stops(atr,pip)`).
+  El ATR del tope es **físico** (`atr_norm×precio/pip`), no el relativo.
+- Las posiciones 88/89 **no se tocan** (orden de Félix): conservan la geometría
+  antigua. C1–C8 siguen apagados. Suite: **1291 passed, 2 xfailed**.
+  Evidencia: README §2026-10-23 · `fastapi/ops/2026-10-22-hallazgos-motor-dinero.md` §H-B.
+
+
 Antes de cualquier cambio en el sistema de trading:
 
 0. El fichero `CLAUDE.md` es de obligado cumplimento. También hay que revisar el codegraph para entender la estructura del proyecto.

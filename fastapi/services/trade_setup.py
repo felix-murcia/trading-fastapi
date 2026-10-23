@@ -23,6 +23,7 @@ from core.rules import size_ppo_position
 from ml.trading_env_v2 import (
     effective_sl_pips,
     production_sl,
+    sl_cap_geom_pips,
     target_level_candidates,
 )
 from services.trade_contract import (
@@ -45,6 +46,19 @@ class TradeSetup:
     lock_alive: bool         # Safe-4 puede dispararse antes del TP
     contract: TradeContract
     tp_candidates: tuple[float, ...]
+    atr_pips: float          # ATR físico del ciclo (pips) — audit H-B
+    sl_cap_geom_pips: float  # tope H-B aplicado al geométrico (pips) — audit
+
+    def audit_fields(self) -> dict[str, float]:
+        """Campos H-B para el audit: ATR físico del ciclo y tope geométrico.
+
+        Permiten verificar ex-post la geometría (`sl_pips_geom ==
+        sl_cap_geom_pips` cuando el tope muerde; `sl_pips/atr_pips ≈ 1,5`
+        salvo el suelo de 10 p geométricos) sin recalcular las velas."""
+        return {
+            "atr_pips": round(self.atr_pips, 1),
+            "sl_cap_geom_pips": round(self.sl_cap_geom_pips, 1),
+        }
 
 
 def prepare_trade(
@@ -78,6 +92,8 @@ def prepare_trade(
         current_price=price,
     )
     sl_pips = effective_sl_pips(sl_geom)
+    atr_pips = (atr * price) / pip_size if price > 0 else 0.0
+    cap_geom = sl_cap_geom_pips(atr, pip_size, price)
 
     ppl = pip_value_eur_per_lot(symbol, price, eurusd_price=eurusd_price)
     head_lots = size_ppo_position(
@@ -113,4 +129,6 @@ def prepare_trade(
         lock_alive=bool(contract.ok and contract.risk_eur >= min_lock_eur),
         contract=contract,
         tp_candidates=candidates,
+        atr_pips=atr_pips,
+        sl_cap_geom_pips=cap_geom if cap_geom is not None else sl_geom,
     )

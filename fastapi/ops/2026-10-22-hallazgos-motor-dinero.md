@@ -10,12 +10,13 @@ G3-2 (orden 80, 10:02 UTC).
   conversión que el gate y el ledger) ⇒ una sola conversión en todo el
   camino. Verificado en producción: ciclo EURUSD 10:25:41 → riesgo 4,81 €
   con tope 9,73 €.
-- **H-B: PARCIALMENTE CORREGIDO.** El contrato **rechaza** las operaciones
-  imposibles (si el TP más cercano que existe no paga 4 € netos con un lote
-  que quepa en el tope ⇒ no se opera). Lo que **NO** hace es impedir una
-  operación con R:R malo pero posible (SL 45 p / TP 40 p ⇒ R:R 0,89): acotar
-  el SL (≤2×ATR) o exigir un R:R mínimo es una decisión de dinero y sigue
-  pendiente de medición y de la orden de Félix.
+- **H-B: CERRADO (2026-10-23).** Se midió el tope de volatilidad del SL sobre
+  30.000 velas H1 × EURUSD/USDCHF y Félix ordenó **1,5×ATR** (su preferencia:
+  lote ~0,06 y stops cercanos). `production_sl` acota el geométrico a
+  `1,5×ATR_físico − buffer`; el EA suma el buffer ⇒ stop efectivo 1,5×ATR.
+  E[R] −0,069 → −0,077 (Δ −0,008 R, borde del ruido de H-N), lotes ≥0,05 de
+  25 % a 35 %, señales +3,5 %. Detalle y evidencia en la sección H-B final.
+  Las posiciones 88/89 se dejan como están (orden de Félix).
 - La orden 80 se cerró el 22-10 a las 10:22:46 UTC (0,8209) con **−0,52 €**;
   quedó persistida en `trade_outcomes` id 288 con `exit_reason=ea`.
 - **H-C (nuevo, 22-10 tarde): CORREGIDO.** Al consolidar se midió la
@@ -179,3 +180,69 @@ serve caía al fallback `2×SL` mientras el env usaba el techo más cercano ⇒
 Regresión: `tests/test_g3_nearest_levels.py::test_candidates_band_is_price_not_pips`.
 La corrección es de paridad/corrección, **no de rentabilidad**: con entrada
 aleatoria el E[R] es un empate (EURUSD −0,011 R, USDCHF +0,004 R).
+
+---
+
+## H-B — CERRADO (2026-10-23): tope de SL 1,5×ATR
+
+**Orden de Félix:** «Prefiero lotes de ~0,06 y SL/TP más cercanos». La medición
+se hizo antes de tocar el motor y con las funciones reales de producción
+(`production_sl`, `effective_sl_pips`, `target_level_candidates`,
+`evaluate_trade`, `size_ppo_position`), sobre **30.000 velas H1** de EURUSD y
+USDCHF (2021-12-27 → 2026-10-23), horizonte 12 velas, time-stop al cierre.
+
+### Evidencia viva (posiciones abiertas el 23-10, 12:42 UTC)
+
+| Posición | Lote | SL | TP | ATR ciclo | SL/ATR | TP/ATR | P/L |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| EURUSD SELL (orden 89) | 0,03 | 1,12206 (29,9 p) | 1,11309 (59,8 p) | ≈7,7 p | **3,9×** | **7,8×** | −2,01 € |
+| USDCHF BUY (orden 88) | 0,03 | 0,81888 (29,0 p) | 0,82444 (26,6 p) | ≈11,4 p | **2,5×** | 2,3× | −0,16 € |
+
+La orden 89 tenía `candidatos=[{lot_lo:0,02, tp_pips:59,8}]` = **fallback 2×SL**
+(sin nivel pagador); el techo estructural estaba a 25,5 p y los buffers lo
+llevaron a 29,9 p. Con ese SL el tope de riesgo 10,32 € sólo permitía 0,03
+lotes. La orden 88 tenía el suelo a 29,0 p (2,5×ATR) y el techo a 26,6 p.
+
+### Medición agregada (motor real)
+
+| Política | n | E[R] | P(TP) | SL medio | TP medio | Lote mediano | ≥0,05 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| actual (sin tope) | 113.985 | −0,069 | 38 % | 22,3 p | 25,8 p | 0,04 | 25 % |
+| **tope 1,5×ATR** | 117.944 | **−0,077** | 39 % | 18,7 p | 24,0 p | 0,04 | **35 %** |
+| tope 2,0×ATR | 116.382 | −0,071 | 39 % | 20,9 p | 24,9 p | 0,03 | 27 % |
+| 1,5×ATR + TP ≤3×ATR | 117.387 | −0,077 | 40 % | 18,7 p | 21,9 p | 0,04 | 35 % |
+
+**Lectura:** el tope 1,5×ATR es el único que lleva las dos órdenes vivas a
+~0,06 lotes y reduce el TP de la 89 de 59,8 a ~24 p (fallback 2×SL). No mejora
+el E[R] (Δ −0,008 R, borde del ruido documentado en H-N) y **ninguna variante
+lo vuelve positivo** (sigue ~−0,07 R): es corrección de la forma del riesgo, no
+edge. No se añade R:R mínimo (H-N ya midió que es neutro) ni tope de TP (no
+mejora el E[R] en esta muestra; el fallback de la 89 ya queda en 24 p).
+
+### Implementación
+
+- `ml/trading_env_v2.py`: `SL_MAX_ATR_MULT = 1.5` y `sl_cap_geom_pips()`.
+  `production_sl` acota el **geométrico** (lo que recibe el EA) a
+  `1,5×ATR_físico − SPREAD_BUFFER_PIPS`; el EA suma su buffer ⇒ el stop
+  efectivo queda en 1,5×ATR. El ATR físico es `atr_norm × precio / pip_size`
+  (no la unidad relativa antigua). Sin precio, el tope no aplica (compatibilidad
+  con las llamadas históricas `production_stops(atr, pip)`).
+- El suelo de 10 p geométricos manda cuando 1,5×ATR < 12 p efectivos (orden 89:
+  ATR 7,7 ⇒ 12 p efectivos, 1,56×ATR). Es el mínimo del sistema, no un fallo
+  del tope.
+- `services/trade_setup.py`: `TradeSetup` expone `atr_pips` y
+  `sl_cap_geom_pips`; `audit_fields()` los publica y `routers/ai.py` los mezcla
+  en el `ai_predict_cycle` sin alargar `predict_direction`.
+- Sin cambio en el EA (no hay bump). El contrato de observación `(20,25)` no
+  cambia; el bundle activo sigue sirviendo. El próximo retrain aprenderá la
+  geometría nueva.
+- Las posiciones 88/89 **no se tocan** (orden de Félix): conservan su geometría
+  antigua hasta que el mercado las cierre.
+
+### Tests
+
+TDD: `tests/test_hb_sl_cap.py` (7) fija la física (ATR en pips, no relativo),
+el suelo, la inactividad sin precio y los dos casos vivos (lote ≥0,05, riesgo
+≤ tope, TP ≤3,5×ATR). Actualizados: `test_p21_unification.py`,
+`test_g3_nearest_levels.py`, `test_trading_env_step.py`. Suite completa:
+**1291 passed, 2 xfailed**.

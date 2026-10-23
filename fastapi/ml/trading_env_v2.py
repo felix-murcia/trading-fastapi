@@ -194,6 +194,17 @@ REWARD_V3_DIRECTION_HORIZON_BARS = 24
 #   buffer fuera del sizing, el riesgo real superaba el presupuesto un 13 %.
 NEAREST_LEVEL_ATR_MULT = 0.75
 MIN_LEVEL_PIPS = 5.0
+# H-B (2026-10-23): tope de volatilidad del SL. El SL geométrico se ancla al
+# suelo/techo más cercano, pero un nivel lejano (precio en el extremo del
+# rango) producía stops de 3-4×ATR: con el tope de riesgo sólo cabía el lote
+# mínimo y el TP caía al fallback 2×SL (6-8×ATR, inalcanzable en 12 velas H1).
+# Medido sobre 30.000 velas H1 × EURUSD/USDCHF: 1,5×ATR lleva el stop efectivo
+# a 1,5×ATR, sube los lotes ≥0,05 del 25 % al 35 % y deja E[R] en −0,077 vs
+# −0,069 (Δ −0,008 R, borde del ruido documentado en H-N). Es forma de riesgo,
+# no edge: la señal sigue con E[R] negativo. 2,0×ATR apenas recorta el centro
+# (Δ −0,002 R) pero no llega a ~0,06 lotes; 1,5×ATR es la preferencia de Félix
+# (orden 2026-10-23).
+SL_MAX_ATR_MULT = 1.5
 # Ventana de búsqueda del suelo/techo (velas H1): "el más cercano" entre los
 # niveles de las últimas 120 velas (la misma ventana que el obs del modelo).
 NEAREST_LEVEL_WINDOW = 120
@@ -798,6 +809,30 @@ def target_level_candidates(
     return [float(x) for x in cand[:max_candidates]]
 
 
+def sl_cap_geom_pips(
+    atr_norm: float,
+    pip_size: float,
+    current_price: Optional[float],
+    cap_mult: float = SL_MAX_ATR_MULT,
+) -> Optional[float]:
+    """Tope de la distancia GEOMÉTRICA del SL (la que recibe el EA).
+
+    El EA suma su buffer de spread al colocar el stop ⇒ el stop EFECTIVO
+    queda en `cap_mult × ATR físico`. `atr_norm` es TR/close (relativo): el
+    ATR físico en pips es `atr_norm × precio / pip_size`; usar `atr_norm /
+    pip_size` (la unidad antigua) desviaba el tope un 12 % en EURUSD y un
+    22 % en USDCHF.
+
+    Devuelve None sin precio: sin precio no hay ATR físico medible y el tope
+    no aplica (compatibilidad de las llamadas históricas `production_stops(
+    atr, pip)` de tests/firmware).
+    """
+    if current_price is None or current_price <= 0:
+        return None
+    atr_pips = (atr_norm * current_price) / pip_size
+    return max(10.0, cap_mult * atr_pips - SPREAD_BUFFER_PIPS)
+
+
 def production_sl(
     atr_norm: float,
     pip_size: float,
@@ -806,8 +841,11 @@ def production_sl(
     ceiling_above: Optional[float] = None,
     current_price: Optional[float] = None,
 ) -> float:
-    """Distancia REAL del SL (geometría suelo/techo más cercano, con el buffer
-    de spread del EA dentro). Ver `production_stops` para la justificación.
+    """Distancia GEOMÉTRICA del SL (la que recibe el EA; el EA añade buffer).
+
+    H-B (2026-10-23): además de la geometría, el SL se acota a
+    1,5×ATR físico (`sl_cap_geom_pips`) para que un nivel estructural lejano
+    no consuma todo el presupuesto de riesgo y degrade el lote/TP.
     """
     atr_pips = atr_norm / pip_size
     sl_pips = max(10.0, min(50.0, atr_pips * 1.5))     # fallback ATR
@@ -821,6 +859,9 @@ def production_sl(
         sl_c = abs(current_price - sl_px) / pip_size
         if sl_c >= MIN_LEVEL_PIPS:
             sl_pips = max(10.0, min(50.0, sl_c))
+    cap = sl_cap_geom_pips(atr_norm, pip_size, current_price)
+    if cap is not None:
+        sl_pips = min(sl_pips, cap)
     return sl_pips
 
 
