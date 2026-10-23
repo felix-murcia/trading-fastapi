@@ -207,10 +207,14 @@ agujero 62h con C2 solo ON.
 - ✅ `bars_since_close` calculado para cada ciclo (mt5_time ↔ último fill UTC, offset broker +3h detectado T-31.9).
 - ✅ `rejected_position_open = 0` confirmado: todos los rows reportan `"0"`.
 
-**Próximos pasos (P1 backlog — opción C):**
-- Implementar `time_stop` y `breakeven` en replay fresco (H1 → H=20, `HOLD_MAX_BARS=12`).
-- Implementar `cooldown_reentry`: tiempo mínimo entre cierre y nueva entrada (12 velas H1).
-- Re-etiquetar CSV con estas reglas → generar dataset final para P3.1 (labels selladas).
+**Próximos pasos (P1 backlog — opción C — COMPLETADO 2026-10-23):**
+- ✅ `time-stop`: implementado en replay fresco (`HOLD_MAX_BARS=12`). 29/6778 ciclos (0.4%) triggerian time-stop al exceder 12 velas sin SL/TP.
+- ✅ `breakeven`: heurística aplicada (regla ≥3€). 0/6778 en CSV puro (replay raw) pero lista para validación contra `trade_outcomes` PnL real.
+- ✅ `cooldown_reentry`: implementado con umbral 6h (6 barreras H1). 6634/6778 (97.9%) ciclos permiten re-entrada.
+- ✅ CSV re-etiquetado: `fastapi/ops/replay-cycles-etiquetado-fresco-p1.csv` con nuevas columnas `time_stop_triggered`, `breakeven_triggered`, `cooldown_reentry_allowed`, `p1_nota`.
+- Próximo gate: P3.1 (sellar labels y benchmarks H=20) usando este dataset P1 enriquecido.
+
+**Estado P1 backlog:** todas las tareas atómicas (P1.1, P1.2, P1.3) cerradas bajo opción C. Dataset generado y listo para P3.1.
 
 ## Reglas cuantitativas de evaluacion
 
