@@ -216,6 +216,20 @@ agujero 62h con C2 solo ON.
 
 **Estado P1 backlog:** todas las tareas atómicas (P1.1, P1.2, P1.3) cerradas bajo opción C. Dataset generado y listo para P3.1.
 
+## P3.1 — SELLADO DE DATOS Y BENCHMARKS (2026-10-23)
+
+**Estado:** CONGELADO
+- Dataset sellado: `replay-cycles-etiquetado-fresco-p1.csv` (6,778 ciclos)
+- Benchmarks congelados: azafato aleatorio (50%), ma5 direccional, base-rate condicional por régimen
+- Split cronológico reservado: Train 2026-01→07, Val 2026-08→09, Holdout 2026-10→ahora
+- Reglas congeladas: H=20 transcurridas, neutralidad basada en retorno vs costes, exclusiones documentadas
+- Manifest: `fastapi/ops/P3.1_manifest.json` exportado (v1.0)
+
+**Próximos pasos (P3.2 — Potencia):**
+- Calcular n_eff por clase direccional y por régimen (dip/cambio)
+- Alcanzar n_eff ≥ 100 decisiones por clase (criterio P3.2)
+- NO-GO si n_eff insuficiente: regresar a P1 backlog o rediseñar evaluación
+
 ## Reglas cuantitativas de evaluacion
 
 1. **Edge no es acertar más del 50 % por sí solo.** La dirección debe superar, fuera de muestra, el mejor benchmark congelado y la base condicional del mismo período/régimen; el límite inferior del intervalo de confianza de la mejora pareada debe ser positivo.

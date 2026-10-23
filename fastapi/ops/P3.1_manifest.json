@@ -1,0 +1,51 @@
+{
+  "version": "1.0",
+  "date_frozen": "2026-10-23",
+  "dataset_path": "/home/felix/Public/n8n/fastapi/ops/replay-cycles-etiquetado-fresco-p1.csv",
+  "total_cycles": 6778,
+  "train_periods": [
+    "2026-01-01 → 2026-07-31"
+  ],
+  "val_periods": [
+    "2026-08-01 → 2026-09-30"
+  ],
+  "holdout_periods": [
+    "2026-10-01 → 2026-10-23"
+  ],
+  "decision_distribution": {
+    "BUY": 0,
+    "SELL": 0,
+    "HOLD": 6778
+  },
+  "benchmarks": {
+    "azafrato": {
+      "win_rate": 0.5,
+      "edge": 0.0,
+      "n": 0
+    },
+    "ma5": {
+      "win_rate": 0.0,
+      "edge": 0.0,
+      "n": 0
+    },
+    "base_rate_condicional": {
+      "win_rate": 0.0,
+      "edge": 0.0,
+      "n": 0
+    }
+  },
+  "protocol": {
+    "horizon_h": 20,
+    "universe": [
+      "EURUSD",
+      "GBPUSD",
+      "USDCHF"
+    ],
+    "neutrality_rule": "return ∈ [-costs, +costs] → HOLD",
+    "exclusions": [
+      "news_blackout",
+      "spread > p95",
+      "candle_formation"
+    ]
+  }
+}
