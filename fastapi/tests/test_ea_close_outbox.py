@@ -47,8 +47,29 @@ class TestCloseOutbox:
     def test_outbox_bounded_per_flush(self):
         src = _ea_source()
         assert "OUTBOX_MAX_PER_FLUSH" in src, "Falta límite de reintentos por ciclo"
+        assert "attempted < OUTBOX_MAX_PER_FLUSH" in src
 
-    def test_ea_version_bumped_to_14_1(self):
+    def test_permanent_link_conflicts_are_quarantined(self):
+        src = _ea_source()
+        assert re.search(
+            r'#define\s+OUTBOX_REJECTED_FILE\s+"trade_filled_conflicts\.jsonl"',
+            src,
+        )
+        assert "if(res == 409)" in src
+        assert "SaveRejectedToOutbox(lines[i])" in src
+        assert "attempted++;" in src
+
+    def test_outbox_rewrite_preserves_original_until_replacement_is_ready(self):
+        src = _ea_source()
+        flush = src[src.index("void FlushTradeOutbox"):src.index("void OnTick")]
+        assert "string temporaryFile = OUTBOX_FILE + \".tmp\";" in flush
+        assert flush.index("FileWrite(hw, remaining[k])") < flush.index("FileClose(hw)")
+        assert flush.index("FileClose(hw)") < flush.index(
+            "FileMove(temporaryFile, 0, OUTBOX_FILE, FILE_REWRITE)"
+        )
+        assert "el outbox original se conserva" in flush
+
+    def test_ea_version_bumped_to_14_3(self):
         src = _ea_source()
         # v13.5: Safe-4 (Félix 2026-10-15) — lock +SL_LockSafetyNetEur
         # (4€) antes de 1R; breakeven deja de moverse a la entrada tal cual.
@@ -60,11 +81,11 @@ class TestCloseOutbox:
         # todos los pares — Symbol() en todo; orden Félix 2026-10-18).
         # v14.0: guard de CLOSE 0,03 → 0,01 + diagnóstico de magic
         # (posición USDCHF 58986641010 con magic 90002, 2026-10-21).
-        # v14.1: el webhook envía el SWAP del cierre (financiación) — sin él el
-        # pnl registrado era el bruto y el ledger perdía ese coste
-        # (medido: −0,16 € en la operación 76; −1,12 € en el histórico).
-        assert re.search(r'#property\s+version\s+"14\.1"', src), "Falta bump a 14.1"
-        assert re.search(r'#define\s+EA_VERSION\s+"14\.1"', src)
+        # v14.2: el order_db_id del gate queda en el comentario de apertura y
+        # se propaga al cierre para enlazar el outcome con la orden exacta.
+        # v14.3: conflictos permanentes HTTP 409 se apartan del outbox activo.
+        assert re.search(r'#property\s+version\s+"14\.3"', src), "Falta bump a 14.3"
+        assert re.search(r'#define\s+EA_VERSION\s+"14\.3"', src)
 
     def test_ea_filters_opening_deals_v13_2(self):
         # v13.2: OnTradeTransaction descarta DEAL_ENTRY_IN — el deal de
@@ -73,6 +94,13 @@ class TestCloseOutbox:
         src = _ea_source()
         assert "if(currentEntry == DEAL_ENTRY_IN)" in src
         assert "long currentEntry = -1;" in src
+
+    def test_order_id_is_carried_from_gate_to_close_webhook(self):
+        src = _ea_source()
+        assert 'GetJsonValue(r, "order_db_id")' in src
+        assert 'StringFormat("AIQ:%I64d", orderDbId)' in src
+        assert 'HistoryDealGetString(openingDeal, DEAL_COMMENT)' in src
+        assert '\\"order_db_id\\"' in src
 
 
 class TestPredictLatencyBudget:

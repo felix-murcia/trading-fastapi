@@ -105,38 +105,55 @@ class TestTradeFilledPayloadValidation:
         assert "exit_reason" in str(response.json()["detail"])
         record_mock.assert_not_awaited()
 
+    def test_non_positive_order_db_id_rejected_at_edge(self):
+        response, record_mock = _post_filled(order_db_id=0)
+
+        assert response.status_code == 422
+        assert "order_db_id" in str(response.json()["detail"])
+        record_mock.assert_not_awaited()
+
+    def test_order_db_id_is_passed_to_outcome_persistence(self):
+        response, record_mock = _post_filled(order_db_id=42)
+
+        assert response.status_code == 200, response.text
+        assert record_mock.await_args.kwargs["order_db_id"] == 42
+
 
 class TestTradeFilledPersistence:
     @pytest.mark.asyncio
-    async def test_persist_inserts_row_with_dedup_and_returns_id(self, monkeypatch):
+    async def test_persist_inserts_row_with_order_link_and_dedup(self, monkeypatch):
         from services.auto_retrain import _persist_trade_outcome
 
         pool = MagicMock()
-        pool.fetchval = AsyncMock(return_value=77)
+        pool.fetchrow = AsyncMock(return_value={"id": 77, "order_db_id": 42})
         monkeypatch.setattr("db.connection.get_pool", lambda: pool)
 
         trade_id = await _persist_trade_outcome(
             "EURUSD", 1725450000.0, 1725453600.0, 12.5, 0.0125,
-            "LONG", False, True, "tp", 123456, 789012,
+            "LONG", False, True, "tp", 123456, 789012, 42,
         )
 
         assert trade_id == 77
-        pool.fetchval.assert_awaited_once()
-        sql, *params = pool.fetchval.await_args.args
+        pool.fetchrow.assert_awaited_once()
+        sql, *params = pool.fetchrow.await_args.args
         assert "INSERT INTO trade_outcomes" in sql
+        assert "order_db_id" in sql
+        assert "orders.symbol=$1" in sql
+        assert "orders.type=CASE $2" in sql
         assert "ON CONFLICT (deal_ticket)" in sql      # dedup a nivel DB
-        assert "RETURNING id" in sql
+        assert "RETURNING id, order_db_id" in sql
         assert params[0] == "EURUSD"
         assert params[1] == "LONG"
-        assert params[-2] == 123456                    # deal_ticket
-        assert params[-1] == 789012                    # position_id
+        assert params[9] == 123456                     # deal_ticket
+        assert params[10] == 789012                    # position_id
+        assert params[11] == 42                        # order_db_id
 
     @pytest.mark.asyncio
     async def test_persist_returns_none_on_duplicate_deal(self, monkeypatch):
         from services.auto_retrain import _persist_trade_outcome
 
         pool = MagicMock()
-        pool.fetchval = AsyncMock(return_value=None)   # ON CONFLICT DO NOTHING
+        pool.fetchrow = AsyncMock(return_value=None)   # ON CONFLICT DO NOTHING
         monkeypatch.setattr("db.connection.get_pool", lambda: pool)
 
         trade_id = await _persist_trade_outcome(
@@ -144,6 +161,45 @@ class TestTradeFilledPersistence:
             "LONG", False, True, "tp", 123456, 789012,
         )
         assert trade_id is None
+
+    @pytest.mark.asyncio
+    async def test_duplicate_deal_with_different_order_link_raises(self, monkeypatch):
+        from services.auto_retrain import (
+            TradeOutcomeLinkConflict,
+            _persist_trade_outcome,
+        )
+
+        pool = MagicMock()
+        pool.fetchrow = AsyncMock(
+            side_effect=[
+                None,
+                {"order_db_id": 42, "requested_order_db_id": 43},
+            ]
+        )
+        monkeypatch.setattr("db.connection.get_pool", lambda: pool)
+
+        with pytest.raises(TradeOutcomeLinkConflict):
+            await _persist_trade_outcome(
+                "EURUSD", 1725450000.0, 1725453600.0, 12.5, 0.0125,
+                "LONG", False, True, "tp", 123456, 789012, 43,
+            )
+
+
+class TestOrderTradeLinkSchema:
+    def test_fresh_schema_and_existing_database_migration_add_nullable_fk(self):
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1]
+        schema = (root / "db" / "schema.sql").read_text()
+        migration = (
+            root / "db" / "migrations" / "20261023_trade_outcome_order_link.sql"
+        ).read_text()
+
+        for ddl in (schema, migration):
+            assert "order_db_id" in ddl
+            assert "REFERENCES orders(id)" in ddl
+            assert "idx_trade_outcomes_order_db_id" in ddl
+            assert "mt5_position_id" in ddl
 
 
 class TestRetrainTriggerLogic:
@@ -157,7 +213,7 @@ class TestRetrainTriggerLogic:
         from services import auto_retrain as ar
 
         pool = MagicMock()
-        pool.fetchval = AsyncMock(return_value=1)
+        pool.fetchrow = AsyncMock(return_value={"id": 1, "order_db_id": None})
         monkeypatch.setattr("db.connection.get_pool", lambda: pool)
 
         state = ar.RetrainState(filled_count=3, last_retrain_time=1.0)
@@ -191,7 +247,7 @@ class TestRetrainTriggerLogic:
         from services import risk_guardian as rg
 
         pool = MagicMock()
-        pool.fetchval = AsyncMock(return_value=1)
+        pool.fetchrow = AsyncMock(return_value={"id": 1, "order_db_id": None})
         pool.execute = AsyncMock()
         monkeypatch.setattr("db.connection.get_pool", lambda: pool)
         monkeypatch.setattr("services.risk_state_store.get_pool", MagicMock(return_value=pool))
@@ -223,7 +279,7 @@ class TestRetrainTriggerLogic:
         from services import auto_retrain as ar
 
         pool = MagicMock()
-        pool.fetchval = AsyncMock(return_value=None)   # deal_ticket ya registrado
+        pool.fetchrow = AsyncMock(return_value=None)   # deal_ticket ya registrado
         monkeypatch.setattr("db.connection.get_pool", lambda: pool)
 
         state = ar.RetrainState(filled_count=3, last_retrain_time=1.0)
@@ -281,7 +337,7 @@ class TestDealTicketPersistence:
         from services.auto_retrain import record_trade_filled
 
         pool = MagicMock()
-        pool.fetchval = AsyncMock(return_value=None)   # conflicto: ya existía
+        pool.fetchrow = AsyncMock(return_value=None)   # conflicto: ya existía
         with patch("db.connection.get_pool", return_value=pool), \
              patch("services.trade_journal.record_trade_closed", AsyncMock()) as journal_mock:
             await record_trade_filled(

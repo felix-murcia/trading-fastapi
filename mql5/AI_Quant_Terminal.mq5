@@ -6,10 +6,10 @@ Terminal de Ejecución y Telemetría para Cerebro Autónomo (FastAPI + PPO v3).
 - Rol del Servidor: Decisión direccional, dimensionamiento de lotes, SL, TP y gestión de riesgo.
 */
 #property copyright "AI Quant Terminal"
-#property version   "14.1"
+#property version   "14.3"
 #property strict
 
-#define EA_VERSION "14.1"
+#define EA_VERSION "14.3"
 
 #include <Trade\Trade.mqh>
 
@@ -18,6 +18,7 @@ Terminal de Ejecución y Telemetría para Cerebro Autónomo (FastAPI + PPO v3).
 #define MAX_CIRCUIT_BREAKERS    5
 #define CIRCUIT_BREAK_COOLDOWN  300
 #define OUTBOX_FILE            "trade_filled_outbox.jsonl"
+#define OUTBOX_REJECTED_FILE   "trade_filled_conflicts.jsonl"
 #define OUTBOX_MAX_PER_FLUSH   10
 // v14.0 (2026-10-21): el guard de CLOSE era 0.03 y bloqueaba el time-stop de
 // posiciones de 0.02 (EURUSD, 21-10). El mínimo del bróker es 0.01; por
@@ -159,9 +160,10 @@ void ReportEADecision(const string cycle_id, const string received, const string
 //+------------------------------------------------------------------+
 bool RequestOrderPermission(const string cycle_id, const string order_type,
                             const double entry, const double sl, const double tp,
-                            const double volume, string &refReason)
+                            const double volume, long &orderDbId, string &refReason)
   {
    refReason = "";
+   orderDbId = 0;
    string body = "";
    StringConcatenate(body, "{",
       "\"cycle_id\":\"", cycle_id, "\",",
@@ -187,7 +189,14 @@ bool RequestOrderPermission(const string cycle_id, const string order_type,
      }
    string r = CharArrayToString(resultArr);
    if(GetJsonValue(r, "approved") == "true")
-      return true;
+       {
+        orderDbId = StringToInteger(GetJsonValue(r, "order_db_id"));
+        if(orderDbId > 0)
+           return true;
+        refReason = "gate_missing_order_db_id";
+        PrintFormat("[AI Terminal] GATE aprobó %s sin order_db_id — orden NO colocada", order_type);
+        return false;
+       }
    refReason = GetJsonValue(r, "rejection_reason");
    if(refReason == "") refReason = "rejected_no_reason";
    PrintFormat("[AI Terminal] GATE rechazó %s: %s | resp=%s", order_type, refReason, r);
@@ -211,6 +220,23 @@ void SaveToOutbox(const string body)
    FileWrite(h, body);
    FileClose(h);
    PrintFormat("[AI Terminal] OUTBOX: cierre encolado para reintento: %s", body);
+  }
+
+bool SaveRejectedToOutbox(const string body)
+  {
+   int h = FileOpen(OUTBOX_REJECTED_FILE, FILE_READ|FILE_WRITE|FILE_TXT, '\n');
+   if(h == INVALID_HANDLE)
+      h = FileOpen(OUTBOX_REJECTED_FILE, FILE_WRITE|FILE_TXT, '\n');
+   if(h == INVALID_HANDLE)
+     {
+      PrintFormat("[AI Terminal] OUTBOX: no se pudo guardar conflicto en %s (err=%d)",
+                  OUTBOX_REJECTED_FILE, GetLastError());
+      return false;
+     }
+   FileSeek(h, 0, SEEK_END);
+   FileWrite(h, body);
+   FileClose(h);
+   return true;
   }
 
 void FlushTradeOutbox()
@@ -238,11 +264,11 @@ void FlushTradeOutbox()
      }
 
    string remaining[];
-   int rem = 0, sent = 0;
+   int rem = 0, sent = 0, attempted = 0;
    for(int i = 0; i < count; i++)
      {
       bool keep = true;
-      if(sent < OUTBOX_MAX_PER_FLUSH)
+      if(attempted < OUTBOX_MAX_PER_FLUSH)
         {
          char postData[], resultArr[];
          string headers = "Content-Type: application/json\r\n"
@@ -251,11 +277,23 @@ void FlushTradeOutbox()
          ArrayResize(postData, StringLen(lines[i]));
          string responseHeaders;
          int res = WebRequest("POST", FastAPI_URL + "/api/v1/ai/trade/filled", headers, 10000, postData, resultArr, responseHeaders);
+         attempted++;
          if(res == 200)
            {
             keep = false;
             sent++;
             PrintFormat("[AI Terminal] OUTBOX: cierre reenviado OK (%d/%d)", sent, count);
+           }
+         else if(res == 409)
+           {
+            if(SaveRejectedToOutbox(lines[i]))
+              {
+               keep = false;
+               PrintFormat("[AI Terminal] OUTBOX: HTTP 409 permanente — cierre apartado en %s",
+                           OUTBOX_REJECTED_FILE);
+              }
+            else
+               Print("[AI Terminal] OUTBOX: HTTP 409 no pudo ponerse en cuarentena; queda pendiente");
            }
          else
             PrintFormat("[AI Terminal] OUTBOX: reintento falló HTTP %d — queda pendiente", res);
@@ -268,19 +306,33 @@ void FlushTradeOutbox()
         }
      }
 
-   FileDelete(OUTBOX_FILE);
-   if(rem > 0)
+   if(rem == 0)
      {
-      int hw = FileOpen(OUTBOX_FILE, FILE_WRITE|FILE_TXT, '\n');
+      if(!FileDelete(OUTBOX_FILE))
+         PrintFormat("[AI Terminal] OUTBOX: no se pudo eliminar %s (err=%d); los reintentos duplicados serán deduplicados por el servidor",
+                     OUTBOX_FILE, GetLastError());
+     }
+   else
+     {
+      string temporaryFile = OUTBOX_FILE + ".tmp";
+      int hw = FileOpen(temporaryFile, FILE_WRITE|FILE_TXT, '\n');
       if(hw == INVALID_HANDLE)
-         PrintFormat("[AI Terminal] OUTBOX: no se pudo reescribir %s (err=%d) — %d cierres en riesgo (recuperables vía historial MT5)", OUTBOX_FILE, GetLastError(), rem);
-      else
         {
-         for(int k = 0; k < rem; k++)
-            FileWrite(hw, remaining[k]);
-         FileClose(hw);
-         PrintFormat("[AI Terminal] OUTBOX: %d cierres pendientes tras reintento", rem);
+         PrintFormat("[AI Terminal] OUTBOX: no se pudo crear %s (err=%d) — el outbox original se conserva",
+                     temporaryFile, GetLastError());
+         return;
         }
+      for(int k = 0; k < rem; k++)
+         FileWrite(hw, remaining[k]);
+      FileClose(hw);
+      if(!FileMove(temporaryFile, 0, OUTBOX_FILE, FILE_REWRITE))
+        {
+         PrintFormat("[AI Terminal] OUTBOX: no se pudo reemplazar %s (err=%d) — se conserva el original",
+                     OUTBOX_FILE, GetLastError());
+         FileDelete(temporaryFile);
+         return;
+        }
+      PrintFormat("[AI Terminal] OUTBOX: %d cierres pendientes tras reintento", rem);
      }
   }
 
@@ -515,12 +567,14 @@ void OnTick()
 
             // P0-3: gate del servidor antes de colocar (fail-closed)
             string gateReason = "";
-            if(!RequestOrderPermission(cycle_id, "BUY", ask, slPrice, tpPrice, lot, gateReason))
+            long orderDbId = 0;
+            if(!RequestOrderPermission(cycle_id, "BUY", ask, slPrice, tpPrice, lot, orderDbId, gateReason))
               {
                ReportEADecision(cycle_id, decision, "rejected_by_gate", r);
                return;
               }
-            bool placed = trade.Buy(lot, Symbol(), ask, slPrice, tpPrice, "AI-Predict-v3");
+            string orderComment = StringFormat("AIQ:%I64d", orderDbId);
+            bool placed = trade.Buy(lot, Symbol(), ask, slPrice, tpPrice, orderComment);
             if(placed)
               {
                ReportEADecision(cycle_id, decision, "buy", r);
@@ -550,12 +604,14 @@ void OnTick()
 
             // P0-3: gate del servidor antes de colocar (fail-closed)
             string gateReason = "";
-            if(!RequestOrderPermission(cycle_id, "SELL", bid, slPrice, tpPrice, lot, gateReason))
+            long orderDbId = 0;
+            if(!RequestOrderPermission(cycle_id, "SELL", bid, slPrice, tpPrice, lot, orderDbId, gateReason))
               {
                ReportEADecision(cycle_id, decision, "rejected_by_gate", r);
                return;
               }
-            bool placed = trade.Sell(lot, Symbol(), bid, slPrice, tpPrice, "AI-Predict-v3");
+            string orderComment = StringFormat("AIQ:%I64d", orderDbId);
+            bool placed = trade.Sell(lot, Symbol(), bid, slPrice, tpPrice, orderComment);
             if(placed)
               {
                ReportEADecision(cycle_id, decision, "sell", r);
@@ -906,6 +962,8 @@ void CloseAllPositions()
      long openingType  = DEAL_TYPE_SELL;
      datetime entryTime= 0;
      datetime closeTime= (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME);
+     long orderDbId = 0;
+     long openingOrderTicket = 0;
 
      if(openingDeal > 0)
       {
@@ -913,6 +971,15 @@ void CloseAllPositions()
        openingType = HistoryDealGetInteger(openingDeal, DEAL_TYPE);
        entryTime = (datetime)HistoryDealGetInteger(openingDeal, DEAL_TIME);
        openingMagic = HistoryDealGetInteger(openingDeal, DEAL_MAGIC);
+       openingOrderTicket = HistoryDealGetInteger(openingDeal, DEAL_ORDER);
+       string openingComment = HistoryDealGetString(openingDeal, DEAL_COMMENT);
+       if(StringFind(openingComment, "AIQ:") == 0)
+         {
+          string orderDbIdText = StringSubstr(openingComment, 4);
+          long parsedOrderDbId = StringToInteger(orderDbIdText);
+          if(parsedOrderDbId > 0 && orderDbIdText == StringFormat("%I64d", parsedOrderDbId))
+             orderDbId = parsedOrderDbId;
+         }
       }
     else
       {
@@ -952,6 +1019,13 @@ void CloseAllPositions()
        pnlPct = ((exitPrice - entryPrice) / entryPrice) * dir * 100.0;
       }
 
+     string orderDbIdJson = orderDbId > 0 ? StringFormat("%I64d", orderDbId) : "null";
+     if(orderDbId <= 0)
+       {
+        PrintFormat("[AI Terminal] No se pudo recuperar order_db_id del deal de apertura=%I64u positionId=%I64d; outcome quedará sin enlace exacto",
+                    openingDeal, positionId);
+       }
+
      // Enviar webhook de telemetría a FastAPI
     string body = "";
     StringConcatenate(body, "{",
@@ -967,6 +1041,8 @@ void CloseAllPositions()
        "\"exit_reason\":\"", exitReason, "\",",
        "\"deal_ticket\":", IntegerToString((long)dealTicket), ",",
        "\"position_id\":", IntegerToString(positionId), ",",
+       "\"order_db_id\":", orderDbIdJson, ",",
+       "\"opening_order_ticket\":", IntegerToString(openingOrderTicket), ",",
        "\"opening_deal\":", IntegerToString((long)openingDeal), ",",
        "\"opening_magic\":", IntegerToString(openingMagic), ",",
        "\"opening_deal_found\":", openingDeal > 0 ? "true" : "false", ",",

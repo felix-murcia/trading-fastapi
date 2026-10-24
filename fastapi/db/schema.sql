@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS orders (
     tp           NUMERIC(10,5) NOT NULL,
     volume       NUMERIC(6,3)  NOT NULL,
     mt5_order_id TEXT,
+    mt5_position_id BIGINT,
     status       TEXT NOT NULL CHECK (status IN ('pending', 'placed', 'filled', 'rejected', 'unconfirmed', 'cancelled')),
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -68,6 +69,7 @@ CREATE TABLE IF NOT EXISTS trade_outcomes (
     tp_hit      BOOLEAN NOT NULL DEFAULT FALSE,
     deal_ticket  BIGINT,
     position_id  BIGINT,
+    order_db_id  BIGINT CONSTRAINT fk_trade_outcomes_order_db_id REFERENCES orders(id),
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -78,6 +80,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_outcomes_deal_ticket
 
 CREATE INDEX IF NOT EXISTS idx_trade_outcomes_symbol ON trade_outcomes(symbol);
 CREATE INDEX IF NOT EXISTS idx_trade_outcomes_exit_time ON trade_outcomes(exit_time);
+CREATE INDEX IF NOT EXISTS idx_trade_outcomes_order_db_id
+    ON trade_outcomes(order_db_id);
+CREATE INDEX IF NOT EXISTS idx_orders_mt5_position_id
+    ON orders(mt5_position_id);
 
 -- P1-2: historial de bundles promovidos — qué modelo corre, por qué, cuándo
 CREATE TABLE IF NOT EXISTS model_registry (

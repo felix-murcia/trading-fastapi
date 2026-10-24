@@ -37,6 +37,7 @@ from ml.trading_env_v2 import (
     stop_geometry_kind,
 )
 from services.auto_retrain import (
+    TradeOutcomeLinkConflict,
     approve_retrain as _approve_retrain,
     force_retrain as _force_retrain,
     get_state as _get_retrain_state,
@@ -2127,6 +2128,8 @@ class TradeFilledRequest(BaseModel):
     exit_reason: str  # "sl", "tp", "manual", "news", "signal_end", "ea"
     deal_ticket: int | str | None = None
     position_id: int | str | None = None
+    order_db_id: int | None = None
+    opening_order_ticket: int | None = None
     # G3-2 (2026-10-21): el SWAP del cierre (financiación por mantener la
     # posición abierta). Antes NO llegaba al backend ⇒ el pnl registrado era
     # el bruto del bróker y el coste de la financiación se perdía en todas las
@@ -2159,6 +2162,16 @@ class TradeFilledRequest(BaseModel):
                 f"exit_reason must be one of {sorted(VALID_EXIT_REASONS)} (got {v!r})",
             )
         return reason
+
+    @field_validator("order_db_id")
+    @classmethod
+    def _positive_order_db_id(cls, value: int | None) -> int | None:
+        if value is not None and value <= 0:
+            raise PydanticCustomError(
+                "value_error.order_db_id",
+                "order_db_id must be a positive integer",
+            )
+        return value
 
 
 class EADecisionRequest(BaseModel):
@@ -2199,6 +2212,51 @@ async def ea_decision_webhook(req: EADecisionRequest, _: None = Depends(verify_t
     return {"status": "recorded"}
 
 
+async def _mark_trade_order_filled(
+    req: TradeFilledRequest,
+    direction: str,
+    position_id: int | None,
+) -> None:
+    await mark_order_filled(
+        req.symbol,
+        "BUY" if direction == "LONG" else "SELL",
+        order_db_id=req.order_db_id,
+        mt5_order_id=req.opening_order_ticket,
+        position_id=position_id,
+    )
+
+
+async def _record_and_mark_trade_filled(
+    req: TradeFilledRequest,
+    entry_time: str,
+    exit_time: str,
+    pnl: float,
+    pnl_pct: float,
+    direction: str,
+    deal_ticket: int | None,
+    position_id: int | None,
+) -> None:
+    try:
+        await record_trade_filled(
+            symbol=req.symbol,
+            entry_time=entry_time,
+            exit_time=exit_time,
+            pnl=pnl,
+            pnl_pct=pnl_pct,
+            direction=direction,
+            sl_hit=req.sl_hit,
+            tp_hit=req.tp_hit,
+            exit_reason=req.exit_reason,
+            deal_ticket=deal_ticket,
+            position_id=position_id,
+            order_db_id=req.order_db_id,
+        )
+    except TradeOutcomeLinkConflict as exc:
+        logger.error("[TRADE-FILLED] conflicto de enlace de cierre: %s", exc)
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    await _mark_trade_order_filled(req, direction, position_id)
+
+
 @router.post("/trade/filled")
 async def trade_filled_webhook(req: TradeFilledRequest, _: None = Depends(verify_token)):
     """
@@ -2230,7 +2288,11 @@ async def trade_filled_webhook(req: TradeFilledRequest, _: None = Depends(verify
         # O-1: la apertura confirma la ejecución → la orden sale del pool de
         # `duplicate_order` (pending/placed → filled). Si este reporte se
         # pierde, la rama de cierre hace la misma transición (idempotente).
-        await mark_order_filled(req.symbol, "BUY" if req.direction == "LONG" else "SELL")
+        await _mark_trade_order_filled(
+            req,
+            req.direction,
+            int(req.position_id) if req.position_id not in (None, "") else None,
+        )
         return {"status": "ignored_open_deal"}
 
     minimum_timestamp = 946684800.0  # 2000-01-01 UTC
@@ -2262,21 +2324,17 @@ async def trade_filled_webhook(req: TradeFilledRequest, _: None = Depends(verify
     if swap:
         logger.info("[TRADE-FILLED] swap=%.2f € (bruto %.2f → real %.2f) symbol=%s",
                     swap, pnl, pnl_total, req.symbol)
-    await record_trade_filled(
-        symbol=req.symbol,
-        entry_time=entry_time_out,
-        exit_time=exit_time_out,
-        pnl=pnl_total,
-        pnl_pct=pnl_pct,
-        direction=direction,
-        sl_hit=req.sl_hit,
-        tp_hit=req.tp_hit,
-        exit_reason=req.exit_reason,
-        deal_ticket=deal_ticket,
-        position_id=position_id,
-    )
     # O-1: catch-all de transición — si el reporte de apertura no llegó (el EA
     # v13.2 filtra DEAL_ENTRY_IN), este cierre saca la orden del pool de
     # `duplicate_order`. Idempotente: si la apertura ya la marcó, no matchea.
-    await mark_order_filled(req.symbol, "BUY" if direction == "LONG" else "SELL")
+    await _record_and_mark_trade_filled(
+        req,
+        entry_time_out,
+        exit_time_out,
+        pnl_total,
+        pnl_pct,
+        direction,
+        deal_ticket,
+        position_id,
+    )
     return {"status": "recorded"}

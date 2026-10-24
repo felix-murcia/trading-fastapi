@@ -100,8 +100,8 @@ class TestEaPositionCounting:
 
     def test_ea_version_was_bumped(self):
         src = MQL5.read_text(encoding="utf-8")
-        assert '#property version   "14.1"' in src
-        assert '#define EA_VERSION "14.1"' in src
+        assert '#property version   "14.3"' in src
+        assert '#define EA_VERSION "14.3"' in src
 
     def test_ea_counts_foreign_magic_positions(self):
         """v14.0: el EA reporta las posiciones del símbolo con OTRO magic.

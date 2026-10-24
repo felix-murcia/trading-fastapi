@@ -31,27 +31,40 @@ class TestSwapIsReported:
         src = EA.read_text(encoding="utf-8")
         assert "DEAL_SWAP" in src, "el EA debe leer el swap del deal"
         assert '\\"swap\\"' in src, "el webhook debe enviar el swap"
-        assert re.search(r'#property\s+version\s+"14\.1"', src), "bump a 14.1"
-        assert '#define EA_VERSION "14.1"' in src
+        assert re.search(r'#property\s+version\s+"14\.3"', src), "bump a 14.3"
+        assert '#define EA_VERSION "14.3"' in src
 
     def test_backend_adds_the_swap_to_the_recorded_pnl(self):
         """El pnl que se registra es el resultado REAL (bruto + swap)."""
         import routers.ai as ai
         src = Path(ai.__file__).read_text(encoding="utf-8")
         assert "pnl_total = pnl + swap" in src
-        assert "pnl=pnl_total" in src
 
     @pytest.mark.asyncio
     async def test_webhook_records_pnl_plus_swap(self, monkeypatch):
         """El endpoint /trade/filled con swap registra bruto + swap."""
-        from routers.ai import TradeFilledRequest
-        req = TradeFilledRequest(
+        import routers.ai as ai
+
+        req = ai.TradeFilledRequest(
             symbol="EURUSD", entry_time=1760000000, exit_time=1760003600,
             pnl=-6.51, pnl_pct=-0.0069, direction="SHORT",
             sl_hit=True, tp_hit=False, exit_reason="sl",
             deal_ticket=999, position_id=888, swap=-0.16,
         )
-        assert req.swap == pytest.approx(-0.16)
+        recorded = {}
+
+        async def record_trade_filled(**kwargs):
+            recorded.update(kwargs)
+
+        async def mark_order_filled(*args, **kwargs):
+            return None
+
+        monkeypatch.setattr(ai, "record_trade_filled", record_trade_filled)
+        monkeypatch.setattr(ai, "mark_order_filled", mark_order_filled)
+
+        await ai.trade_filled_webhook(req, None)
+
+        assert recorded["pnl"] == pytest.approx(-6.67)
 
 
 class TestAuditDeclaresTheRealGeometry:

@@ -39,6 +39,18 @@ Sistema de trading automatizado que conecta Expert Advisors (MQL5) con MetaTrade
 Cada cambio funcional o corrección de errores debe incluir una actualización de
 este README.
 
+### Evidencia reciente — transición de órdenes sin identidad exacta (2026-10-24)
+
+`mark_order_filled` ya no elige la orden viva más reciente por símbolo/tipo
+cuando falta `order_db_id`; registra una advertencia y no modifica ninguna
+orden. Así se evita asignar un fill a una orden distinta. La transición solo
+actualiza la fila indicada por ID exacto, símbolo y tipo. **Tests focalizados:**
+`pytest tests/test_orders_lifecycle.py tests/test_trade_filled_webhook.py -q`
+→ **37 passed**. Archivos funcionales: `fastapi/services/order_manager.py`;
+regresión: `fastapi/tests/test_orders_lifecycle.py`. El auditor read-only
+2026-10-24 13:20Z sigue `UNRECONCILED` (614 ciclos, 90 órdenes, 210 outcomes
+unresolved); no se escribieron datos ni se abrieron operaciones.
+
 ## Arquitectura
 
 ```
@@ -1250,7 +1262,7 @@ Ahora, si las Bandas de Bollinger son inválidas o el ratio es insuficiente, el 
 
 **Cambios (solo MQL5):**
 - `SaveToOutbox(body)` — la rama de fallo del webhook persiste el cuerpo JSON en `MQL5\Files\trade_filled_outbox.jsonl` (una línea por cierre).
-- `FlushTradeOutbox()` — al inicio de cada ciclo M5 (tras el circuit breaker, antes del predict): reenvía hasta `OUTBOX_MAX_PER_FLUSH = 10` cierres pendientes; los fallidos quedan en el archivo; si todos van bien se elimina.
+- `FlushTradeOutbox()` — al inicio de cada ciclo M5 (tras el circuit breaker, antes del predict): limita a `OUTBOX_MAX_PER_FLUSH = 10` solicitudes por ciclo; HTTP 409 se aparta en `trade_filled_conflicts.jsonl`, y los temporales reescriben el outbox sin borrar el original antes de completar el reemplazo.
 - Reintento ciego seguro gracias al dedup server-side (sección Y).
 - **v13.0 → v13.1.**
 
@@ -4008,3 +4020,188 @@ próximo retrain aprenderá la geometría nueva. **EA sin cambios (sin bump).**
 - **2026-10-23 — P0.2 RECONCILIACIÓN (auditoría de evidencia, no cambio en producción):** `audit_log` (`ai_predict_cycle`) 7058 ciclos (2026-09-02 → 10-23) vs `replay-cycles.csv` 2050 filas (ventana fija). Decisiones direccionales BD (58 sin clave `decision` = eventos no predict): BUY=50, SELL=63, HOLD=174. **`rejected_position_open = 0`** confirmado: `data ? 'veto_reason'` = 0 filas en DB; CSV replay vacío (`veto`, `veto_reason`); 89 órdenes / 87 filled (`orders`); `trade_outcomes` 208 / PnL +356,06 € / 85 wins / 73 losses; 42/45 `trade_id` replay en `trade_outcomes.id` (3 eliminados en higiene P2: 76–79, 107–111; backups `higiene_p2_*.sql`). `bars_since_close` aún pendiente (`etiquetar_bars_since_close.py` preparado, requiere autor P0.3). C1–C8 OFF. Suite 1291 passed / 2 xfail. No se activa criterio ni se modifica `predict_direction`.
 
 - **2026-10-23 — P0.3 PRE-REGISTRO (opción C de Félix: iterar P1 backlog):** Protocolo congelado antes de abrir evaluación. Ejecutamos replay fresco contra `audit_log` + `orders` actuales → `fastapi/ops/replay-cycles-etiquetado-fresco.csv` (6778 ciclos con datos actuales). `bars_since_close` calculado (mt5_time ↔ último fill UTC, offset broker +3h detectado T-31.9). **`rejected_position_open = 0` confirmado** (todas las filas reportan `0`). Opción C elegida: **iterar P1 backlog** (implementar `time_stop`/`breakeven`, `cooldown_reentry`) antes de shadow §6.
+
+### 2026-10-23 — Bloqueo del dataset P3.1 y auditor offline de manifiestos
+
+Al verificar el supuesto dataset P3.1 antes de calcular potencia, se detectó
+que no cumple su propio contrato: el CSV tiene 6.778 filas pero solo EURUSD
+(universo declarado: EURUSD/GBPUSD/USDCHF), todas HOLD, sin `label`, 102 IDs
+duplicados, 619 discrepancias entre símbolo e ID y 6.463 valores negativos de
+`bars_since_close`. Train contiene 0 filas (Val 1.799; Holdout 4.979). Los
+benchmarks están en `n=0` y el manifiesto no fija el SHA-256 del dataset.
+**P3.1 queda invalidado y P3.2 bloqueado** hasta regenerar el conjunto; no se
+modificó el CSV ni el manifiesto originales.
+
+Se implementó [replay_manifest_audit.py](fastapi/services/replay_manifest_audit.py)
+y [test_replay_manifest_audit.py](fastapi/tests/test_replay_manifest_audit.py).
+El auditor es offline, read-only y sale con código 2 si hay defectos de
+integridad o muestra. Hashes observados: manifest
+`1a3d4c3aca04d9654b8bd35cf9c511d151b3ffe684fce4e47cf6dbc2e1aa7953`;
+dataset `5d61ecc16e87b16e22d26a39fa5a54fc643292de0f544b2a075a05cf4c68f0a2`.
+
+**Validación:** `pytest tests/test_replay_manifest_audit.py
+tests/test_market_snapshot_audit.py tests/test_architecture_rules.py -q` →
+**18 passed**. La auditoría CLI del artefacto actual sale con código **2** y
+`valid=false`, como gate fail-closed. Se retira la afirmación previa de que
+`bars_since_close` quedó correctamente calculado en esas 6.778 filas: la
+verificación posterior encontró 6.463 valores negativos. No se tocó producción,
+PPO/LLM, switches ni órdenes. El detalle y
+el comando reproducible están en
+[el backlog PPO/LLM](fastapi/ops/2026-10-22-punto-inflexion-ppo-llm-20h.md).
+
+La consulta read-only de BD también encontró un corte distinto del inventario
+anterior: 7.098 `ai_predict_cycle`, 88 órdenes `filled` (1 `pending`, 1
+`cancelled`) y 209 `trade_outcomes` con +347,21 €. No se ha conciliado con el
+corte previo (7.058 ciclos, 89 órdenes, 208 outcomes, +356,06 €). Además, el
+`exit_time` máximo reportado (15:46:11+00) estaba en el futuro respecto al host
+(13:21 UTC); se conserva como evidencia de reloj no reconciliado, no como fecha
+UTC. P0.2 permanece abierto.
+
+**Reconciliación P0.2 (2026-10-23, snapshot UTC
+`2026-10-23T13:29:58.253730+00:00`):** se incorporó
+[`reconcile_replay_sources.py`](fastapi/ops/reconcile_replay_sources.py), que
+consulta en transacción `REPEATABLE READ READ ONLY`. Reporta **UNRECONCILED**
+(código 2 esperado): 7.101 ciclos (6.988 IDs únicos, 113 duplicados, 12 IDs
+con decisiones contradictorias, 306 sin `mt5_time`, 1 fuera del universo);
+90 órdenes (15 sin ciclo y 88 `filled` sin ID MT5); 209 resultados (121 sin
+`deal_ticket` ni `position_id`). El esquema no representa la relación
+orden→resultado: `mt5_order_id`, `position_id` y `deal_ticket` son identificadores
+distintos y no hay una FK compartida. Hay 121 resultados sin `deal_ticket` y
+121 sin `position_id` (no se afirma que sean las mismas filas). Los 74 eventos
+de fill sí incluyen `order_db_id`. El PnL observado de
++347,2100 no se reconcilia con el capital: faltan balance inicial y extractos
+de depósitos/retiros. No se empleó el join temporal exploratorio. La suite
+focalizada dio **21 passed**. P0.2 queda abierto; P3.1 sigue NO-GO y P3.2
+bloqueado. No se modificaron datos, órdenes, modelos ni switches de producción.
+
+**Enlace exacto orden→cierre (2026-10-23):** el backend valida símbolo/dirección,
+rechaza con HTTP 409 un `deal_ticket` reutilizado con otra orden y actualiza la
+orden por su ID, guardando ticket y posición MT5. La vía legacy permanece para
+EA anterior y no certifica reconciliación. La migración aditiva
+`trade_outcomes.order_db_id → orders.id` y `orders.mt5_position_id` se aplicó a
+la BD activa tras crear y verificar un `pg_dump`; no se realizó backfill.
+
+**EA v14.3:** el cambio local aparta HTTP 409 en `trade_filled_conflicts.jsonl`,
+limita los intentos HTTP por ciclo a 10 y reemplaza el outbox desde un temporal.
+El usuario confirmó que está compilado y desplegado en el terminal MT5 activo;
+el log compartido registra el inicio de v14.3 a las `18:57:45.812` del
+23-10-2026 y conexión al backend (zona horaria no especificada). El artefacto
+compilado no está disponible en este host para comparar su hash.
+
+**Verificación/despliegue (2026-10-23):** suite completa **1308 passed,
+2 xfailed**; imagen FastAPI construida y desplegada, `/health` devolvió 200 y el
+arranque confirmó PostgreSQL, MT5, PPO y VecNormalize. El reconciliador posterior
+a la migración informa `UNRECONCILED` / `INCOMPLETE`: **209/209 outcomes siguen
+sin `order_db_id`**, junto con los huecos de ciclo y fill ya documentados. No se
+inventaron enlaces históricos. P0.2 continúa NO-GO; P3.1 NO-GO y P3.2 bloqueado.
+El último equity snapshot almacenado es de `2026-10-23T10:57:27Z`; `/health`
+consultó `504.89` a las `13:57Z`. No son instantes coincidentes y no se usan
+para afirmar una conciliación de capital.
+
+**P1.1, captura H1 read-only (2026-10-23):** archivo local no versionado
+`h1-market-snapshot-20261023-latest.json`, SHA-256
+`2ff207824e8020c6b4c79892eb4326d69fcd3aed2b08c192cdb6a75d18c0d7e4`.
+Desfase del bróker +3 h medido por la hora del servidor; cada símbolo devolvió
+1.200 filas, 1.199 cerradas hasta `13:00Z`, sin duplicados ni OHLC inválidos.
+Hubo 10 huecos >1 h (máximo 49 h; calendario aún por revisar). `spread=0` en
+1.200/1.200 EURUSD y 1.177/1.200 USDCHF: el feed no aporta costes utilizables y
+P1.2 permanece NO-GO. Los exports H1 del disco terminan el 12 de octubre y
+requieren revisión de calendario; no se usaron para afirmar actualidad.
+
+**Historial MT5 read-only (2026-10-23):** se consultaron 576 deals de
+EURUSD/USDCHF; `commission`, `swap` y `fee` estaban presentes en todos. Hubo
+87 coincidencias exactas outcome→deal de cierre por `deal_ticket` (79 EURUSD,
+8 USDCHF). En 12 cierres EURUSD el PnL almacenado refleja `profit` bruto y no
+incluye el swap no nulo; no se corrigió el histórico. No hay base para enlazar
+esos deals a órdenes internas: solo 1/90 órdenes tiene `mt5_order_id`, 0/90
+tienen `mt5_position_id`, los 74 eventos `order_filled` no contienen IDs MT5
+y ningún deal conserva el comentario exacto `AIQ:<id>`. `history/orders`
+devolvió HTTP 500 en la consulta probada. No se ejecutó backfill ni se
+modificaron datos; P0.2 sigue incompleto y P1.2 continúa NO-GO. Filtro solicitado:
+2026-08-01 a 2026-10-23 UTC; el significado horario del filtro en el servidor
+no está verificado.
+
+**Actualización P0.2 — auditor reproducible (2026-10-23 17:05 UTC):**
+`fastapi/ops/audit_broker_order_links.py` comprueba solo identidades exactas
+entre PostgreSQL y `history/deals`; la transacción SQL es read-only y no genera
+backfill. Ejecutar con
+`docker exec trading-fastapi python -m ops.audit_broker_order_links --from-date 2026-08-01T00:00:00Z`.
+El código de salida 2 significa que la auditoría produjo reporte pero el enlace
+sigue incompleto. El corte consultó 578 deals, 91 órdenes y 210 outcomes: 88
+tickets de cierre coinciden exactamente, 1 ticket no aparece en el feed del
+rango y 121 outcomes carecen de `deal_ticket`. De las 88 coincidencias, 86
+coinciden con `profit` bruto y 76 con `profit + swap + commission + fee`; 12
+cierres con swap no nulo tienen PnL almacenado igual al profit bruto. Cero
+outcomes tienen `order_db_id`; cero órdenes tienen un `mt5_order_id` positivo
+válido o `mt5_position_id`, y no hubo matches exactos deal→orden. El único
+`mt5_order_id` no nulo es inválido para reconciliación exacta. `history/orders`
+devolvió HTTP 500 en EURUSD y USDCHF; la causa queda desconocida sin logs del
+bridge. P0.2 sigue NO-GO. Pruebas focalizadas: **7 passed**; suite completa
+posterior al cambio: **1315 passed, 2 xfailed**.
+
+**Comprobación tras el despliegue de v14.3 (2026-10-23 17:17 UTC):** consulta
+read-only del historial con rango amplio `14:00Z–17:17Z`, porque la zona horaria
+del log de inicio no se especificó y el servidor no ha confirmado cómo interpreta
+el filtro. El endpoint devolvió 3 deals USDCHF y **0 comentarios exactos
+`AIQ:<id>`**. Dos tickets coincidieron con outcomes existentes; el reporte no
+incluye hora individual, así que no demuestra que fueran posteriores al inicio.
+El check queda pendiente hasta el primer fill/deal identificable después del
+arranque. La BD tampoco ofrece aún enlace exacto a órdenes: P0.2 sigue NO-GO.
+No se escribieron operaciones ni se hizo backfill.
+
+**Estado del roadmap (captura 2026-10-23 19:40 UTC; gaps reevaluados después):** P0.2 sigue abierto.
+El auditor ahora asigna estado/razón al 100% de las filas internas: 7.202 ciclos,
+91 órdenes, 75 fills y 210 outcomes, cero sin clasificar; siguen unresolved
+607 ciclos, 90 órdenes y los 210 outcomes. Los 75 fills enlazan a `orders.id`
+por clave exacta. La captura P1.1 obtuvo 1.199 velas cerradas por cada uno de
+los tres pares; validación estructural correcta. Los diez gaps semanales por par
+(30/30 comparaciones) coinciden, tras convertir el offset observado +3h a
+`America/New_York`, con cierre viernes 17:00 y reapertura domingo 17:00 EDT,
+consistente con la convención MetaQuotes-Demo aportada por Félix. La muestra
+termina antes del cambio DST del 1-11-2026: ese cambio del offset del servidor
+sigue sin verificación empírica. Además, [AGENTS.md](AGENTS.md) documenta +2h
+desde el 25-10-2026, fecha distinta; resolver la discrepancia con mediciones
+broker posteriores a ambas fechas, sin fijar el offset por suposición. La captura
+ya está obsoleta para replay, por lo que P1.1 sigue parcial y NO-GO. Comprobé directamente el bridge indicado: OpenAPI HTTP 200, 19 rutas
+y ninguna ruta de sesiones/calendario; `symbol/info` no publica un horario
+semanal. `CALENDAR_URL` de `fastapi/services/news_filter.py` es un feed de
+noticias, no el horario de mercado del broker. El spread H1 está a cero en casi
+todas las filas y no se usa como coste. El corte broker
+anterior mantiene 121 outcomes sin `deal_ticket`/`position_id`, 0 IDs MT5
+válidos en 91 órdenes y capital sin conciliar. P1.1 parcial, P1.2 NO-GO,
+P1.3/P3.1 NO-GO; P2–P8 bloqueados por integridad/costes/dataset. P9
+shadow/promoción no autorizado.
+
+La causa de `history/orders` 500 no se pudo diagnosticar: hacen falta logs del
+bridge; tampoco se verificó un fill natural posterior al despliegue v14.3.
+El monitor registró drift **critical** en EURUSD (`max_psi=5.3098`, `sma20`).
+La herramienta de reconciliación y sus pruebas cambiaron en
+[`reconcile_replay_sources.py`](fastapi/ops/reconcile_replay_sources.py) y
+[`test_reconcile_replay_sources.py`](fastapi/tests/test_reconcile_replay_sources.py):
+**13 pruebas focalizadas pasaron**, Pylance no reportó diagnósticos y el auditor
+live emitió `UNRECONCILED` (exit code 2). La guía única de gates, estados,
+dependencias y aceptación cuantificable está en
+[roadmap PPO/LLM](fastapi/ops/2026-10-22-punto-inflexion-ppo-llm-20h.md#estado-ejecutivo-vigente--corte-2026-10-23-1940-utc).
+No se provocaron operaciones ni se modificó la BD.
+
+**Snapshot H1:** captura read-only a las 19:40Z, offset broker detectado +3h,
+1.199 barras cerradas por cada par, cero timestamps duplicados/desordenados y
+cero OHLC inválido. Los 10 huecos de 49 h por par se verificaron: 30/30
+comparaciones equivalen a cierre viernes 17:00 y reapertura domingo 17:00 EDT
+en `America/New_York`. La transición de offset no está verificada y contradice
+la fecha del 25-10 documentada en AGENTS.md; P1.1 sigue parcial por esa
+limitación y porque el snapshot está obsoleto para replay. El snapshot y reporte
+hashados están fuera del repositorio en los artefactos de sesión
+`h1-market-snapshot-20261023-1940Z.json`
+(SHA-256 `b0021fc79ecd2e4a7aecac701cc79c426c579c194c612175f1c1ac2dfca83591`) y
+`h1-market-snapshot-audit-20261023-1940Z.json`
+(SHA-256 `184e52390102daee00ce236d7aeb0e80f37c79b4809f97d9905f2998469664dc`).
+La captura no se ha usado en replay y no debe reutilizarse si supera cinco
+minutos de antigüedad al inicio del replay.
+
+Archivos funcionales tocados: `fastapi/db/schema.sql`, la migración
+`fastapi/db/migrations/20261023_trade_outcome_order_link.sql`, `fastapi/routers/ai.py`,
+`fastapi/services/auto_retrain.py`, `fastapi/services/order_manager.py`,
+`fastapi/ops/reconcile_replay_sources.py`,
+`fastapi/ops/audit_broker_order_links.py`, `mql5/AI_Quant_Terminal.mq5` y sus
+pruebas de contrato/lifecycle/auditoría; además de este README y el roadmap.

@@ -38,6 +38,11 @@ from services.error_taxonomy import LOOP_ERRORS
 
 logger = logging.getLogger(__name__)
 
+
+class TradeOutcomeLinkConflict(RuntimeError):
+    """A broker deal ticket was replayed with a different exact order link."""
+
+
 # P3-1b/P3-3: símbolo POR DEFECTO del pipeline de retrain. El pipeline está
 # parametrizado por símbolo (P3-3): cada par entrena su propio bundle; este
 # es el default de force/approve/scheduled cuando el caller no elige mundo.
@@ -293,6 +298,34 @@ def _parse_timestamp(ts: float | str) -> float:
     return float(ts)
 
 
+async def _verify_duplicate_trade_link(
+    pool,
+    deal_ticket: int,
+    order_db_id: int,
+) -> None:
+    duplicate = await pool.fetchrow(
+        """
+        SELECT existing.order_db_id,
+               CASE WHEN $2::bigint IS NOT NULL AND EXISTS (
+                   SELECT 1 FROM orders
+                   WHERE orders.id=$2 AND orders.symbol=existing.symbol
+                     AND orders.type=CASE existing.direction
+                         WHEN 'LONG' THEN 'BUY' ELSE 'SELL' END
+               ) THEN $2::bigint ELSE NULL END AS requested_order_db_id
+        FROM trade_outcomes AS existing
+        WHERE existing.deal_ticket=$1
+        """,
+        deal_ticket,
+        order_db_id,
+    )
+    if duplicate and duplicate["order_db_id"] != duplicate["requested_order_db_id"]:
+        raise TradeOutcomeLinkConflict(
+            f"deal_ticket {deal_ticket} ya está asociado a "
+            f"order_db_id={duplicate['order_db_id']}, no "
+            f"{duplicate['requested_order_db_id']}"
+        )
+
+
 async def _persist_trade_outcome(
     symbol: str,
     entry_time: float | str,
@@ -305,6 +338,7 @@ async def _persist_trade_outcome(
     exit_reason: str,
     deal_ticket: int | None = None,
     position_id: int | None = None,
+    order_db_id: int | None = None,
 ) -> int | None:
     """Persiste el trade outcome a la tabla trade_outcomes en PostgreSQL. Retorna el trade_id.
 
@@ -314,22 +348,49 @@ async def _persist_trade_outcome(
     pool = get_pool()
     entry_ts = _parse_timestamp(entry_time)
     exit_ts = _parse_timestamp(exit_time)
-    trade_id = await pool.fetchval(
+    row = await pool.fetchrow(
         """
         INSERT INTO trade_outcomes
             (symbol, direction, entry_time, exit_time, pnl, pnl_pct, exit_reason, sl_hit, tp_hit,
-             deal_ticket, position_id)
-        VALUES ($1,$2,to_timestamp($3::double precision),to_timestamp($4::double precision),$5,$6,$7,$8,$9,$10,$11)
+             deal_ticket, position_id, order_db_id)
+        VALUES (
+            $1,$2,to_timestamp($3::double precision),to_timestamp($4::double precision),
+            $5,$6,$7,$8,$9,$10,$11,
+            CASE WHEN $12::bigint IS NOT NULL AND EXISTS (
+                SELECT 1 FROM orders
+                WHERE orders.id=$12 AND orders.symbol=$1
+                  AND orders.type=CASE $2 WHEN 'LONG' THEN 'BUY' ELSE 'SELL' END
+            ) THEN $12::bigint ELSE NULL END
+        )
         ON CONFLICT (deal_ticket) WHERE deal_ticket IS NOT NULL DO NOTHING
-        RETURNING id
+        RETURNING id, order_db_id
         """,
         symbol, direction,
         entry_ts, exit_ts,
         pnl, pnl_pct,
         exit_reason, sl_hit, tp_hit,
         deal_ticket, position_id,
+        order_db_id,
     )
-    return trade_id
+    if row is None:
+        if deal_ticket is not None and order_db_id is not None:
+            await _verify_duplicate_trade_link(pool, deal_ticket, order_db_id)
+        return None
+
+    if order_db_id is None:
+        logger.warning(
+            "[TRADE-FILLED] outcome %s persistido sin order_db_id; "
+            "queda fuera de reconciliación exacta",
+            row["id"],
+        )
+    elif row["order_db_id"] is None:
+        logger.error(
+            "[TRADE-FILLED] order_db_id=%s no coincide con una orden del mismo "
+            "símbolo/dirección; outcome %s persistido sin enlace",
+            order_db_id,
+            row["id"],
+        )
+    return row["id"]
 
 
 # P2-3 (2026-10-09, decisión de Félix — «Cooldown 24h post-rechazo»):
@@ -370,7 +431,7 @@ async def record_trade_filled(
     tp_hit: bool,
     exit_reason: str,
     deal_ticket: int | None = None,
-    position_id: int | None = None,
+    position_id: int | None = None, order_db_id: int | None = None,
 ) -> None:
     """
     Llamar cada vez que una orden se cierra como 'filled'.
@@ -381,7 +442,7 @@ async def record_trade_filled(
 
     trade_id = await _persist_trade_outcome(
         symbol, entry_ts, exit_ts, pnl, pnl_pct, direction, sl_hit, tp_hit, exit_reason,
-        deal_ticket, position_id,
+        deal_ticket, position_id, order_db_id,
     )
 
     if trade_id is None:

@@ -269,6 +269,7 @@ class TestEAGateContract:
         src = _ea_source()
         assert re.search(r'#property\s+version\s+"14\.', src), "Falta bump de #property version"
         assert re.search(r'#define\s+EA_VERSION\s+"14\.', src), "Falta bump de EA_VERSION"
+        assert "long &orderDbId" in src
 
 
 # ─── P3-1d: gate de mundo, cupo por par y presupuesto de equity ─────────────
