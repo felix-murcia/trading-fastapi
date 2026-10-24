@@ -51,6 +51,17 @@ regresión: `fastapi/tests/test_orders_lifecycle.py`. El auditor read-only
 2026-10-24 13:20Z sigue `UNRECONCILED` (614 ciclos, 90 órdenes, 210 outcomes
 unresolved); no se escribieron datos ni se abrieron operaciones.
 
+### Evidencia — rechazo de desfases horarios no contemporáneos (2026-10-24)
+
+`broker_offset_hours` ya no devuelve ni cachea desfases implausibles del
+endpoint de precio; intenta una medición H1 contemporánea y, si tampoco está
+disponible, conserva el último offset validado. La caché descarta también
+valores fuera de ±12 h y `_offset_from_candles` distingue una detección válida
+de velas antiguas o ausentes. Regresiones: timestamp de precio inválido,
+fallback H1 fresco, datos H1 obsoletos y caché inválida. **Validación:**
+`pytest fastapi/tests/ -q` → **1322 passed, 2 xfailed**. Archivos: `fastapi/services/timebase.py`,
+`fastapi/tests/test_timebase_alignment.py`.
+
 ## Arquitectura
 
 ```

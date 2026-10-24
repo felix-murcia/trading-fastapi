@@ -30,6 +30,7 @@ se entere. Fija:
 import datetime as dt
 import sys
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -90,6 +91,113 @@ class TestOffsetDetection:
         out = shift_candle_times(candles, 3)
         stamps = sorted(c["time"] for c in out)
         assert stamps == ["2026-10-20T15:00:00Z", "2026-10-20T16:00:00Z"]
+
+
+class TestStaleBrokerClockSources:
+    class _Response:
+        status_code = 200
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class _Client:
+        def __init__(self, payload):
+            self._payload = payload
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        async def get(self, *_args, **_kwargs):
+            return TestStaleBrokerClockSources._Response(self._payload)
+
+    @pytest.mark.asyncio
+    async def test_implausible_price_timestamp_uses_fresh_h1_offset(self, monkeypatch):
+        import httpx
+
+        now = dt.datetime.now(dt.timezone.utc)
+        stale_time = (now - dt.timedelta(hours=13)).isoformat()
+        monkeypatch.setattr(
+            httpx, "AsyncClient",
+            lambda **_kwargs: self._Client({"time": stale_time}),
+        )
+        monkeypatch.setattr(
+            timebase, "_offset_from_candles",
+            AsyncMock(return_value=2),
+        )
+        monkeypatch.setattr(timebase, "_OFFSET_CACHE", {"offset_h": 3, "ts": 0.0})
+        monkeypatch.setattr(timebase, "_KNOWN_OFFSET", {"offset_h": 3, "source": "test"})
+
+        offset = await timebase.broker_offset_hours("EURUSD")
+
+        assert offset == 2
+        assert timebase._OFFSET_CACHE["offset_h"] == 2
+        assert timebase.current_broker_offset() == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("candle_offset", [None, -19])
+    async def test_unavailable_fresh_clock_preserves_last_known_offset(
+        self, monkeypatch, candle_offset
+    ):
+        import httpx
+
+        now = dt.datetime.now(dt.timezone.utc)
+        stale_time = (now - dt.timedelta(hours=13)).isoformat()
+        monkeypatch.setattr(
+            httpx, "AsyncClient",
+            lambda **_kwargs: self._Client({"time": stale_time}),
+        )
+        monkeypatch.setattr(
+            timebase, "_offset_from_candles",
+            AsyncMock(return_value=candle_offset),
+        )
+        monkeypatch.setattr(timebase, "_OFFSET_CACHE", {"offset_h": 3, "ts": 0.0})
+        monkeypatch.setattr(timebase, "_KNOWN_OFFSET", {"offset_h": 3, "source": "test"})
+
+        offset = await timebase.broker_offset_hours("EURUSD")
+
+        assert offset == 3
+        assert timebase._OFFSET_CACHE["offset_h"] == 3
+        assert timebase.current_broker_offset() == 3
+
+    @pytest.mark.asyncio
+    async def test_stale_h1_candles_are_not_a_detected_offset(self, monkeypatch):
+        import httpx
+
+        stale_time = (
+            dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=20)
+        ).isoformat()
+        monkeypatch.setattr(
+            httpx, "AsyncClient",
+            lambda **_kwargs: self._Client({"candles": [{"time": stale_time}]}),
+        )
+
+        assert await timebase._offset_from_candles("EURUSD") is None
+
+    @pytest.mark.asyncio
+    async def test_implausible_cached_offset_is_not_returned(self, monkeypatch):
+        import httpx
+
+        now = dt.datetime.now(dt.timezone.utc)
+        server_time = (now + dt.timedelta(hours=2)).isoformat()
+        monkeypatch.setattr(
+            httpx, "AsyncClient",
+            lambda **_kwargs: self._Client({"time": server_time}),
+        )
+        monkeypatch.setattr(timebase, "_OFFSET_CACHE", {
+            "offset_h": 13, "ts": timebase.time.time(),
+        })
+        monkeypatch.setattr(timebase, "_KNOWN_OFFSET", {"offset_h": 3, "source": "test"})
+
+        offset = await timebase.broker_offset_hours("EURUSD")
+
+        assert offset == 2
+        assert timebase._OFFSET_CACHE["offset_h"] == 2
 
 
 class TestBrokerDay:

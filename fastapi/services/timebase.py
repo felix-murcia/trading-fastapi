@@ -107,9 +107,12 @@ async def broker_offset_hours(symbol: str = "EURUSD") -> int:
     caso, al desfase cacheado.
     """
     now = time.time()
-    if now - _OFFSET_CACHE["ts"] < OFFSET_TTL_S:
-        return int(_OFFSET_CACHE["offset_h"])
+    cached_offset = int(_OFFSET_CACHE["offset_h"])
+    if (now - _OFFSET_CACHE["ts"] < OFFSET_TTL_S
+            and abs(cached_offset) <= 12):
+        return cached_offset
     offset_h: Optional[int] = None
+    source = "endpoint_precio"
     try:
         import httpx
         from config import settings
@@ -123,25 +126,41 @@ async def broker_offset_hours(symbol: str = "EURUSD") -> int:
                 srv_ts = dt.datetime.fromisoformat(
                     str(srv).replace("Z", "+00:00")).timestamp()
             offset_h = int(round((srv_ts - time.time()) / 3600.0))
+            if abs(offset_h) > 12:
+                logger.warning(
+                    "[TIMEBASE] Timestamp de precio no contemporáneo o "
+                    "implausible (%+d h); se prueba la vela H1", offset_h,
+                )
+                offset_h = None
     except LOOP_ERRORS:  # noqa: BLE001 — el desfase NUNCA tumba una operación
         offset_h = None
     if offset_h is None:
         try:
             offset_h = await _offset_from_candles(symbol)
         except LOOP_ERRORS:  # noqa: BLE001
-            offset_h = int(_OFFSET_CACHE["offset_h"])
+            offset_h = None
+        if offset_h is not None and abs(offset_h) > 12:
+            logger.warning(
+                "[TIMEBASE] Desfase H1 implausible (%+d h); se conserva "
+                "el último desfase conocido", offset_h,
+            )
+            offset_h = None
+        if offset_h is None:
+            offset_h = current_broker_offset()
+            source = "ultimo_conocido"
     _OFFSET_CACHE["offset_h"] = int(offset_h)
     _OFFSET_CACHE["ts"] = now
-    set_broker_offset(int(offset_h), source="endpoint_precio" if offset_h is not None else "cache")
+    set_broker_offset(int(offset_h), source=source)
     return int(offset_h)
 
 
-async def _offset_from_candles(symbol: str = "EURUSD") -> int:
+async def _offset_from_candles(symbol: str = "EURUSD") -> Optional[int]:
     """Fallback: deducir el desfase de la vela EN FORMACIÓN (aritmética de
     hora, sin el punto medio ⇒ estable en toda la hora).
 
     La vela más reciente está sellada en `floor(hora real) + desfase` ⇒ el
-    desfase es la diferencia entre su hora y la hora real.
+    desfase es la diferencia entre su hora y la hora real. Velas que ya no
+    representan la hora viva del bróker no son una medición de offset.
     """
     import httpx
     from config import settings
@@ -154,7 +173,44 @@ async def _offset_from_candles(symbol: str = "EURUSD") -> int:
         )
         data = r.json() if r.status_code == 200 else {}
     raw = data if isinstance(data, list) else data.get("candles", [])
-    return int(broker_offset_hours_from_candles(raw))
+    if not isinstance(raw, list) or not raw:
+        return None
+
+    newest = None
+    for candle in raw:
+        stamp = candle.get("time") if isinstance(candle, dict) else None
+        if stamp is None:
+            continue
+        try:
+            if isinstance(stamp, (int, float)):
+                parsed = dt.datetime.fromtimestamp(
+                    float(stamp), tz=dt.timezone.utc
+                )
+            else:
+                parsed = dt.datetime.fromisoformat(
+                    str(stamp).replace("Z", "+00:00")
+                )
+        except (OverflowError, OSError, ValueError):
+            continue
+        if parsed.tzinfo is None:
+            continue
+        parsed = parsed.astimezone(dt.timezone.utc)
+        if newest is None or parsed > newest:
+            newest = parsed
+
+    if newest is None:
+        return None
+
+    now_utc = dt.datetime.now(dt.timezone.utc)
+    age_seconds = (now_utc - newest).total_seconds()
+    if age_seconds > 2 * 3600 or age_seconds < -12 * 3600:
+        logger.warning(
+            "[TIMEBASE] Se descarta la vela H1 no contemporánea "
+            "(edad=%+.1f h)", age_seconds / 3600,
+        )
+        return None
+
+    return int(broker_offset_hours_from_candles(raw, now=now_utc))
 
 
 def to_utc(ts_broker: float, offset_h: int) -> float:
