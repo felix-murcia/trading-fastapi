@@ -419,6 +419,12 @@ class Brain:
 _BRAINS: dict[str, Brain] = {}
 _REGISTRY: Optional[PairRegistry] = None   # mundos configurados vía PAIRS
 
+# P1.2b (2026-10-25): cache de quotes por cycle_id para calcular slippage en
+# el cierre. El EA envía bid/ask/quote_time en /predict; el backend los guarda
+# aquí y los usa cuando llega /trade/filled para calcular slippage_pips.
+# TTL: las entradas se purgan al recibir el cierre correspondiente.
+_QUOTE_CACHE: dict[str, dict] = {}
+
 
 # G3 (2026-10-20) · E4: cuando un par declara `decision_source="momentum24"`,
 # el decisor es la REGLA medida (services/rule_decider) y NO hace falta un
@@ -786,6 +792,10 @@ class PredictRequest(BaseModel):
     magic: int | None = None
     my_positions: int = 0
     foreign_positions: int = 0
+    # P1.2b (2026-10-25): quote de decisión para calcular slippage en el cierre.
+    bid: float | None = None      # precio bid en el momento de la decisión
+    ask: float | None = None      # precio ask en el momento de la decisión
+    quote_time: float | str | None = None  # timestamp del quote (epoch o ISO)
 
 
 class PredictResponse(BaseModel):
@@ -809,6 +819,19 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     t_start = time.time()
     mt5_ts = req.mt5_time if req.mt5_time is not None else t_start
     cycle_id = f"{req.symbol}_{int(mt5_ts * 1000)}"
+
+    # P1.2b: guardar el quote de decisión para calcular slippage en el cierre.
+    # El EA envía bid/ask/quote_time; los indexamos por cycle_id para usarlos
+    # cuando llegue /trade/filled.
+    if req.bid is not None or req.ask is not None:
+        _QUOTE_CACHE[cycle_id] = {
+            "symbol": req.symbol.upper(),
+            "bid": float(req.bid) if req.bid is not None else None,
+            "ask": float(req.ask) if req.ask is not None else None,
+            "quote_time": candle_timestamp(req.quote_time)
+                          if req.quote_time is not None
+                          else dt.datetime.now(dt.timezone.utc),
+        }
 
     env_position = 1 if req.position == 1 else (-1 if req.position == 2 else 0)
 
@@ -2126,6 +2149,15 @@ class TradeFilledRequest(BaseModel):
     position_id: int | str | None = None
     order_db_id: int | None = None
     opening_order_ticket: int | None = None
+    # P1.2b (2026-10-25): identifica el ciclo de decisión para vincular el
+    # cierre con su quote y calcular slippage. `None` = EA antiguo.
+    cycle_id: str | None = None
+    # P1.2b (2026-10-25): precio de fill de apertura y costes del bróker.
+    # `None` = EA antiguo que no los envía ⇒ valores por defecto (declarado en
+    # el audit).
+    entry_price: float | str | None = None
+    commission: float | str | None = None
+    fee: float | str | None = None
     # G3-2 (2026-10-21): el SWAP del cierre (financiación por mantener la
     # posición abierta). Antes NO llegaba al backend ⇒ el pnl registrado era
     # el bruto del bróker y el coste de la financiación se perdía en todas las
@@ -2231,6 +2263,14 @@ async def _record_and_mark_trade_filled(
     direction: str,
     deal_ticket: int | None,
     position_id: int | None,
+    # P1.2b: costes de ejecución del cierre (opcionales; EA antiguo no los envía).
+    entry_price: float | None = None,
+    commission: float | None = None,
+    fee: float | None = None,
+    slippage_pips: float | None = None,
+    quote_bid: float | None = None,
+    quote_ask: float | None = None,
+    quote_time: Optional[datetime] = None,
 ) -> None:
     try:
         await record_trade_filled(
@@ -2246,6 +2286,14 @@ async def _record_and_mark_trade_filled(
             deal_ticket=deal_ticket,
             position_id=position_id,
             order_db_id=req.order_db_id,
+            # P1.2b: costes de ejecución.
+            entry_price=entry_price,
+            commission=commission,
+            fee=fee,
+            slippage_pips=slippage_pips,
+            quote_bid=quote_bid,
+            quote_ask=quote_ask,
+            quote_time=quote_time,
         )
     except TradeOutcomeLinkConflict as exc:
         logger.error("[TRADE-FILLED] conflicto de enlace de cierre: %s", exc)
@@ -2314,12 +2362,47 @@ async def trade_filled_webhook(req: TradeFilledRequest, _: None = Depends(verify
     deal_ticket = int(req.deal_ticket) if req.deal_ticket not in (None, "") else None
     position_id = int(req.position_id) if req.position_id not in (None, "") else None
     swap = float(req.swap) if req.swap not in (None, "") else 0.0
+    # P1.2b: costes de ejecución del cierre.
+    entry_price = (
+        float(req.entry_price) if req.entry_price not in (None, "") else None
+    )
+    commission = (
+        float(req.commission) if req.commission not in (None, "") else None
+    )
+    fee = float(req.fee) if req.fee not in (None, "") else None
+    cycle_id = req.cycle_id
+
+    # Calcular slippage: |entry_price - quote_relevante| / pip_size.
+    # Para BUY, el quote relevante es el ask (precio al que compras);
+    # para SELL, es el bid (precio al que vendes).
+    slippage_pips = None
+    quote_bid = quote_ask = quote_time_ts = None
+    if entry_price is not None and cycle_id is not None:
+        quote = _QUOTE_CACHE.get(cycle_id)
+        if quote is not None:
+            quote_bid = quote.get("bid")
+            quote_ask = quote.get("ask")
+            quote_time_ts = quote.get("quote_time")
+            pip = PIP_SIZE.get(sym, 0.0001)
+            if direction == "LONG" and quote.get("ask") is not None:
+                slippage_pips = abs(entry_price - quote["ask"]) / pip
+            elif direction == "SHORT" and quote.get("bid") is not None:
+                slippage_pips = abs(entry_price - quote["bid"]) / pip
+            # Purgar el quote usado para no acumular entradas viejas.
+            _QUOTE_CACHE.pop(cycle_id, None)
+
     # El pnl que se registra es el RESULTADO REAL (bruto + swap): el swap es
     # un coste cierto de mantener la posición y esconderlo falsea el ledger.
     pnl_total = pnl + swap
     if swap:
         logger.info("[TRADE-FILLED] swap=%.2f € (bruto %.2f → real %.2f) symbol=%s",
                     swap, pnl, pnl_total, req.symbol)
+    if slippage_pips is not None:
+        logger.info(
+            "[TRADE-FILLED] slippage=%.2f pips (entry=%.5f, quote=%s) symbol=%s",
+            slippage_pips, entry_price,
+            quote_ask if direction == "LONG" else quote_bid, req.symbol,
+        )
     # O-1: catch-all de transición — si el reporte de apertura no llegó (el EA
     # v13.2 filtra DEAL_ENTRY_IN), este cierre saca la orden del pool de
     # `duplicate_order`. Idempotente: si la apertura ya la marcó, no matchea.
@@ -2332,5 +2415,12 @@ async def trade_filled_webhook(req: TradeFilledRequest, _: None = Depends(verify
         direction,
         deal_ticket,
         position_id,
+        entry_price=entry_price,
+        commission=commission,
+        fee=fee,
+        slippage_pips=slippage_pips,
+        quote_bid=quote_bid,
+        quote_ask=quote_ask,
+        quote_time=quote_time_ts,
     )
     return {"status": "recorded"}

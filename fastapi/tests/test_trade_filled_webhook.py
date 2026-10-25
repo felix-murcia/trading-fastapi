@@ -144,9 +144,18 @@ class TestTradeFilledPersistence:
         assert "RETURNING id, order_db_id" in sql
         assert params[0] == "EURUSD"
         assert params[1] == "LONG"
-        assert params[9] == 123456                     # deal_ticket
-        assert params[10] == 789012                    # position_id
-        assert params[11] == 42                        # order_db_id
+        assert params[9] == 123456                     # deal_ticket ($10)
+        assert params[10] == 789012                    # position_id ($11)
+        # P1.2b: entry_price, commission, fee, slippage_pips, quote_bid,
+        # quote_ask, quote_time ocupan $12-$18 antes de order_db_id ($19)
+        assert params[11] is None                      # entry_price (no enviado en test)
+        assert params[12] is None                      # commission
+        assert params[13] is None                      # fee
+        assert params[14] is None                      # slippage_pips
+        assert params[15] is None                      # quote_bid
+        assert params[16] is None                      # quote_ask
+        assert params[17] is None                      # quote_time
+        assert params[18] == 42                        # order_db_id ($19)
 
     @pytest.mark.asyncio
     async def test_persist_returns_none_on_duplicate_deal(self, monkeypatch):

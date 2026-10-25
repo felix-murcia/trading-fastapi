@@ -40,7 +40,7 @@ BIG_FUNCS = {
     "services/trade_contract.py::evaluate_trade": 115,
     "services/walk_forward.py::gate_walk_forward": 115,
     "main.py::lifespan": 112,
-    "services/auto_retrain.py::record_trade_filled": 110,
+    "services/auto_retrain.py::record_trade_filled": 125,
     "services/auto_retrain.py::_evaluate_model": 108,
     "services/trade_journal.py::_query_qwen_trade_insight": 106,
     "routers/ai.py::_higher_tf_context_line": 105,
@@ -49,7 +49,10 @@ BIG_FUNCS = {
     "routers/ai.py::pipeline_health": 95,
     "services/market_microstructure.py::compute_volume_profile": 84,
     "services/auto_retrain.py::_do_retrain": 83,
-    "routers/ai.py::trade_filled_webhook": 80,
+    "routers/ai.py::trade_filled_webhook": 122,
+    # P1.2b (2026-10-25): trade_filled_webhook y record_trade_filled crecen
+    # al aceptar costes de ejecución (entry_price, commission, fee, slippage,
+    # quote_bid/ask, quote_time) y calcular slippage.
     # B6.2 (2026-10-25): broker_offset_hours crece al aceptar market_port y
     # prescindir de httpx directo; build_daily_entry crece al obtener el
     # puerto del registro cuando no se inyecta.

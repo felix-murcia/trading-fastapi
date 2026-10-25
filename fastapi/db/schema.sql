@@ -78,7 +78,15 @@ CREATE TABLE IF NOT EXISTS trade_outcomes (
     deal_ticket  BIGINT,
     position_id  BIGINT,
     order_db_id  BIGINT CONSTRAINT fk_trade_outcomes_order_db_id REFERENCES orders(id),
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- P1.2b (2026-10-25): costes de ejecución para reconciliar PnL real vs coste
+    entry_price  NUMERIC(12,5),          -- precio de fill de apertura (reloj broker)
+    commission   NUMERIC(12,4) DEFAULT 0,-- comisión del bróker (moneda de cuenta)
+    fee          NUMERIC(12,4) DEFAULT 0,-- fee del bróker (moneda de cuenta)
+    slippage_pips NUMERIC(8,4) DEFAULT 0,-- slippage en pips vs quote de decisión
+    quote_bid    NUMERIC(12,5),          -- bid en el momento de /predict
+    quote_ask    NUMERIC(12,5),          -- ask en el momento de /predict
+    quote_time   TIMESTAMPTZ,            -- timestamp del quote (reloj broker)
 );
 
 -- Dedup: un mismo deal de MT5 solo puede registrarse una vez (webhooks reintentados / backfill EA)
@@ -167,3 +175,15 @@ CREATE TABLE IF NOT EXISTS equity_snapshots (
 
 CREATE INDEX IF NOT EXISTS idx_equity_snapshots_ts
     ON equity_snapshots(ts);
+
+-- P1.2b (2026-10-25): migración de columnas de costes en trade_outcomes.
+-- Las tablas ya creadas necesitan ALTER TABLE explícito (CREATE TABLE IF NOT
+-- EXISTS no añade columnas a tablas existentes).
+ALTER TABLE trade_outcomes
+    ADD COLUMN IF NOT EXISTS entry_price  NUMERIC(12,5),
+    ADD COLUMN IF NOT EXISTS commission   NUMERIC(12,4) DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS fee          NUMERIC(12,4) DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS slippage_pips NUMERIC(8,4) DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS quote_bid    NUMERIC(12,5),
+    ADD COLUMN IF NOT EXISTS quote_ask    NUMERIC(12,5),
+    ADD COLUMN IF NOT EXISTS quote_time   TIMESTAMPTZ;

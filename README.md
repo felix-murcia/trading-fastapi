@@ -125,6 +125,56 @@ Regresión: `fastapi/tests/test_timebase_hardening.py`,
 `fastapi/tests/test_orders_prepare.py`,
 `fastapi/tests/test_g2_b1_reward_gate.py`.
 
+### Evidencia — P1.1b offset broker en runtime y persistencia (2026-10-25)
+
+Mercado abierto. `/health` → `ok`, `validated=true`, `persisted=true`, `offset_h=2`
+(post-DST 25-10-2026). Fuente detectada en runtime: `endpoint_precio+h1` (cero
+hardcode de DST). `broker_clock_state` en PostgreSQL: offset 2, source
+`endpoint_precio+h1`, validado a `2026-10-25 22:00:06Z`. `risk_account_state`
+inicializado: día 2026-10-26, equity 503.25, peak 506.77. Quote ≈1 min (≤5 ✅),
+H1 ≈5 min (≤2h ✅); dominios de precio y vela compatibles.
+
+### Evidencia — P1.1c snapshot H1 (2026-10-25)
+
+Captura de velas H1 cerradas de EURUSD, GBPUSD y USDCHF (3 × 1999 velas),
+normalizadas con offset +2h detectado en runtime. 0 duplicados, 0 desorden, 0
+OHLC inválido, 0 vela abierta. 48 gaps clasificados (fin de semana).
+SHA-256: `648d250ed5caf284185b62eedde69f7828ec44abe8a722518ed95bb7b72066ff`.
+Reporte: `ops/snapshot-h1-20261025-220903Z-report.json`.
+
+### Evidencia — P1.2a reconciliación de costes históricos (2026-10-25)
+
+91 trade_outcomes, 91 con deal_ticket, 90 match con deals del broker,
+78 reconciliados (≤€0,01), 12 discrepancias documentadas. Costes completos
+(commission + swap) en 100% de deals. Fills sin IDs exactos se excluyen
+(nunca imputados). SHA-256: `46ca4ed431515eaeea37810840342487c6e2e7455640debc4aaa698bfde7f646`.
+Reporte: `ops/reconcile-costs-20261025-221100Z.json`.
+
+### Evidencia — P2.1 snapshot canónico H=20 (PPO ↔ LLM) (2026-10-25)
+
+Pre-registro: `ops/2026-10-25-pre-registro-p21-snapshot-h20.md`. Define el
+snapshot canónico por oportunidad: mismo corte temporal, campos compartidos
+entre PPO y Qwen, horizonte de 20 horas transcurridas (H=20, no H=24), abstención
+ante dato ausente (terminal no cerrado), 0 dato posterior al corte.
+Pruebas de paridad en `tests/test_p21_canonical_snapshot.py` (8 passed):
+`canonical_direction` con `horizon_h=20` usa "última vela ≤ t0+H" (no "primera
+≥"), devuelve None si la serie no cubre el horizonte o el terminal no está
+cerrado, y no usa información posterior a `t0 + 20 h`.
+
+### Evidencia — P1.2b costes de ejecución (backend HECHO, 2026-10-25)
+
+**Backend:**
+- `PredictRequest` acepta `bid`/`ask`/`quote_time` (quote de decisión para slippage)
+- `TradeFilledRequest` acepta `entry_price`/`commission`/`fee`/`cycle_id` (costes de cierre y vínculo al ciclo de decisión)
+- `trade_outcomes` gana columnas: `entry_price`, `commission`, `fee`, `slippage_pips`, `quote_bid`, `quote_ask`, `quote_time` (migración `ADD COLUMN IF NOT EXISTS` en `db/schema.sql`)
+- `/predict` guarda el quote por `cycle_id` en caché de memoria; `/trade/filled` calcula `slippage_pips = |entry_price − quote_relevante| / pip_size` (ask para BUY, bid para SELL) y lo guarda con los costes
+- EA v14.3 actual no envía los nuevos campos → degradación honesta (valores None/0, sin romper)
+- **EA v15.0 pendiente:** Félix debe compilar y desplegar el EA con los nuevos campos (ver `mql5/AI_Quant_Terminal.mq5`, `#property version "15.0"`)
+- Suite: 1398 passed, 2 xfailed (incluyendo tests actualizados de `test_trade_filled_webhook.py`)
+
+Archivos funcionales: `fastapi/routers/ai.py`, `fastapi/services/auto_retrain.py`, `fastapi/db/schema.sql`.
+Regresión: `fastapi/tests/test_trade_filled_webhook.py`, `fastapi/tests/architecture_baseline.py`.
+
 ## Arquitectura
 
 ```

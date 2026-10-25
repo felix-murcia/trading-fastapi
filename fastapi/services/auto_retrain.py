@@ -339,6 +339,14 @@ async def _persist_trade_outcome(
     deal_ticket: int | None = None,
     position_id: int | None = None,
     order_db_id: int | None = None,
+    # P1.2b (2026-10-25): costes de ejecución del cierre.
+    entry_price: float | None = None,
+    commission: float | None = None,
+    fee: float | None = None,
+    slippage_pips: float | None = None,
+    quote_bid: float | None = None,
+    quote_ask: float | None = None,
+    quote_time: Optional[datetime] = None,
 ) -> int | None:
     """Persiste el trade outcome a la tabla trade_outcomes en PostgreSQL. Retorna el trade_id.
 
@@ -352,15 +360,17 @@ async def _persist_trade_outcome(
         """
         INSERT INTO trade_outcomes
             (symbol, direction, entry_time, exit_time, pnl, pnl_pct, exit_reason, sl_hit, tp_hit,
-             deal_ticket, position_id, order_db_id)
+             deal_ticket, position_id, order_db_id,
+             entry_price, commission, fee, slippage_pips, quote_bid, quote_ask, quote_time)
         VALUES (
             $1,$2,to_timestamp($3::double precision),to_timestamp($4::double precision),
             $5,$6,$7,$8,$9,$10,$11,
-            CASE WHEN $12::bigint IS NOT NULL AND EXISTS (
+            $12,$13,$14,$15,$16,$17,$18,
+            CASE WHEN $19::bigint IS NOT NULL AND EXISTS (
                 SELECT 1 FROM orders
-                WHERE orders.id=$12 AND orders.symbol=$1
+                WHERE orders.id=$19 AND orders.symbol=$1
                   AND orders.type=CASE $2 WHEN 'LONG' THEN 'BUY' ELSE 'SELL' END
-            ) THEN $12::bigint ELSE NULL END
+            ) THEN $19::bigint ELSE NULL END
         )
         ON CONFLICT (deal_ticket) WHERE deal_ticket IS NOT NULL DO NOTHING
         RETURNING id, order_db_id
@@ -370,6 +380,7 @@ async def _persist_trade_outcome(
         pnl, pnl_pct,
         exit_reason, sl_hit, tp_hit,
         deal_ticket, position_id,
+        entry_price, commission, fee, slippage_pips, quote_bid, quote_ask, quote_time,
         order_db_id,
     )
     if row is None:
@@ -432,6 +443,14 @@ async def record_trade_filled(
     exit_reason: str,
     deal_ticket: int | None = None,
     position_id: int | None = None, order_db_id: int | None = None,
+    # P1.2b (2026-10-25): costes de ejecución del cierre.
+    entry_price: float | None = None,
+    commission: float | None = None,
+    fee: float | None = None,
+    slippage_pips: float | None = None,
+    quote_bid: float | None = None,
+    quote_ask: float | None = None,
+    quote_time: Optional[datetime] = None,
 ) -> None:
     """
     Llamar cada vez que una orden se cierra como 'filled'.
@@ -443,6 +462,13 @@ async def record_trade_filled(
     trade_id = await _persist_trade_outcome(
         symbol, entry_ts, exit_ts, pnl, pnl_pct, direction, sl_hit, tp_hit, exit_reason,
         deal_ticket, position_id, order_db_id,
+        entry_price=entry_price,
+        commission=commission,
+        fee=fee,
+        slippage_pips=slippage_pips,
+        quote_bid=quote_bid,
+        quote_ask=quote_ask,
+        quote_time=quote_time,
     )
 
     if trade_id is None:
