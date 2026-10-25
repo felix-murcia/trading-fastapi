@@ -12,10 +12,11 @@ La operación con una dirección contradictoria no es una fusión válida: cualq
 
 El objetivo es eliminar el ruido evitable de datos, relojes, etiquetas y evaluación. No existe una garantía honesta de “cero ruido” de mercado ni de fiabilidad absoluta futura; la salida a producción requiere evidencia reproducible, límites explícitos y no-go automático cuando falte.
 
-## Estado ejecutivo vigente — corte documental 2026-10-25 15:01 UTC
+## Estado ejecutivo vigente — corte documental 2026-10-25 15:06:48 UTC
 
-Última evidencia runtime incorporada: 2026-10-25 13:18 UTC. No se hizo una
-nueva lectura live para este corte documental.
+Última lectura de `/health` y logs: 2026-10-25 15:06:48 UTC, tras reconstruir
+el contenedor. El último corte de reconciliación DB sigue siendo 13:16:29 UTC;
+no se volvió a ejecutar el reconciliador.
 
 El inventario de evidencia P0.1 se cerró documentalmente en
 [`P0-evidence-inventory-20261025.md`](./P0-evidence-inventory-20261025.md).
@@ -33,7 +34,7 @@ significa implementación/evidencia disponible, no aprobación de gate.
 | **P0.1 — Inventario** | **GO — alcance documental** | Inventario de fuentes/hash/dominio/uso admisible publicado; métricas históricas no reproducibles se excluyen de gates. | No implica que los datasets/costes sean válidos ni cierra P0/P0.2. Revisar el inventario al entrar evidencia nueva. |
 | **P0.2 — Ledger, órdenes, deals, PnL y capital** | **ABIERTO / BLOQUEANTE** | Reconciliación read-only de 2026-10-25 13:16:29Z: `UNRECONCILED`; 7.282 ciclos (614 unresolved), 92 órdenes (90 unresolved), 76/76 eventos fill con `order_db_id`, 211 outcomes (solo 1 enlazado; 210 sin `order_db_id`), PnL realizado €347,29. Las 7.282/92/76/211 filas recibieron clasificación y razón deterministas. | Falta fill natural v14.3 con identidad broker completa, explicar filas unresolved y conciliar capital/PnL con extractos verificables. El HTTP 500 de `history/orders` es dependencia del bridge remoto, fuera del alcance de esta aplicación; no se modifica ni diagnostica aquí. |
 | **P0.3 — Pre-registro** | **NO-GO** | Se conservaron H=20, universo y criterios estadísticos como intención. La permutación histórica se excluyó formalmente. La inspección actual confirma que PPO recompensa dirección a 24 barras H1 y Qwen pregunta por precio más alto en 24h. | No cambiar solo el prompt: todavía no existe una política PPO entrenada/evaluada para 20 horas transcurridas. El holdout hasta 2026-10-23 ya fue consultado. Faltan costes completos, identidad estable del modelo LLM, contrato común, estados C1–C8 documentados y revisión independiente/hash final. |
-| **P1.1 — Mercado H1** | **NO-GO PARA REPLAY** | La captura read-only 2026-10-23 conserva valor estructural; su auditor observó 30/30 gaps semanales compatibles con cierre viernes/domingo 17:00 New York en EDT. Último health leído 2026-10-25 13:18Z: MT5 conectado, pero reloj `validated=false`, `persisted=false`, `offset_h=null`; logs descartaron precio y vela H1 con ~37–38 h de antigüedad. | Snapshot stale y sin offset broker fresco/persistido. Primero validar con tests el rechazo de timestamp viejo aunque el offset calculado parezca plausible; al reabrir el mercado, observar la respuesta real y una H1 contemporánea sin fijar DST/offset. Después capturar datos nuevos. |
+| **P1.1 — Mercado H1** | **NO-GO PARA REPLAY** | La captura read-only 2026-10-23 conserva valor estructural; su auditor observó 30/30 gaps semanales compatibles con cierre viernes/domingo 17:00 New York en EDT. Health 2026-10-25 15:06:48Z: `degraded`, MT5 conectado, reloj `validated=false`, `persisted=false`, `offset_h=null`; log rechazó timestamp de precio implausible (-39 h) y vela H1 con edad +40,1 h; baseline de riesgo no inicializado. | Snapshot stale y sin offset broker fresco/persistido. Primero validar con tests el rechazo de timestamp viejo aunque el offset calculado parezca plausible; al reabrir el mercado, observar la respuesta real y una H1 contemporánea sin fijar DST/offset. Después capturar datos nuevos. |
 | **P1.2 — Costes de ejecución** | **NO-GO** | Auditor de 576 deals consultados: comisión/fee/swap aparecen; auditoría agregada registra 12 cierres con discrepancia de swap. El EA reporta profit y swap de cierre; no persiste un snapshot bid/ask/timestamp de entrada ni commission/fee completos en `trade_outcomes`. | Recuperar históricos solo por deal/position IDs exactos; sin bid/ask/tick histórico verificable, excluir la fila. Para observaciones nuevas, añadir captura de quote y fill-cost lineage con migración aditiva y EA versionado; 100% de cobertura de costes requeridos, FX trazable y sin doble contar costes ya incluidos en profit. |
 | **P1.3 — Muestra y lineage** | **NO-GO** | Reauditoría reproducida en este corte: manifest P3.1 `valid=false`, 9 clases de issue bloqueante. | Regenerar solo desde datos reconciliados; no reparar ni reutilizar el CSV fallido. Cero duplicados/mismatches/labels inmaduras y holdout nuevo sellado. |
 | **P2.1 — Entrada común PPO/LLM** | **PENDIENTE / BLOQUEADO POR P1** | Diferencia de contexto identificada y verificada: PPO consume su tensor secuencial y su reward vigente usa 24 barras; Qwen recibe indicadores, H4/D1, noticias/memorias y el ML signal, y pregunta por 24h. No son todavía la misma pregunta ni el mismo payload. | Tras aceptar datos P1 y fijar el protocolo H=20, definir snapshot canónico con corte/hash por oportunidad y adaptadores reproducibles. Probar as-of sin fuga y paridad de la información compartida; no declarar paridad por cambiar solo texto del prompt ni ajustar la reward productiva. |
@@ -831,7 +832,7 @@ FastAPI, ejecutada antes de editar documentación, dio **1328 passed, 2
 xfail**. Este corte solo cambia el roadmap: no hubo cambios funcionales,
 escrituras DB, nuevas órdenes, cambio de prompt, switches, bundle, EA ni bridge.
 
-## Alineación con T-31 y memoria de trabajo (2026-10-25 15:01 UTC)
+## Alineación con T-31 y memoria de trabajo (2026-10-25 15:06:48 UTC)
 
 Se conserva T-31 como marco metodológico L0–L6 y el roadmap de este archivo
 como backlog operativo P0–P9 para H=20. La correspondencia y estados están en
@@ -855,6 +856,12 @@ el 69,6% histórico del LLM, no demuestran edge ni autoridad para H=20.
 7. Calcular potencia; solo entonces ejecutar E2/E3 (PPO y LLM por separado),
    L4/L6 y gates de alineación/robustez. E4/E5 y P9 requieren resultados y
    decisión explícita; no hay promoción implícita.
+
+**Actualización de evidencia runtime (15:06:48Z, tras rebuild):** `/health`
+respondió `degraded`; MT5 conectado; reloj `validated=false`,
+`persisted=false`, `offset_h=null`. Los logs rechazaron precio implausible
+(-39 h) y vela H1 con edad +40,1 h; baseline de riesgo no inicializado. No es
+un nuevo corte de reconciliación DB.
 
 **Estado de cierre:** no cambia ningún gate por esta alineación documental:
 P0/P0.3 siguen NO-GO; P1.1/P1.2/P3.1 no aceptados; no hay edge H=20 demostrado
