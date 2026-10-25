@@ -1031,9 +1031,11 @@ void CloseAllPositions()
 
      // Enviar webhook de telemetría a FastAPI
      // P1.2b: costes de ejecución (commission del apertura, fee del cierre)
-     double dealCommission = openingDeal > 0 ? HistoryDealDouble(openingDeal, DEAL_COMMISSION) : 0.0;
-     double dealFee        = HistoryDealDouble(dealTicket, DEAL_FEE);
+     double dealCommission = openingDeal > 0 ? HistoryDealGetDouble(openingDeal, DEAL_COMMISSION) : 0.0;
+     double dealFee        = HistoryDealGetDouble(dealTicket, DEAL_FEE);
      string cycle_id       = IntegerToString((long)closeTime);
+     string openingDealFoundStr = openingDeal > 0 ? "true" : "false";
+     string magicMatchStr = (openingDeal > 0 && openingMagic == (long)MagicNumber) ? "true" : "false";
      string body = "";
     StringConcatenate(body, "{",
        "\"symbol\":\"", Symbol(), "\",",
@@ -1052,8 +1054,8 @@ void CloseAllPositions()
        "\"opening_order_ticket\":", IntegerToString(openingOrderTicket), ",",
        "\"opening_deal\":", IntegerToString((long)openingDeal), ",",
        "\"opening_magic\":", IntegerToString(openingMagic), ",",
-       "\"opening_deal_found\":", openingDeal > 0 ? "true" : "false", ",",
-       "\"magic_match\":", (openingDeal > 0 && openingMagic == (long)MagicNumber) ? "true" : "false", ",
+       "\"opening_deal_found\":", openingDealFoundStr, ",",
+       "\"magic_match\":", magicMatchStr, ",
        "\"cycle_id\":\"", cycle_id, "\",",
        "\"entry_price\":", DoubleToString(entryPrice, 5), ",",
        "\"commission\":", DoubleToString(dealCommission, 2), ",",
