@@ -51,7 +51,7 @@ import datetime as dt
 import logging
 import time
 from typing import Optional
-from services.error_taxonomy import LOOP_ERRORS
+from services.error_taxonomy import DB_ERRORS, LOOP_ERRORS
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,9 @@ OFFSET_TTL_S = 300.0
 # (el guardián de riesgo, que no puede esperar a una llamada de red):
 # `current_broker_offset()` devuelve el último valor conocido (0 si nunca se
 # detectó ⇒ el comportamiento histórico: el día UTC).
-_KNOWN_OFFSET: dict = {"offset_h": 0, "source": "sin_detecccion"}
+_KNOWN_OFFSET: dict = {
+    "offset_h": 0, "source": "sin_detecccion", "validated": False,
+}
 
 
 def set_broker_offset(offset_h: int, source: str = "deteccion") -> None:
@@ -90,11 +92,19 @@ def set_broker_offset(offset_h: int, source: str = "deteccion") -> None:
         )
     _KNOWN_OFFSET["offset_h"] = off
     _KNOWN_OFFSET["source"] = source
+    _KNOWN_OFFSET["validated"] = True
 
 
 def current_broker_offset() -> int:
     """Desfase del bróker CONOCIDO (último detectado). 0 si no se detectó."""
     return int(_KNOWN_OFFSET["offset_h"])
+
+
+def broker_offset_is_validated() -> bool:
+    """Indica si el offset actual procede de una medición o estado persistido."""
+    return bool(_KNOWN_OFFSET.get(
+        "validated", _KNOWN_OFFSET.get("source") != "sin_detecccion"
+    ))
 
 
 async def broker_offset_hours(symbol: str = "EURUSD") -> int:
@@ -137,6 +147,8 @@ async def broker_offset_hours(symbol: str = "EURUSD") -> int:
     if offset_h is None:
         try:
             offset_h = await _offset_from_candles(symbol)
+            if offset_h is not None:
+                source = "velas_h1"
         except LOOP_ERRORS:  # noqa: BLE001
             offset_h = None
         if offset_h is not None and abs(offset_h) > 12:
@@ -150,7 +162,16 @@ async def broker_offset_hours(symbol: str = "EURUSD") -> int:
             source = "ultimo_conocido"
     _OFFSET_CACHE["offset_h"] = int(offset_h)
     _OFFSET_CACHE["ts"] = now
-    set_broker_offset(int(offset_h), source=source)
+    if source != "ultimo_conocido":
+        set_broker_offset(int(offset_h), source=source)
+        try:
+            from services.broker_clock_store import persist_broker_offset
+            await persist_broker_offset(int(offset_h), source)
+        except DB_ERRORS + (RuntimeError,):
+            logger.exception(
+                "[TIMEBASE] No se pudo persistir el offset validado (%+d h)",
+                int(offset_h),
+            )
     return int(offset_h)
 
 

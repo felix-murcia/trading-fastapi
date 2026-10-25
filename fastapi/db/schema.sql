@@ -47,6 +47,14 @@ CREATE TABLE IF NOT EXISTS risk_pair_state (
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Offset del reloj del bróker: solo se guardan mediciones validadas.
+CREATE TABLE IF NOT EXISTS broker_clock_state (
+    id           SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    offset_h     SMALLINT NOT NULL CHECK (offset_h BETWEEN -12 AND 12),
+    source       TEXT NOT NULL,
+    validated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- Trade outcomes para auto-retrain y métricas
 --
 -- DOMINIO DE LAS MARCAS (T-31.9, 2026-10-20): `entry_time` y `exit_time`

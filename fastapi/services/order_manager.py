@@ -45,6 +45,20 @@ def _reject(reason: str) -> OrderPrepareResponse:
     return OrderPrepareResponse(approved=False, order_payload={}, rejection_reason=reason)
 
 
+async def _broker_clock_rejection(
+    req: OrderPrepareRequest,
+) -> OrderPrepareResponse | None:
+    from services.timebase import broker_offset_is_validated
+
+    if broker_offset_is_validated():
+        return None
+    await _audit(req.cycle_id, "order_rejected", {
+        "reason": "broker_clock_unavailable",
+        "symbol": req.symbol,
+    })
+    return _reject("broker_clock_unavailable")
+
+
 async def mark_order_filled(
     symbol: str,
     order_type: str,
@@ -180,7 +194,8 @@ async def _total_risk_eur(open_all: list[dict], equity: float) -> tuple[float, s
 
 async def prepare(req: OrderPrepareRequest) -> OrderPrepareResponse:
     pool = get_pool()
-
+    if (clock_rejection := await _broker_clock_rejection(req)) is not None:
+        return clock_rejection
     # 1. Idempotencia: ¿este cycle_id ya tiene una orden?
     existing = await pool.fetchrow(
         "SELECT id FROM orders WHERE cycle_id=$1 AND status IN ('pending','placed','filled')",
@@ -189,7 +204,6 @@ async def prepare(req: OrderPrepareRequest) -> OrderPrepareResponse:
     if existing:
         await _audit(req.cycle_id, "order_rejected", {"reason": "cycle_already_has_order", "symbol": req.symbol})
         return _reject("cycle_already_has_order")
-
     # 1b. Gate de mundo (P3-1d): la orden debe pertenecer a un par configurado
     # y habilitado — MISMA admisión que /predict, ahora en la última línea de
     # defensa antes de MT5. La asignación de equity del par viaja con su config.

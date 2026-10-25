@@ -54,13 +54,19 @@ unresolved); no se escribieron datos ni se abrieron operaciones.
 ### Evidencia — rechazo de desfases horarios no contemporáneos (2026-10-24)
 
 `broker_offset_hours` ya no devuelve ni cachea desfases implausibles del
-endpoint de precio; intenta una medición H1 contemporánea y, si tampoco está
-disponible, conserva el último offset validado. La caché descarta también
-valores fuera de ±12 h y `_offset_from_candles` distingue una detección válida
-de velas antiguas o ausentes. Regresiones: timestamp de precio inválido,
-fallback H1 fresco, datos H1 obsoletos y caché inválida. **Validación:**
-`pytest fastapi/tests/ -q` → **1322 passed, 2 xfailed**. Archivos: `fastapi/services/timebase.py`,
-`fastapi/tests/test_timebase_alignment.py`.
+endpoint de precio; intenta una medición H1 contemporánea y descarta velas
+antiguas. El último offset validado se persiste en `broker_clock_state` y se
+restaura al arrancar. Si no hay medición fresca ni valor persistido, el health
+queda `degraded`, no se inicializa el baseline de riesgo y el gate final de
+órdenes rechaza nuevas entradas con `broker_clock_unavailable`; el monitor
+reintenta y recupera el servicio al validar un offset. Así `+0 h` deja de
+presentarse como una detección cuando solo era el default. Regresiones:
+fuentes inválidas/obsoletas, persistencia/restauración, estado desconocido y
+rechazo de órdenes. **Validación:** `pytest fastapi/tests/ -q` →
+**1327 passed, 2 xfailed**. Archivos: `fastapi/services/timebase.py`,
+`fastapi/services/broker_clock_store.py`, `fastapi/db/schema.sql`,
+`fastapi/main.py`, `fastapi/services/order_manager.py` y tests temporales/de
+órdenes.
 
 ## Arquitectura
 

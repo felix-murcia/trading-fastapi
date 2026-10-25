@@ -166,6 +166,29 @@ class TestStaleBrokerClockSources:
         assert timebase.current_broker_offset() == 3
 
     @pytest.mark.asyncio
+    async def test_no_validated_offset_stays_unvalidated_when_sources_are_stale(
+        self, monkeypatch
+    ):
+        import httpx
+
+        now = dt.datetime.now(dt.timezone.utc)
+        stale_time = (now - dt.timedelta(hours=13)).isoformat()
+        monkeypatch.setattr(
+            httpx, "AsyncClient",
+            lambda **_kwargs: self._Client({"time": stale_time}),
+        )
+        monkeypatch.setattr(
+            timebase, "_offset_from_candles", AsyncMock(return_value=None)
+        )
+        monkeypatch.setattr(timebase, "_OFFSET_CACHE", {"offset_h": 0, "ts": 0.0})
+        monkeypatch.setattr(timebase, "_KNOWN_OFFSET", {
+            "offset_h": 0, "source": "sin_detecccion", "validated": False,
+        })
+
+        assert await timebase.broker_offset_hours("EURUSD") == 0
+        assert not timebase.broker_offset_is_validated()
+
+    @pytest.mark.asyncio
     async def test_stale_h1_candles_are_not_a_detected_offset(self, monkeypatch):
         import httpx
 

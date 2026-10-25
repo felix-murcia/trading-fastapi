@@ -12,6 +12,7 @@ from config import settings
 from db.connection import init_pool, close_pool
 from routers import orders, smc, journal
 from services.performance_metrics import get_metrics, reset_metrics
+from services.broker_clock_store import restore_broker_offset
 from services.risk_state_store import init_risk_state
 from services.structured_logging import StructuredLoggingMiddleware
 from services.error_taxonomy import DB_ERRORS, HTTP_ERRORS, LOOP_ERRORS, PARSE_ERRORS
@@ -23,6 +24,34 @@ _mcp_status: dict = {"connected": False, "last_check": None, "detail": "pending"
 # Tareas de fondo con referencia viva (P0-6/P3-2): sin referencia el task puede
 # recolectarse y sus excepciones mueren en silencio; se cancelan en shutdown.
 _bg_tasks: set[asyncio.Task] = set()
+_risk_state_ready = False
+
+
+async def _recover_broker_clock_and_risk(data: dict) -> None:
+    global _risk_state_ready
+    from services.timebase import broker_offset_hours, broker_offset_is_validated
+
+    if not broker_offset_is_validated():
+        try:
+            await broker_offset_hours("EURUSD")
+        except LOOP_ERRORS as exc:
+            logger.warning(
+                "[TIMEBASE] No se pudo refrescar el offset del bróquer: %s",
+                exc,
+            )
+    if not broker_offset_is_validated() or _risk_state_ready:
+        return
+
+    try:
+        equity = data.get("equity", data.get("balance"))
+        current_equity = float(equity) if equity and float(equity) > 0 else None
+        await init_risk_state(current_equity)
+        _risk_state_ready = True
+    except DB_ERRORS + (RuntimeError,):
+        logger.exception(
+            "[RISK-STATE] No se pudo inicializar tras validar el offset; "
+            "se reintentará"
+        )
 
 
 async def _mcp_health_loop():
@@ -38,6 +67,8 @@ async def _mcp_health_loop():
             connected = "balance" in data
             _mcp_status["connected"] = connected
             _mcp_status["detail"] = f"equity={data.get('equity')}" if connected else data.get("detail", "unknown")
+            if connected:
+                await _recover_broker_clock_and_risk(data)
         except LOOP_ERRORS as exc:
             connected = False
             _mcp_status["connected"] = False
@@ -96,6 +127,8 @@ async def _mcp_health_loop():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _risk_state_ready
+    _risk_state_ready = False
     await init_pool()
     logger.info("PostgreSQL pool inicializado")
 
@@ -139,26 +172,7 @@ async def lifespan(app: FastAPI):
     except (HTTP_ERRORS + PARSE_ERRORS) as exc:
         logger.warning("[RISK-STATE] No se pudo leer equity para el baseline: %s", exc)
         boot_equity = None
-    # T-31.9 (2026-10-20): el desfase del bróker se detecta ANTES de
-    # inicializar el estado de riesgo ⇒ la clave del día de la cuenta es
-    # desde el primer arranque el DÍA DEL BRÓKER (21:00–21:00 UTC con el
-    # desfase de +3 h), no el día civil UTC. Sin esto, el primer arranque
-    # tras un reinicio sembraría el baseline con una clave de día distinta
-    # y el límite diario de pérdida se reiniciaría fuera de sitio.
-    try:
-        from services.timebase import broker_offset_hours
-        off = await broker_offset_hours("EURUSD")
-        logger.info("[TIMEBASE] Desfase del bróquer detectado al arrancar: %+d h", off)
-    except LOOP_ERRORS as exc:
-        logger.warning("[TIMEBASE] No se pudo detectar el desfase del bróquer: %s", exc)
-
-    try:
-        await init_risk_state(boot_equity)
-    except RuntimeError as exc:
-        # Solo alcanzable con el pool sin inicializar (suite sin BD): en
-        # producción init_pool() ya habría reventado el arranque antes, y un
-        # fallo REAL de query (asyncpg) sí propaga y detiene el boot.
-        logger.warning("[RISK-STATE] Sin pool: estado de riesgo no restaurado (%s)", exc)
+    await _initialize_clock_and_risk(boot_equity)
 
     _bg_tasks.add(asyncio.create_task(_mcp_health_loop()))
     # P3-2b: backup programado del bundle (primera pasada a los 60 s).
@@ -209,6 +223,46 @@ async def lifespan(app: FastAPI):
     logger.info("Shutdown completo")
 
 
+async def _initialize_clock_and_risk(boot_equity: float | None) -> None:
+    global _risk_state_ready
+    from services.timebase import broker_offset_hours, broker_offset_is_validated
+
+    try:
+        if await restore_broker_offset():
+            logger.info("[TIMEBASE] Offset validado restaurado desde PostgreSQL")
+    except DB_ERRORS + (RuntimeError,):
+        logger.exception("[TIMEBASE] No se pudo restaurar el offset persistido")
+
+    try:
+        offset_h = await broker_offset_hours("EURUSD")
+        if broker_offset_is_validated():
+            logger.info(
+                "[TIMEBASE] Offset validado disponible al arrancar: %+d h",
+                offset_h,
+            )
+        else:
+            logger.error(
+                "[TIMEBASE] Offset desconocido: no hay medición fresca ni "
+                "valor persistido; se bloquean nuevas órdenes"
+            )
+    except LOOP_ERRORS as exc:
+        logger.warning(
+            "[TIMEBASE] No se pudo detectar el desfase del bróquer: %s", exc
+        )
+
+    if not broker_offset_is_validated():
+        logger.error(
+            "[RISK-STATE] No se inicializa el baseline del día: el offset "
+            "del bróquer no está validado; trading bloqueado"
+        )
+        return
+    try:
+        await init_risk_state(boot_equity)
+        _risk_state_ready = True
+    except RuntimeError as exc:
+        logger.warning("[RISK-STATE] Sin pool: estado de riesgo no restaurado (%s)", exc)
+
+
 app = FastAPI(
     title="Trading API",
     version="5.0.0",
@@ -255,7 +309,16 @@ app.include_router(orders.router)
 
 @app.get("/health")
 async def health() -> dict:
+    from services.timebase import (
+        broker_offset_is_validated,
+        current_broker_offset,
+    )
+    clock_ready = broker_offset_is_validated()
     return {
-        "status": "ok" if _mcp_status["connected"] else "degraded",
+        "status": "ok" if _mcp_status["connected"] and clock_ready else "degraded",
         "mcp": _mcp_status,
+        "broker_clock": {
+            "validated": clock_ready,
+            "offset_h": current_broker_offset() if clock_ready else None,
+        },
     }

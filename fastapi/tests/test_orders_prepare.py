@@ -57,7 +57,7 @@ class _FakeAsyncClient:
 
 
 def _prepare(payload, *, fetchrow=None, risk=(True, ""), fetchval=42, headers=None,
-             positions=None):
+             positions=None, clock_ready=True):
     """POST /v1/orders/prepare con todo el entorno parcheado. Devuelve (response, pool).
 
     `positions`: contenido de get_positions (P3-1d, default sin posiciones).
@@ -68,6 +68,9 @@ def _prepare(payload, *, fetchrow=None, risk=(True, ""), fetchval=42, headers=No
         stack.enter_context(patch("main.close_pool", AsyncMock()))
         stack.enter_context(patch("routers.ai.load_inference_artifacts"))
         stack.enter_context(patch("httpx.AsyncClient", _FakeAsyncClient))
+        stack.enter_context(
+            patch("services.timebase.broker_offset_is_validated", return_value=clock_ready)
+        )
 
         pool = MagicMock()
         if isinstance(fetchrow, list):
@@ -139,6 +142,14 @@ class TestPrepareEndpoint:
         # Registrado como pending ANTES de enviar
         insert_sql = pool.fetchval.await_args.args[0]
         assert "INSERT INTO orders" in insert_sql and "'pending'" in insert_sql
+
+    def test_unvalidated_broker_clock_blocks_order(self):
+        response, _ = _prepare(_order(), clock_ready=False)
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["approved"] is False
+        assert data["rejection_reason"] == "broker_clock_unavailable"
 
     def test_cycle_idempotency_rejects_second_order(self):
         response, _ = _prepare(_order(), fetchrow={"id": 7})
