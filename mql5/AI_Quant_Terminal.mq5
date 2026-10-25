@@ -1055,7 +1055,7 @@ void CloseAllPositions()
        "\"opening_deal\":", IntegerToString((long)openingDeal), ",",
        "\"opening_magic\":", IntegerToString(openingMagic), ",",
        "\"opening_deal_found\":", openingDealFoundStr, ",",
-       "\"magic_match\":", magicMatchStr, ",
+       "\"magic_match\":", magicMatchStr, ",",
        "\"cycle_id\":\"", cycle_id, "\",",
        "\"entry_price\":", DoubleToString(entryPrice, 5), ",",
        "\"commission\":", DoubleToString(dealCommission, 2), ",",
