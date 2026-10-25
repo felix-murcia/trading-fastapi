@@ -1,0 +1,152 @@
+{
+  "symbols": {
+    "EURUSD": {
+      "n_outcomes": 81,
+      "n_con_deal_ticket": 81,
+      "n_match_broker": 81,
+      "n_sin_match_broker": 0,
+      "n_reconciliados": 69,
+      "n_discrepancias": 12,
+      "tolerancia_eur": 0.01,
+      "discrepancias": [
+        {
+          "deal_ticket": 58283064337,
+          "deal_pnl_eur": -0.5,
+          "outcome_pnl_eur": -0.44,
+          "diff_eur": 0.06,
+          "commission": 0.0,
+          "swap": -0.06,
+          "fee": 0.0
+        },
+        {
+          "deal_ticket": 58304218220,
+          "deal_pnl_eur": 1.22,
+          "outcome_pnl_eur": 1.27,
+          "diff_eur": 0.05,
+          "commission": 0.0,
+          "swap": -0.05,
+          "fee": 0.0
+        },
+        {
+          "deal_ticket": 58324256235,
+          "deal_pnl_eur": 5.56,
+          "outcome_pnl_eur": 5.75,
+          "diff_eur": 0.19,
+          "commission": 0.0,
+          "swap": -0.19,
+          "fee": 0.0
+        },
+        {
+          "deal_ticket": 58341544622,
+          "deal_pnl_eur": -0.59,
+          "outcome_pnl_eur": -0.57,
+          "diff_eur": 0.02,
+          "commission": 0.0,
+          "swap": -0.02,
+          "fee": 0.0
+        },
+        {
+          "deal_ticket": 58364800472,
+          "deal_pnl_eur": -11.29,
+          "outcome_pnl_eur": -11.26,
+          "diff_eur": 0.03,
+          "commission": 0.0,
+          "swap": -0.03,
+          "fee": 0.0
+        },
+        {
+          "deal_ticket": 58389761564,
+          "deal_pnl_eur": 14.17,
+          "outcome_pnl_eur": 14.19,
+          "diff_eur": 0.02,
+          "commission": 0.0,
+          "swap": -0.02,
+          "fee": 0.0
+        },
+        {
+          "deal_ticket": 58399838146,
+          "deal_pnl_eur": 0.14,
+          "outcome_pnl_eur": 0.18,
+          "diff_eur": 0.04,
+          "commission": 0.0,
+          "swap": -0.04,
+          "fee": 0.0
+        },
+        {
+          "deal_ticket": 58440843904,
+          "deal_pnl_eur": -5.75,
+          "outcome_pnl_eur": -5.72,
+          "diff_eur": 0.03,
+          "commission": 0.0,
+          "swap": -0.03,
+          "fee": 0.0
+        },
+        {
+          "deal_ticket": 58470843034,
+          "deal_pnl_eur": -0.58,
+          "outcome_pnl_eur": -0.56,
+          "diff_eur": 0.02,
+          "commission": 0.0,
+          "swap": -0.02,
+          "fee": 0.0
+        },
+        {
+          "deal_ticket": 58509141129,
+          "deal_pnl_eur": 15.6,
+          "outcome_pnl_eur": 15.68,
+          "diff_eur": 0.08,
+          "commission": 0.0,
+          "swap": -0.08,
+          "fee": 0.0
+        },
+        {
+          "deal_ticket": 58591941142,
+          "deal_pnl_eur": 0.75,
+          "outcome_pnl_eur": 0.77,
+          "diff_eur": 0.02,
+          "commission": 0.0,
+          "swap": -0.02,
+          "fee": 0.0
+        },
+        {
+          "deal_ticket": 58602759536,
+          "deal_pnl_eur": -6.67,
+          "outcome_pnl_eur": -6.51,
+          "diff_eur": 0.16,
+          "commission": 0.0,
+          "swap": -0.16,
+          "fee": 0.0
+        }
+      ]
+    },
+    "GBPUSD": {
+      "n_outcomes": 0,
+      "n_con_deal_ticket": 0,
+      "n_match_broker": 0,
+      "n_sin_match_broker": 0,
+      "n_reconciliados": 0,
+      "n_discrepancias": 0,
+      "tolerancia_eur": 0.01,
+      "discrepancias": []
+    },
+    "USDCHF": {
+      "n_outcomes": 10,
+      "n_con_deal_ticket": 10,
+      "n_match_broker": 9,
+      "n_sin_match_broker": 1,
+      "n_reconciliados": 9,
+      "n_discrepancias": 0,
+      "tolerancia_eur": 0.01,
+      "discrepancias": []
+    }
+  },
+  "global": {
+    "total_outcomes": 91,
+    "total_con_deal_ticket": 91,
+    "total_match_broker": 90,
+    "total_reconciliados": 78,
+    "total_discrepancias": 12,
+    "tolerancia_eur": 0.01,
+    "capturado_utc": "2026-10-25T22:11:00.192478+00:00"
+  }
+}
