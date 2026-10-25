@@ -1,7 +1,7 @@
 # P0.3 — Pre-registro Protocolo H=20 (PPO vs Qwen)
 
 > **Estado:** pre-registro (borrador para certificación por revisor independiente).
-> **Fecha:** 2026-10-25
+> **Fecha:** 2026-10-26
 > **Autor:** Félix (ingeniería)
 > **Revisor independiente:** pendiente de asignación
 > **SHA-256 del documento:** pendiente de cálculo tras firma
@@ -188,8 +188,8 @@ Los campos de texto de Qwen se derivan de los mismos datos base que los campos n
 | **C4** | Sin datos posterior al corte | 0 violaciones | Auditoría del snapshot |
 | **C5** | Paridad PPO↔LLM | 0 diferencias en campos compartidos | Test de paridad (tests/test_p21_canonical_snapshot.py) |
 | **C6** | Cero contradicciones ejecutables | 0 BUY/SELL opuestos en muestra | Replay emparejado |
-| **C7** | Robustez por régimen | Cada régimen supera criterios | Split por trending/ranging |
-| **C8** | Exposición correlacionada | Dentro de límites de riesgo | Análisis por par/sesión |
+| **C7** | Robustez por régimen | Cada régimen (trending/ranging) supera: n_eff ≥ 50, LB IC 95% del skill > 0, y diferencia de skill entre regímenes ≤ 5 pp | Split por trending/ranging, cálculo de n_eff y IC por estrato |
+| **C8** | Exposición correlacionada | Drawdown máximo diario ≤ 5% del equity; exposición por par ≤ 3% del equity por operación; exposición correlacionada EURUSD+GBPUSD ≤ 5% del equity total (ρ≈0.7-0.9); drawdown máximo semanal ≤ 10% del equity | Análisis por par/sesión, cálculo de exposición agregada por régimen |
 
 ### 8.3 Benchmarks (comparadores)
 
@@ -202,6 +202,12 @@ Los benchmarks se miden con **la misma función** `canonical_direction()` que lo
 | **Barra previa** | Dirección = dirección de la vela anterior |
 | **RSI** | RSI > 50 → BUY, RSI < 50 → SELL |
 | **Azar** | 50% BUY / 50% SELL (base condicional) |
+
+**Definiciones de límites de riesgo (C8):**
+- **Drawdown diario**: `(peak_equity_día − equity_actual) / peak_equity_día`, medido a cierre de cada día UTC.
+- **Exposición por par**: `volumen × precio × 100.000 / equity_cuenta`, medida en cada operación abierta.
+- **Exposición correlacionada EURUSD+GBPUSD**: suma de exposición de ambos pares, dado ρ≈0.7-0.9 medido en ventana de 30 días.
+- **Drawdown semanal**: `(peak_equity_semana − equity_actual) / peak_equity_semana`, medido al cierre de cada domingo UTC.
 
 El criterio T-31 de >55% con n≥100 se reporta como diagnóstico, **no** como prueba de edge sin comparación/IC.
 
