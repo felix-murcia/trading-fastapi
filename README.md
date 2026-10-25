@@ -51,19 +51,20 @@ regresión: `fastapi/tests/test_orders_lifecycle.py`. El auditor read-only
 2026-10-24 13:20Z sigue `UNRECONCILED` (614 ciclos, 90 órdenes, 210 outcomes
 unresolved); no se escribieron datos ni se abrieron operaciones.
 
-### Evidencia — rechazo de desfases horarios no contemporáneos (2026-10-24)
+### Evidencia — offset horario validado y persistido (hallazgo 2026-10-24; cierre 2026-10-25)
 
 `broker_offset_hours` ya no devuelve ni cachea desfases implausibles del
 endpoint de precio; intenta una medición H1 contemporánea y descarta velas
 antiguas. El último offset validado se persiste en `broker_clock_state` y se
-restaura al arrancar. Si no hay medición fresca ni valor persistido, el health
-queda `degraded`, no se inicializa el baseline de riesgo y el gate final de
-órdenes rechaza nuevas entradas con `broker_clock_unavailable`; el monitor
-reintenta y recupera el servicio al validar un offset. Así `+0 h` deja de
-presentarse como una detección cuando solo era el default. Regresiones:
+restaura al arrancar. Solo se habilitan órdenes con offset validado y
+persistido; sin ellos, el health queda `degraded`, no se inicializa el
+baseline de riesgo y el gate final rechaza entradas con
+`broker_clock_unavailable`. El monitor reintenta y recupera el servicio tras
+validar y persistir un offset. Así `+0 h` deja de presentarse como detección
+cuando solo era el default. Regresiones:
 fuentes inválidas/obsoletas, persistencia/restauración, estado desconocido y
 rechazo de órdenes. **Validación:** `pytest fastapi/tests/ -q` →
-**1327 passed, 2 xfailed**. Archivos: `fastapi/services/timebase.py`,
+**1328 passed, 2 xfailed**. Archivos: `fastapi/services/timebase.py`,
 `fastapi/services/broker_clock_store.py`, `fastapi/db/schema.sql`,
 `fastapi/main.py`, `fastapi/services/order_manager.py` y tests temporales/de
 órdenes.

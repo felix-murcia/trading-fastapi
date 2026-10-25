@@ -27,9 +27,31 @@ _bg_tasks: set[asyncio.Task] = set()
 _risk_state_ready = False
 
 
+async def _persist_validated_broker_offset() -> None:
+    from services.timebase import (
+        broker_offset_is_persisted,
+        broker_offset_is_validated,
+        broker_offset_source,
+        current_broker_offset,
+    )
+    if not broker_offset_is_validated() or broker_offset_is_persisted():
+        return
+    try:
+        from services.broker_clock_store import persist_broker_offset
+        await persist_broker_offset(
+            current_broker_offset(), broker_offset_source()
+        )
+    except DB_ERRORS + (RuntimeError,):
+        logger.exception("[TIMEBASE] No se pudo persistir el offset validado")
+
+
 async def _recover_broker_clock_and_risk(data: dict) -> None:
     global _risk_state_ready
-    from services.timebase import broker_offset_hours, broker_offset_is_validated
+    from services.timebase import (
+        broker_clock_ready,
+        broker_offset_hours,
+        broker_offset_is_validated,
+    )
 
     if not broker_offset_is_validated():
         try:
@@ -39,7 +61,8 @@ async def _recover_broker_clock_and_risk(data: dict) -> None:
                 "[TIMEBASE] No se pudo refrescar el offset del bróquer: %s",
                 exc,
             )
-    if not broker_offset_is_validated() or _risk_state_ready:
+    await _persist_validated_broker_offset()
+    if not broker_clock_ready() or _risk_state_ready:
         return
 
     try:
@@ -225,7 +248,11 @@ async def lifespan(app: FastAPI):
 
 async def _initialize_clock_and_risk(boot_equity: float | None) -> None:
     global _risk_state_ready
-    from services.timebase import broker_offset_hours, broker_offset_is_validated
+    from services.timebase import (
+        broker_clock_ready,
+        broker_offset_hours,
+        broker_offset_is_validated,
+    )
 
     try:
         if await restore_broker_offset():
@@ -249,11 +276,12 @@ async def _initialize_clock_and_risk(boot_equity: float | None) -> None:
         logger.warning(
             "[TIMEBASE] No se pudo detectar el desfase del bróquer: %s", exc
         )
+    await _persist_validated_broker_offset()
 
-    if not broker_offset_is_validated():
+    if not broker_clock_ready():
         logger.error(
             "[RISK-STATE] No se inicializa el baseline del día: el offset "
-            "del bróquer no está validado; trading bloqueado"
+            "del bróquer no está validado y persistido; trading bloqueado"
         )
         return
     try:
@@ -310,15 +338,18 @@ app.include_router(orders.router)
 @app.get("/health")
 async def health() -> dict:
     from services.timebase import (
+        broker_clock_ready,
         broker_offset_is_validated,
+        broker_offset_is_persisted,
         current_broker_offset,
     )
-    clock_ready = broker_offset_is_validated()
+    clock_ready = broker_clock_ready()
     return {
         "status": "ok" if _mcp_status["connected"] and clock_ready else "degraded",
         "mcp": _mcp_status,
         "broker_clock": {
-            "validated": clock_ready,
-            "offset_h": current_broker_offset() if clock_ready else None,
+            "validated": broker_offset_is_validated(),
+            "persisted": broker_offset_is_persisted(),
+            "offset_h": current_broker_offset() if broker_offset_is_validated() else None,
         },
     }

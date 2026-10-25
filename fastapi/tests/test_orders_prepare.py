@@ -69,7 +69,7 @@ def _prepare(payload, *, fetchrow=None, risk=(True, ""), fetchval=42, headers=No
         stack.enter_context(patch("routers.ai.load_inference_artifacts"))
         stack.enter_context(patch("httpx.AsyncClient", _FakeAsyncClient))
         stack.enter_context(
-            patch("services.timebase.broker_offset_is_validated", return_value=clock_ready)
+            patch("services.timebase.broker_clock_ready", return_value=clock_ready)
         )
 
         pool = MagicMock()

@@ -1,6 +1,6 @@
 """Persist and restore the last validated broker clock offset."""
 from db.connection import get_pool
-from services.timebase import set_broker_offset
+from services.timebase import mark_broker_offset_persisted, set_broker_offset
 
 _CREATE_TABLE = """
     CREATE TABLE IF NOT EXISTS broker_clock_state (
@@ -42,3 +42,4 @@ async def persist_broker_offset(offset_h: int, source: str) -> None:
     if abs(offset_h) > 12:
         raise ValueError(f"Broker offset outside the valid range: {offset_h}")
     await get_pool().execute(_UPSERT, offset_h, source)
+    mark_broker_offset_persisted(offset_h)

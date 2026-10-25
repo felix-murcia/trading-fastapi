@@ -20,6 +20,7 @@ async def test_restore_broker_offset_marks_persisted_value_as_validated(monkeypa
     assert restored is True
     assert timebase.current_broker_offset() == 3
     assert timebase.broker_offset_is_validated()
+    assert timebase.broker_clock_ready()
     pool.execute.assert_awaited_once()
 
 
@@ -56,9 +57,14 @@ async def test_persist_writes_validated_offset_and_source(monkeypatch):
     pool = MagicMock()
     pool.execute = AsyncMock()
     monkeypatch.setattr(broker_clock_store, "get_pool", lambda: pool)
+    monkeypatch.setattr(timebase, "_KNOWN_OFFSET", {
+        "offset_h": 2, "source": "endpoint_precio", "validated": True,
+        "persisted": False,
+    })
 
     await broker_clock_store.persist_broker_offset(2, "endpoint_precio")
 
     query, offset_h, source = pool.execute.await_args.args
     assert "INSERT INTO broker_clock_state" in query
     assert (offset_h, source) == (2, "endpoint_precio")
+    assert timebase.broker_clock_ready()

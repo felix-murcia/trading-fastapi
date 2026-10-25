@@ -48,9 +48,9 @@ def _reject(reason: str) -> OrderPrepareResponse:
 async def _broker_clock_rejection(
     req: OrderPrepareRequest,
 ) -> OrderPrepareResponse | None:
-    from services.timebase import broker_offset_is_validated
+    from services.timebase import broker_clock_ready
 
-    if broker_offset_is_validated():
+    if broker_clock_ready():
         return None
     await _audit(req.cycle_id, "order_rejected", {
         "reason": "broker_clock_unavailable",

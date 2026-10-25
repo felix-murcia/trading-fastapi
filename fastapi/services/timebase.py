@@ -66,7 +66,8 @@ OFFSET_TTL_S = 300.0
 # `current_broker_offset()` devuelve el último valor conocido (0 si nunca se
 # detectó ⇒ el comportamiento histórico: el día UTC).
 _KNOWN_OFFSET: dict = {
-    "offset_h": 0, "source": "sin_detecccion", "validated": False,
+    "offset_h": 0, "source": "sin_detecccion",
+    "validated": False, "persisted": False,
 }
 
 
@@ -93,6 +94,7 @@ def set_broker_offset(offset_h: int, source: str = "deteccion") -> None:
     _KNOWN_OFFSET["offset_h"] = off
     _KNOWN_OFFSET["source"] = source
     _KNOWN_OFFSET["validated"] = True
+    _KNOWN_OFFSET["persisted"] = source.startswith("persisted:")
 
 
 def current_broker_offset() -> int:
@@ -105,6 +107,28 @@ def broker_offset_is_validated() -> bool:
     return bool(_KNOWN_OFFSET.get(
         "validated", _KNOWN_OFFSET.get("source") != "sin_detecccion"
     ))
+
+
+def broker_offset_is_persisted() -> bool:
+    """Indica si el último offset validado ya sobrevive a un reinicio."""
+    return bool(_KNOWN_OFFSET.get("persisted", False))
+
+
+def broker_clock_ready() -> bool:
+    """Trading solo cuando el offset está validado y persistido."""
+    return broker_offset_is_validated() and broker_offset_is_persisted()
+
+
+def broker_offset_source() -> str:
+    return str(_KNOWN_OFFSET["source"])
+
+
+def mark_broker_offset_persisted(offset_h: int) -> None:
+    if (
+        broker_offset_is_validated()
+        and int(offset_h) == current_broker_offset()
+    ):
+        _KNOWN_OFFSET["persisted"] = True
 
 
 async def broker_offset_hours(symbol: str = "EURUSD") -> int:
