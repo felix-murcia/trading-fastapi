@@ -189,7 +189,7 @@ Los campos de texto de Qwen se derivan de los mismos datos base que los campos n
 | **C5** | Paridad PPO↔LLM | 0 diferencias en campos compartidos | Test de paridad (tests/test_p21_canonical_snapshot.py) |
 | **C6** | Cero contradicciones ejecutables | 0 BUY/SELL opuestos en muestra | Replay emparejado |
 | **C7** | Robustez por régimen | Cada régimen (trending/ranging) supera: n_eff ≥ 50, LB IC 95% del skill > 0, y diferencia de skill entre regímenes ≤ 5 pp | Split por trending/ranging, cálculo de n_eff y IC por estrato |
-| **C8** | Exposición correlacionada | Drawdown máximo diario ≤ 5% del equity; exposición por par ≤ 3% del equity por operación; exposición correlacionada EURUSD+GBPUSD ≤ 5% del equity total (ρ≈0.7-0.9); drawdown máximo semanal ≤ 10% del equity | Análisis por par/sesión, cálculo de exposición agregada por régimen |
+| **C8** | Exposición correlacionada | Drawdown diario ≤ 5% del equity (cualquier día > 5% hace fallar C8); drawdown semanal ≤ 10% del equity; exposición por operación ≤ 3% del equity; exposición agregada por par ≤ 15% del equity; exposición correlacionada EURUSD+GBPUSD = Exp_EURUSD + Exp_GBPUSD × ρ₃₀ ≤ 5% del equity (ρ₃₀ medido en ventana de 30 días) | Análisis por par/sesión, cálculo de exposición agregada, ρ₃₀ = correlación de retornos horarios en ventana de 30 días |
 
 ### 8.3 Benchmarks (comparadores)
 
