@@ -12,10 +12,12 @@ La operación con una dirección contradictoria no es una fusión válida: cualq
 
 El objetivo es eliminar el ruido evitable de datos, relojes, etiquetas y evaluación. No existe una garantía honesta de “cero ruido” de mercado ni de fiabilidad absoluta futura; la salida a producción requiere evidencia reproducible, límites explícitos y no-go automático cuando falte.
 
-## Estado ejecutivo vigente — corte 2026-10-23 19:40 UTC
+## Estado ejecutivo vigente — corte 2026-10-25 12:07 UTC
 
-La clasificación de gaps se amplió posteriormente con una comprobación de
-30/30 comparaciones; esta evidencia no representa una nueva captura de mercado.
+El inventario de evidencia P0.1 se cerró documentalmente en
+[`P0-evidence-inventory-20261025.md`](./P0-evidence-inventory-20261025.md).
+“GO” en P0.1 significa que las fuentes, hashes, dominios, límites y usos
+admisibles quedaron catalogados; **no** aprueba P0 ni P0.3.
 
 Esta tabla es la **fuente de estado actual**. Los apartados posteriores titulados
 «Avance verificable» son bitácora con su propio timestamp; sus cifras no deben
@@ -24,13 +26,13 @@ significa implementación/evidencia disponible, no aprobación de gate.
 
 | Gate | Estado | Hecho verificable | Falta para cerrar |
 |---|---|---|---|
-| **P0 — Protocolo y evidencia** | **PARCIAL / NO-GO** | Horizonte objetivo H=20h, universo declarado y criterios estadísticos documentados; se conservó como inconcluso el test de permutación sin vectores crudos. Migración aditiva aplicada y backend desplegado. | Versionar y revisar el protocolo completo con hashes de bundle/VecNormalize/código/LLM y costes válidos; evidencia cruda reproducible del test de permutación o excluirlo formalmente del gate. |
-| **P0.1 — Inventario** | **PARCIAL** | Se conservaron snapshots, hashes, auditorías y cortes etiquetados por fecha; existe un reporte read-only de enlaces broker/DB. | Consolidar inventario con fuente, zona horaria, definición, hash y uso permitido para cada artefacto/claim; cero claims no reproducibles usados como criterio. |
-| **P0.2 — Ledger, órdenes, deals, PnL y capital** | **ABIERTO / BLOQUEANTE** | FK `trade_outcomes.order_db_id → orders.id` aplicada. Corte 17:38:49Z: clasificación determinista con estado/razón para el 100% de 7.202 ciclos, 91 órdenes, 75 fills y 210 outcomes (0 filas sin clasificación/razón); 607 ciclos, 90 órdenes y 210 outcomes siguen unresolved. 75/75 fills enlazan a `orders.id` exacto. Auditor broker 17:30Z: 121 outcomes sin deal/posición, 88 tickets exactos, 1 sin coincidencia, 0 `order_db_id` y 0 IDs MT5 válidos. | Validar v14.3 con un fill natural posterior al despliegue y enlace exacto; diagnosticar `history/orders` HTTP 500; explicar filas unresolved y conciliar PnL/capital con documentación de balance y movimientos. Sin backfill heurístico. |
-| **P0.3 — Pre-registro** | **PARCIAL** | Decisiones del protocolo anotadas: H=20, splits temporales, efecto mínimo, potencia objetivo, métricas y regla de parada. | Revisión independiente y sellado de versión/hash; resolver cobertura de costes, elegibilidad, calendario y holdout nuevo antes de cualquier evaluación. |
-| **P1.1 — Mercado H1** | **PARCIAL / NO-GO PARA REPLAY** | Captura MT5 read-only 19:40:24–19:40:25Z en los 3 pares; offset broker detectado +3h. 1.200 barras recibidas y 1.199 cerradas por símbolo; auditor estructural válido. Los 10 gaps semanales por par (30/30 símbolo-intervalos) convierten a cierre viernes 17:00 y reapertura domingo 17:00 New York, consistente con la convención MetaQuotes-Demo aportada por Félix. | La muestra solo cubre EDT y no observa la transición de otoño del 1-11-2026. Hay discrepancia sin resolver: esta convención implica cambio con DST de EE. UU. (1-11), mientras AGENTS.md documenta +2h desde el 25-10. No elegir ni codificar una fecha por suposición: confirmar el offset real con observaciones broker posteriores a ambas transiciones. Para replay, capturar dentro de ≤5 min del inicio y confirmar última vela cerrada; esta captura ya es stale y no se usó. El spread es inválido para costes (1200/1200 ceros EURUSD y GBPUSD; 1177/1200 USDCHF). |
-| **P1.2 — Costes de ejecución** | **NO-GO** | `commission`, `swap`, `fee` aparecen en deals históricos consultados; 12 cierres tienen discrepancia registrada de swap. `spread` del feed H1 no es utilizable. | Fuente verificable de bid/ask/spread y slippage para el instante de entrada/fill; cobertura y conciliación completas según criterios más abajo. |
-| **P1.3 — Muestra y lineage** | **NO-GO** | Auditor de manifiestos detectó que el CSV P3.1 no es válido. | Regenerar desde fuentes reconciliadas; no reutilizar el CSV fallido. Cero IDs duplicados, discordancias de símbolo, timestamps inválidos o labels inmaduras en muestra aceptada. |
+| **P0 — Protocolo y evidencia** | **NO-GO** | P0.1 tiene inventario reproducible; el test de permutación sin vectores se excluyó formalmente, sin usar sus porcentajes. | No hay preregistro H=20 listo para firmar: faltan costes válidos, entrada/LLM alineados a 20h, identidad del modelo LLM, holdout nuevo y revisión independiente. P0.2 sigue abierto. |
+| **P0.1 — Inventario** | **GO — alcance documental** | Inventario de fuentes/hash/dominio/uso admisible publicado; métricas históricas no reproducibles se excluyen de gates. | No implica que los datasets/costes sean válidos ni cierra P0/P0.2. Revisar el inventario al entrar evidencia nueva. |
+| **P0.2 — Ledger, órdenes, deals, PnL y capital** | **ABIERTO / BLOQUEANTE** | Último corte de conciliación disponible: 2026-10-24 13:20Z; `UNRECONCILED`, 614 ciclos, 90 órdenes y 210 outcomes unresolved; los 76/76 fills observados enlazaban a `orders.id` exacto, pero 210/211 outcomes carecían de `order_db_id`. La FK está aplicada y no hubo backfill. | Aún falta fill natural v14.3 con identidad completa, explicar filas unresolved y conciliar capital/PnL. `history/orders` HTTP 500 queda como dependencia del equipo del bridge remoto, fuera del alcance de cambios en esta aplicación; no se inventa una causa. |
+| **P0.3 — Pre-registro** | **NO-GO** | Se conservaron H=20, universo y criterios estadísticos como intención. La permutación histórica se excluyó formalmente. | El holdout hasta 2026-10-23 ya fue consultado y no es confirmatorio; no se fija un holdout sustituto antes de aceptar datos/costes. El prompt Qwen actual pregunta por precio más alto a 24h y la API no fija el identificador del modelo. Faltan costes completos, estados C1–C8 documentados y revisión independiente/hash final. |
+| **P1.1 — Mercado H1** | **NO-GO PARA REPLAY** | La captura read-only 2026-10-23 conserva valor estructural; su auditor observó 30/30 gaps semanales compatibles con cierre viernes/domingo 17:00 New York en EDT. | Snapshot stale. Health observado 2026-10-25 12:07Z: MT5 conectado, reloj `validated=false`, `persisted=false`, `offset_h=null`; no hay offset broker fresco/persistido. Falta validar el cambio DST real y capturar datos nuevos con offset fiable. |
+| **P1.2 — Costes de ejecución** | **NO-GO** | Auditor de 576 deals consultados: comisión/fee/swap aparecen; auditoría agregada registra 12 cierres con discrepancia de swap. | Sin fuente completa y verificable de bid/ask, spread y slippage por fill; spread del feed H1 no sirve. Cobertura de costes de entrada no alcanza 100%. |
+| **P1.3 — Muestra y lineage** | **NO-GO** | Reauditoría reproducida en este corte: manifest P3.1 `valid=false`, 9 clases de issue bloqueante. | Regenerar solo desde datos reconciliados; no reparar ni reutilizar el CSV fallido. Cero duplicados/mismatches/labels inmaduras y holdout nuevo sellado. |
 | **P2.1 — Entrada común PPO/LLM** | **PENDIENTE / BLOQUEADO POR P1** | Diferencia de contexto PPO/Qwen identificada como riesgo. | Estado canónico y hash por oportunidad; payload reconstruible para ambos con mismo corte temporal, features comunes, pregunta y horizonte; paridad probada. |
 | **P3.1 — Labels y benchmarks** | **NO-GO** | Se implementó auditor de manifiestos; el artefacto declarado (6.778 filas) falló: 100% HOLD, solo EURUSD, duplicados y split Train vacío. Se preserva como evidencia fallida. | Nuevo conjunto desde datos P1 aceptados, labels outcome-blind y benchmarks no vacíos sellados antes de leer predicciones. |
 | **P3.2 — Potencia** | **BLOQUEADO** | Umbral provisional documentado: `n_eff ≥ 100` por clase direccional/régimen. | Calcular potencia con dependencia temporal/corrección múltiple una vez aprobados P1/P3.1; insuficiencia = inconcluso/NO-GO. |
@@ -715,3 +717,42 @@ bridge remoto, no a esta aplicación; queda como dependencia externa del gate
 contable, no como tarea de modificación en este repositorio. El siguiente
 paso de aplicación sigue siendo validar un fill natural con `order_db_id` y
 referencias exactas de broker; no generar trades para obtener esa evidencia.
+
+## Actualización P0 / P0.1 / P0.3 — inventario y decisión de gate (2026-10-25 12:07 UTC)
+
+**P0.1: GO limitado al inventario documental.** Se publicó
+[`P0-evidence-inventory-20261025.md`](./P0-evidence-inventory-20261025.md),
+que registra hashes, dominio temporal, corte, límites y uso admisible de las
+fuentes del workstream. Las afirmaciones históricas sin respaldo reproducible
+quedan expresamente fuera de los criterios. El test histórico de permutación
+se excluye formalmente: faltan sus vectores crudos y su informe contiene una
+contradicción entre el máximo simulado y el PnL observado. No se usa ninguno
+de sus porcentajes o p-valores.
+
+**P0.3: NO-GO.** La inspección del código de Qwen demuestra que el prompt pide
+la probabilidad de precio más alto a 24h, incompatible con el objetivo
+declarado H=20; además, la petición al servidor no especifica `model`, por lo
+que la identidad del modelo servido no está fijada por esta aplicación. El
+pre-registro antiguo declara costes que el feed no acredita, su holdout llega
+hasta 2026-10-23 y ya fue consultado, y no existe revisión independiente
+firmada de una versión final. No se modifica en esta tarea el prompt de
+producción ni se declara un nuevo holdout.
+
+**Comprobación reproducible del dataset fallido:** se ejecutó
+`python -m services.replay_manifest_audit ops/P3.1_manifest.json`; salida 2,
+`valid=false`: un solo símbolo real (EURUSD), 6.778 decisiones HOLD, 102 IDs
+duplicados, 619 discordancias ciclo/símbolo, 6.463 valores
+`bars_since_close` negativos, cero labels direccionales y split Train vacío.
+El dataset queda excluido; no se repara ni se usa para entrenar/evaluar.
+
+**Estado operativo concurrente:** `/health` devolvió `degraded`, MT5 conectado
+y reloj no validado/no persistido (`offset_h=null`). Por ello sigue activo el
+bloqueo fail-closed de nuevas órdenes; no hay snapshot de mercado fresco ni
+base de tiempo para autorizar replay.
+
+**Decisión del gate:** P0 global permanece **NO-GO**. P0.1 ya está cerrado en
+su alcance documental, pero P0.2 sigue sin reconciliar PnL/capital y P0.3 no
+es un pre-registro ejecutable. También siguen abiertos los costes P1.2, el
+snapshot P1.1 y el nuevo dataset P1.3/P3.1. Declarar P0=GO ahora contradiría
+los criterios de aceptación medibles del propio plan. No se tocaron órdenes,
+datos de trading, switches, bundle ni el bridge remoto.
