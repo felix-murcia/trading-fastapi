@@ -32,7 +32,7 @@ significa implementación/evidencia disponible, no aprobación de gate.
 |---|---|---|---|
 | **P0 — Protocolo y evidencia** | **NO-GO** | P0.1 tiene inventario reproducible; el test de permutación sin vectores se excluyó formalmente, sin usar sus porcentajes. | No hay preregistro H=20 listo para firmar: faltan costes válidos, entrada/LLM alineados a 20h, identidad del modelo LLM, holdout nuevo y revisión independiente. P0.2 sigue abierto. |
 | **P0.1 — Inventario** | **GO — alcance documental** | Inventario de fuentes/hash/dominio/uso admisible publicado; métricas históricas no reproducibles se excluyen de gates. | No implica que los datasets/costes sean válidos ni cierra P0/P0.2. Revisar el inventario al entrar evidencia nueva. |
-| **P0.2 — Ledger, órdenes, deals, PnL y capital** | **ABIERTO / BLOQUEANTE** | Reconciliación read-only de 2026-10-25 13:16:29Z: `UNRECONCILED`; 7.282 ciclos (614 unresolved), 92 órdenes (90 unresolved), 76/76 eventos fill con `order_db_id`, 211 outcomes (solo 1 enlazado; 210 sin `order_db_id`), PnL realizado €347,29. Las 7.282/92/76/211 filas recibieron clasificación y razón deterministas. | Falta fill natural v14.3 con identidad broker completa, explicar filas unresolved y conciliar capital/PnL con extractos verificables. El HTTP 500 de `history/orders` es dependencia del bridge remoto, fuera del alcance de esta aplicación; no se modifica ni diagnostica aquí. |
+| **P0.2 — Ledger, órdenes, deals, PnL y capital** | **ABIERTO / BLOQUEANTE** | Reconciliación read-only de 2026-10-25 13:16:29Z: `UNRECONCILED`; 7.282 ciclos (614 unresolved), 92 órdenes (90 unresolved), 76/76 eventos fill con `order_db_id`, 211 outcomes (solo 1 enlazado; 210 sin `order_db_id`), PnL realizado €347,29. Las 7.282/92/76/211 filas recibieron clasificación y razón deterministas. Además, 1 fill posterior a v14.3 ya tiene la cadena exacta completa verificada (apertura → posición → cierre → outcome) **sin usar `history/orders`**. | Falta explicar las filas unresolved y conciliar capital/PnL: 90/211 outcomes tienen `position_id` (conciliación exacta por posición) y 121/211 no tienen ninguna clave de bróker (solo conciliación agregada + extractos). Las horas de la cadena verificada siguen pendientes de offset validado (P1.1). `history/orders` no es criterio: `history/deals` devuelve `order` y `position_id` en el 100% de los deals. |
 | **P0.3 — Pre-registro** | **NO-GO** | Se conservaron H=20, universo y criterios estadísticos como intención. La permutación histórica se excluyó formalmente. La inspección actual confirma que PPO recompensa dirección a 24 barras H1 y Qwen pregunta por precio más alto en 24h. | No cambiar solo el prompt: todavía no existe una política PPO entrenada/evaluada para 20 horas transcurridas. El holdout hasta 2026-10-23 ya fue consultado. Faltan costes completos, identidad estable del modelo LLM, contrato común, estados C1–C8 documentados y revisión independiente/hash final. |
 | **P1.1 — Mercado H1** | **NO-GO PARA REPLAY** | La captura read-only 2026-10-23 conserva valor estructural; su auditor observó 30/30 gaps semanales compatibles con cierre viernes/domingo 17:00 New York en EDT. Health 2026-10-25 15:06:48Z: `degraded`, MT5 conectado, reloj `validated=false`, `persisted=false`, `offset_h=null`; log rechazó timestamp de precio implausible (-39 h) y vela H1 con edad +40,1 h; baseline de riesgo no inicializado. | Snapshot stale y sin offset broker fresco/persistido. Primero validar con tests el rechazo de timestamp viejo aunque el offset calculado parezca plausible; al reabrir el mercado, observar la respuesta real y una H1 contemporánea sin fijar DST/offset. Después capturar datos nuevos. |
 | **P1.2 — Costes de ejecución** | **NO-GO** | Auditor de 576 deals consultados: comisión/fee/swap aparecen; auditoría agregada registra 12 cierres con discrepancia de swap. El EA reporta profit y swap de cierre; no persiste un snapshot bid/ask/timestamp de entrada ni commission/fee completos en `trade_outcomes`. | Recuperar históricos solo por deal/position IDs exactos; sin bid/ask/tick histórico verificable, excluir la fila. Para observaciones nuevas, añadir captura de quote y fill-cost lineage con migración aditiva y EA versionado; 100% de cobertura de costes requeridos, FX trazable y sin doble contar costes ya incluidos en profit. |
@@ -76,10 +76,10 @@ esta tabla antes de iniciar la siguiente tarea dependiente.
 | ID / estado | Responsable y dependencias | Trabajo acotado | Criterio de salida |
 |---|---|---|---|
 | **P0.1 — HECHO (documental)** | Aplicación; independiente | Mantener inventario de fuentes, hashes, dominios y usos admisibles. | [`P0-evidence-inventory-20261025.md`](./P0-evidence-inventory-20261025.md) versionado; no confundirlo con validez de los datos. |
-| **P0.2a — BLOQUEADO (fill natural)** | Félix/operación EA; requiere el siguiente fill posterior a v14.3 y reloj válido | Seguir una sola orden natural desde `orders/prepare` hasta fill y cierre, usando IDs exactos; no abrir trades de prueba. | ≥1 fill/cierre posterior al despliegue con comentario `AIQ:<order_db_id>`, `orders.id`, IDs broker, `deal_ticket` y FK de outcome coherentes; horas convertidas con offset validado. |
-| **P0.2b — FUERA DE ALCANCE (bridge)** | Equipo propietario del bridge; externo a este repo | La aplicación registra la respuesta/impacto de `history/orders`; la causa del HTTP 500 y su reparación pertenecen al propietario remoto. | Dependencia externa satisfecha cuando su equipo provea respuesta 2xx reproducible y contrato/IDs verificables para ambos símbolos. Hasta entonces P0.2 sigue abierto; no tocar bridge ni suponer causa. |
-| **P0.2c — HECHO (snapshot); NO-GO (conciliación)** | Aplicación; se reejecuta después de nueva evidencia P0.2a/b | Clasificar en modo `REPEATABLE READ READ ONLY` ciclos, órdenes, fills y outcomes. Último corte DB **2026-10-25 13:16:29Z**: 7.282 ciclos (614 unresolved), 92 órdenes (90 unresolved), 76 eventos fill con FK, 211 outcomes (1 enlazado, 210 sin FK); PnL €347,29. Todas las filas clasificadas con razón; balance/equity no concilia cash. | Para cerrar gate: 100% de filas con estado/razón, 0 joins temporales, enlaces exactos, filas legacy excluidas con motivo y reconciliación capital/PnL ≤€0,01 (tolerancia distinta solo si preregistrada). Este snapshot no alcanza esos criterios. |
-| **P1.1a — PENDIENTE (hardening reloj)** | Aplicación; TDD, antes del siguiente intento live | Testear quote ≤5 min (límite propuesto, consistente con la frescura snapshot→replay), quote más viejo con diferencia UTC aún plausible, offsets implausibles, incompatibilidad de dominios quote/H1 y fallo de persistencia. Conservar el límite actual de ≤2 h para vela H1 durante mercado abierto; distinguir mercado cerrado de feed obsoleto. Ajustar productor solo donde los tests demuestren el defecto; no hardcodear calendario DST. | Quote >5 min o vela H1 >2 h durante mercado abierto, fuentes incompatibles o fallo DB nunca validan/cachean/persisten offset; entradas admisibles validan el offset medido; errores DB se notifican y health mantiene el estado no listo. Tests de regresión pasan. |
+| **P0.2a — PARCIAL (identidad HECHA; horas pendientes)** | Félix/operación EA; verificado 2026-10-25 read-only | Seguir una sola orden natural desde `orders/prepare` hasta fill y cierre, usando IDs exactos; no abrir trades de prueba. | Identidad verificada en 1 fill posterior a v14.3: `orders.mt5_order_id` = `order` del deal de apertura, `orders.mt5_position_id` = `position_id`, comentario de apertura `AIQ:<orders.id>` exacto, `magic` del EA, `ticket` del deal de cierre = `trade_outcomes.deal_ticket`, PnL neto idéntico al céntimo y FK `order_db_id` poblada. Falta solo «horas convertidas con offset validado», que depende de P1.1. |
+| **P0.2b — NO REQUERIDO (ruta redundante)** | Aplicación; decisión documentada 2026-10-25 | No consumir `history/orders`. El enlace deal→orden se obtiene de `history/deals` (`order` y `position_id` presentes en 37/37 deals de la muestra) y el ticket de apertura llega por el webhook del EA (`opening_order_ticket`, introducido con EA v14.3). | Cierre documental: `history/orders` deja de ser criterio de salida de P0.2. Su HTTP 500 se registra como observación del bridge, sin diagnóstico ni reparación desde este repo. |
+| **P0.2c — HECHO (snapshot); NO-GO (conciliación)** | Aplicación; se reejecuta después de nueva evidencia P0.2a | Clasificar en modo `REPEATABLE READ READ ONLY` ciclos, órdenes, fills y outcomes. Último corte DB **2026-10-25 13:16:29Z**: 7.282 ciclos (614 unresolved), 92 órdenes (90 unresolved), 76 eventos fill con FK, 211 outcomes (1 enlazado, 210 sin FK); PnL €347,29. Todas las filas clasificadas con razón; balance/equity no concilia cash. | Para cerrar gate: 100% de filas con estado/razón, 0 joins temporales, enlaces exactos, filas legacy excluidas con motivo y reconciliación capital/PnL ≤€0,01 (tolerancia distinta solo si preregistrada). Conciliación en dos niveles: posición exacta para las 90/211 filas con `position_id`; agregado (deals del periodo vs suma de outcomes) para las 121/211 sin clave de bróker; capital contra extractos. Este snapshot no alcanza esos criterios. |
+| **P1.1a — HECHO (código; 2026-10-25)** | Aplicación; TDD, antes del siguiente intento live | Testear quote ≤5 min, quote más viejo con diferencia UTC aún plausible, offsets implausibles, incompatibilidad de dominios quote/H1 y fallo de persistencia. Conservar el límite actual de ≤2 h para vela H1. Ajustar productor solo donde los tests demuestren el defecto; no hardcodear calendario DST. | 7 tests nuevos en `tests/test_timebase_hardening.py`; 4 demostraron defecto y se corrigieron en `services/timebase.py`: frescura del sello de precio, consenso obligatorio quote/H1, y persistencia ANTES de publicar (fallo DB no valida, no cachea y conserva el offset anterior). Suite completa **1335 passed, 2 xfailed**. Verificado read-only contra el feed real (mercado cerrado): ambas fuentes rechazadas, `validated=false`, `persisted=false`, caché intacta. |
 | **P1.1b — BLOQUEADO (ventana de mercado)** | Aplicación + feed MT5; depende de P1.1a y mercado abierto | Capturar timestamps crudos de precio y H1 cerrada contemporánea; derivar el offset en runtime usando la semántica temporal existente y comprobar compatibilidad de dominios; verificar persistencia y baseline de riesgo. | Quote ≤5 min y H1 cerrada ≤2 h; `/health` `ok`; `validated=true`, `persisted=true`, offset medido; estado de riesgo inicializado; cero offset fijo. Si mercado cerrado, feed obsoleto o fuentes incompatibles, sigue NO-GO. |
 | **P1.1c — BLOQUEADO (snapshot)** | Aplicación; depende de P1.1b | Capturar solo velas crudas/cerradas de EURUSD, GBPUSD y USDCHF; normalizar con offset ya validado; auditar estructura y clasificar gaps contra calendario documentado. | Hash y reporte reproducibles; 0 duplicados/desorden/OHLC inválido/vela abierta; gaps clasificados; captura termina ≤5 min antes del replay. No usar feed patcher ni snapshot stale como datos del experimento. |
 | **P1.2a — PENDIENTE (costes históricos recuperables)** | Aplicación; read-only, depende de IDs broker exactos disponibles | Cruzar cada fill/cierre con deal/position exactos; recuperar profit, comisión, fee, swap y conversión de moneda disponible. Registrar separadamente campos ausentes y discrepancias. | Muestra elegible con 100% de costes requeridos y PnL reconciliado ≤€0,01 o tolerancia preregistrada; los fills sin bid/ask/tick verificable o sin IDs exactos se excluyen, nunca se imputan por hora/símbolo. |
@@ -92,6 +92,45 @@ esta tabla antes de iniciar la siguiente tarea dependiente.
 | **P4.1 / P6.1 — BLOQUEADOS (edge individual, L5-E2/E3)** | Evaluación independiente; depende de P3.2 | Medir PPO sin Qwen y LLM sin PPO, mismo conjunto, costes, horizonte y splits; fijar versión exacta del bundle y del LLM. | Para cada modelo: LB IC 95% de skill contra mejor benchmark >0 y LB IC 95% de expectancy neta >0 en OOS, con potencia suficiente; sin tuning sobre holdout. |
 | **P5.1 / P7 / P8 — BLOQUEADOS (experimento, alineación y robustez)** | Aplicación + revisión independiente; depende de P4.1/P6.1 | Diseñar un cambio causal por experimento; probar concordancia, regímenes, pares y exposición. | Cero contradicciones ejecutables en muestra aceptada; cada modelo conserva edge por separado; métricas y límites robustos por estrato. Una abstención/HOLD no cuenta como edge. |
 | **P9 — NO AUTORIZADO (shadow/promoción)** | Aprobación explícita separada; depende de P0–P8 | Solicitar decisión de shadow con telemetría y rollback. | Todos los gates aprobados con evidencia vigente y autorización documentada. No entrenar/promover/activar switches bajo este backlog. |
+
+## Backlog B — Desacoplamiento de broker (multibroker)
+
+**Objetivo:** permitir cambiar de broker (MT5-demo → MT5-real u otro) con un cambio de configuración, sin tocar código de negocio ni redeploy. El núcleo de la aplicación depende solo de puertos (`core/ports.py`); la implementación concreta del broker es un detalle de infraestructura seleccionable por variable de entorno.
+
+**Estado actual del acoplamiento (pendiente de resolver):**
+- `core/adapters.py`: `MT5MarketDataAdapter` y `MT5ExecutionDataAdapter` hacen late-binding a `services.mt5_client` en cada llamada.
+- `core/container.py`: `build_registry()` instancia `MT5MarketDataAdapter` y `MT5ExecutionDataAdapter` directamente; no hay fábrica seleccionable por tipo de broker.
+- `services/mt5_client.py`: acoplado al MCP server de MT5 vía `settings.mt5_http_url`; contiene lógica de offset de broker (`_resolve_offset`, `get_candles_with_offset`).
+- Al menos 10 archivos importan `services.mt5_client` directamente, saltándose los puertos: `llm_replay.py`, `position_sizing.py`, `qwen_authority.py`, `strategist.py`, `cross_audit.py`, `ledger.py`, `order_manager.py`, `scripts/audit_qwen_controls.py`, `scripts/measure_gbpusd.py`, `scripts/measure_time_stop_protection.py`.
+- `main.py`, `routers/ai.py`, `routers/smc.py`, `services/equity_curve.py`, `services/daily_ledger.py`, `services/cross_audit.py`, `services/auto_retrain.py`, `services/market_microstructure.py` hacen llamadas HTTP directas a `settings.mt5_http_url` sin pasar por los puertos.
+- `timebase.py` consulta el endpoint de precio y velas de MT5 directamente (`broker_offset_hours`).
+
+| ID / estado | Responsable y dependencias | Trabajo acotado | Criterio de salida |
+|---|---|---|---|
+| **B1.1 — HECHO (2026-10-25)** | Aplicación; independiente | Añadir a `config.Settings`: `broker_type` (`mt5_demo` \| `mt5_real`), `broker_http_url` (str), `broker_timeout` (float). Valor por defecto `broker_type="mt5_demo"` y `broker_http_url=""` (cae a `mt5_http_url`). | `settings.broker_type` leído desde `.env`; tests de config pasan sin cambiar valores por defecto. Suite: 1341 passed, 2 xfailed. |
+| **B1.2 — PENDIENTE** | Aplicación; depende de B1.1 | Documentar en `.env.example` todas las variables de broker con sus valores por defecto y significado. | `.env.example` incluye `BROKER_TYPE`, `BROKER_HTTP_URL`, `BROKER_TIMEOUT`. |
+| **B2.1 — HECHO (2026-10-25)** | Aplicación; depende de B1.1 | Crear `core/broker_factory.py`: función `build_adapters(broker_type)` que devuelva `(MarketDataPort, ExecutionPort)` según el tipo de broker. `mt5_demo` y `mt5_real` devuelven los adaptadores MT5 existentes; cualquier otro valor lanza `ValueError`. | Factory devuelve adaptadores MT5 para ambos tipos; `ValueError` para tipo desconocido; cero import de `services.mt5_client` a nivel de módulo. Tests: 8 nuevos en `test_broker_factory.py`, suite 1349 passed, 2 xfailed. |
+| **B2.2 — HECHO (2026-10-25)** | Aplicación; depende de B2.1 | Añadir `MockBrokerAdapter` en `core/adapters.py` (implementa `MarketDataPort` y `ExecutionPort` con datos deterministas) solo para tests. No es un adaptador de producción. | `MockBrokerAdapter` pasa tests unitarios sin red ni broker. Tests: 10 nuevos en `test_mock_broker_adapter.py`, suite 1359 passed, 2 xfailed. |
+| **B3.1 — HECHO (2026-10-25)** | Aplicación; depende de B2.1 | Modificar `core/container.build_registry()` para usar `broker_factory.build_adapters(settings.broker_type)` en lugar de instanciar `MT5MarketDataAdapter`/`MT5ExecutionDataAdapter` directamente. `broker_type` se lee de settings si no se pasa explícitamente. | `build_registry_from_settings()` construye contextos con adaptadores del broker configurado; cero import directo de `services.mt5_client` en `container.py`. Tests: 4 nuevos en `test_p31a_pair_registry.py`, suite 1363 passed, 2 xfailed. |
+| **B4.1 — HECHO (2026-10-25)** | Aplicación; depende de B3.1 | Migrar `order_manager.py`: usar `pair_ctx.market.get_account()` / `get_positions()` y pasar `pair_ctx.market` a `_total_risk_eur` en lugar de `from services.mt5_client import ...`. | `order_manager.py` no importa `services.mt5_client`; usa puertos del contexto de par. Tests: 1 nuevo en `test_orders_prepare.py`, 6 actualizados en `test_g2_5_portfolio_risk.py`, suite 1364 passed, 2 xfailed. |
+| **B4.2 — HECHO (2026-10-25)** | Aplicación; depende de B3.1 | Migrar `strategist.py` (`_sample_spread` usa `market_port.get_spread`), `position_sizing.py` (`eurusd_price` usa `market_port.get_candles`), `qwen_authority.py` (`_measure` usa `market_port.get_candles_with_offset`). Cada función acepta `market_port=None` (resuelto desde settings si no se inyecta). Añadido `get_candles_with_offset` al `MarketDataPort` y a `MT5MarketDataAdapter`/`MockBrokerAdapter`. | Cero import de `services.mt5_client` en estos 3 archivos. Tests: 6 nuevos + tests existentes actualizados, suite 1370 passed, 2 xfailed. |
+| **B4.3 — HECHO (2026-10-25)** | Aplicación; depende de B3.1 | Migrar `ledger.py` (`_edge_decay_map` usa `market_port.get_candles_with_offset`), `llm_replay.py` (`_candles` usa `market_port.get_candles_with_offset`), `cross_audit.py` (`run_cross_audit` usa `market_port.get_candles_with_offset` en ambos bloques). Cada función acepta `market_port=None` (resuelto desde settings si no se inyecta). | Cero import de `services.mt5_client` en estos 3 archivos. Tests: 4 nuevos (test_t31_ledger.py, test_t31_cross_audit.py, test_llm_replay.py), baseline arquitectura actualizado (2 entradas), suite 1374 passed, 2 xfailed. |
+| **B4.4 — HECHO (2026-10-25)** | Aplicación; depende de B3.1 | Migrar los 3 scripts con imports de `mt5_client` (`audit_qwen_controls.py` → `_measure_symbol`, `measure_gbpusd.py` → `main`, `measure_time_stop_protection.py` → `main`) a usar `market_port` en lugar de `mt5_client` directo. Cada función acepta `market_port=None` (resuelto desde settings si no se inyecta). | Cero import de `services.mt5_client` en estos scripts. Tests: 3 nuevos archivos de test, suite 1380 passed, 2 xfailed. |
+| **B5.1 — HECHO (2026-10-25)** | Aplicación; depende de B3.1 | Migrar `main.py`: el health loop (`_mcp_health_loop(market_port)`) consulta la cuenta vía `market_port.get_account()` del registro en lugar de `httpx` directo a `settings.mt5_http_url`; el lifespan construye el registro una vez (`build_registry_from_settings()`) y lo reusa para guardianes, health loop y equity de arranque. El broker se resuelve por configuración (`settings.broker_type`), sin imports de `services.mt5_client` en `main.py`. | Health loop sin `httpx.AsyncClient` ni `services.mt5_client`; tests: test_main_b51.py (4 nuevos), suite 1384 passed, 2 xfailed. |
+| **B5.2 — HECHO (2026-10-25)** | Aplicación; depende de B3.1 | Migrar `routers/ai.py` y `routers/smc.py` a usar puertos en lugar de llamadas HTTP directas a `settings.mt5_http_url`. | Routers no construyen URLs del MCP directamente; usan `pair_ctx.market`. `predict_direction` y `pipeline_health` usan `ctx.market.get_account()/get_candles()`; `get_analytics` usa `get_deals()/get_account()/get_candles_with_offset()`. `_hf_candles_for_obs`/`_higher_tf_context_line` aceptan tanto `list[dict]` (puerto) como respuestas HTTP legacy. Suite: **1388 passed, 2 xfailed**. |
+| **B6.1 — HECHO (2026-10-25)** | Aplicación; depende de B3.1 | Desacoplar lógica de offset de broker de MT5: la normalización de velas y el cálculo de offset reciben los datos crudos del puerto de mercado, sin consultar MT5 directamente. | `mt5_client.py` no contiene lógica de negocio de offset (`_resolve_offset` eliminado); `normalize_candles` y `get_candles_with_offset` aplican `timebase.current_broker_offset()` en lugar de auto-detectar. |
+| **B6.2 — HECHO (2026-10-25)** | Aplicación; depende de B6.1 | `services/timebase.broker_offset_hours()` obtiene quote/velas a través del `MarketDataPort`, no mediante `httpx` directo a `settings.mt5_http_url`. | `timebase.py` no importa `httpx` para consultar al broker; `broker_offset_hours(symbol, market_port)` usa `market_port.get_price()` y `market_port.get_candles()`. Añadido `get_price(symbol)` al `MarketDataPort` y adaptadores MT5/Mock. `main.py` y `daily_ledger.py` inyectan `market_port`. Suite: **1390 passed, 2 xfailed**. |
+| **B7.1 — HECHO (2026-10-25)** | Aplicación; depende de B2.1–B6.2 | Tests: fábrica de adaptadores, adaptador mock, migración de puertos. TDD: escribir tests antes de la implementación. | Suite completa verde (1390 tests) con `BROKER_TYPE=mt5_demo` y `BROKER_TYPE=mock`. |
+| **B7.2 — HECHO (2026-10-25)** | Operación; documentación | Runbook de cambio de broker: pasos para pasar de MT5-demo a cuenta real (cambio de `.env`, validación de offset, reinicio, verificación en `/health`). | Documento `fastapi/ops/BROKER_CHANGE_RUNBOOK.md` creado. |
+
+**Reglas de oro (no negociables):**
+1. El núcleo (`core/`, `services/` de negocio) depende solo de `core.ports.*`, nunca de `services.mt5_client`.
+2. `settings.mt5_http_url` sigue existiendo para retrocompatibilidad pero deja de ser la única URL de broker; `BROKER_TYPE` y `BROKER_HTTP_URL` son la fuente de verdad.
+3. Sin hardcode de tipo de broker en ningún archivo de negocio; el tipo se lee una vez en el container y se propaga via adaptadores.
+4. Los tests deben poder ejecutarse con `BROKER_TYPE=mock` sin broker ni red.
+5. No se modifica código de ejecución real hasta que B1–B6 estén implementados y tests verdes.
+6. TDD: escribir tests antes de implementar cada tarea (B2.1, B3.1, B4.x, B5.x, B6.x).
+7. Sin adaptadores PaperTrading ni otros modos de broker no solicitados: solo `mt5_demo` y `mt5_real` son tipos de producción; `mock` es solo para tests.
 
 **Definiciones de estado:** `HECHO` = artefacto/acción reproducible disponible;
 `PARCIAL` = evidencia incompleta; `PENDIENTE` = no iniciado; `BLOQUEADO` =
@@ -111,9 +150,10 @@ gate no superado», no fallo de ejecución. No se asignan fechas objetivo.
 
 ## Backlog priorizado
 
-El backlog conserva los diez gates P0–P9. La tabla resume su orden; el
-desglose atómico inmediatamente posterior define la ejecución y la trazabilidad.
-Estado de este desglose: **2026-10-23**. El estado vigente y el siguiente orden
+El backlog conserva los diez gates P0–P9. La tabla resume su orden; la
+ejecución y la trazabilidad usan los IDs atómicos de **«Backlog ejecutable»**
+(corte 2026-10-25): `P0.2 = P0.2a + P0.2b + P0.2c`, `P1.1 = P1.1a + P1.1b +
+P1.1c` y `P1.2 = P1.2a + P1.2b`. El estado vigente y el siguiente orden
 ejecutable constan en «Estado ejecutivo vigente»; no se asignan fechas objetivo
 ni se presuponen resultados no medidos.
 
@@ -138,6 +178,12 @@ no se presenta como prueba de edge. La observación PPO de
 holdout negativa con **n=16** es insuficiente para inferencia concluyente, pero
 sí impide promoción: no se puede convertir en un caso de mejora relativa ni
 reutilizar como holdout después de haberlo inspeccionado.
+
+**Mapeo de IDs:** las filas P0.2, P1.1 y P1.2 de este desglose se ejecutan y
+se cierran con sus subtareas atómicas de «Backlog ejecutable»: P0.2a (identidad
+del fill natural), P0.2b (ruta no requerida) y P0.2c (snapshot/conciliación);
+P1.1a (hardening del reloj), P1.1b (ventana de mercado) y P1.1c (snapshot);
+P1.2a (costes históricos recuperables) y P1.2b (instrumentación futura).
 
 | Tarea | Trabajo atómico y criterio de aceptación | Dependencias | Responsable por rol |
 |---|---|---|---|
@@ -808,7 +854,9 @@ la actualización del inventario, no la reconciliación ni P0.2.
 La revisión de runtime volvió a observar MT5 conectado y reloj sin validar ni
 persistir (`offset_h=null`); nuevas órdenes y replay siguen bloqueados. El
 puente remoto `history/orders` se reclasificó en el backlog como dependencia
-externa, no como tarea de modificación/diagnóstico de esta aplicación.
+externa, no como tarea de modificación/diagnóstico de esta aplicación
+(posteriormente, el 2026-10-25, pasó a «no requerido»: `deals.order` cubre el
+enlace; ver «Avance — P0.2a»).
 
 También se comprobó en código la brecha de horizonte: el prompt Qwen pide
 probabilidad de precio más alto en 24h; el reward PPO vigente usa
@@ -823,8 +871,10 @@ común P2.1 y al nuevo dataset OOS P3.1, sin retocar el bundle.
 actualizados, pero su criterio de conciliación sigue fallando; el backlog
 ahora separa ese subresultado del cierre de P0.2 y de la dependencia externa.
 Las tareas P0.2a (esperar un fill natural) y P1.1/P1.2 siguen bloqueadas por
-evidencia que no puede fabricarse en código. La secuencia y los criterios de
-salida actualizados están en la tabla **Backlog ejecutable** anterior.
+evidencia que no puede fabricarse en código (el mismo 2026-10-25 se verificó
+la identidad del fill v14.3; ver «Avance — P0.2a»). La secuencia y los
+criterios de salida actualizados están en la tabla **Backlog ejecutable**
+anterior.
 
 **Validación de este trabajo:** el reconciliador produjo su reporte read-only
 con salida esperada 2 (`UNRECONCILED`); `/health` sigue `degraded`. La suite
@@ -848,9 +898,10 @@ el 69,6% histórico del LLM, no demuestran edge ni autoridad para H=20.
 4. P1.2a puede avanzar en paralelo únicamente para deals/posiciones con IDs
    exactos; P1.2b añade lineage de costes para observaciones futuras mediante
    cambio coordinado EA/backend y versión EA nueva.
-5. Cerrar P0.2 con fill natural enlazado, reconciliación completa y evidencia
-   de capital; no crear operaciones de prueba. El bridge permanece fuera del
-   ámbito de esta aplicación.
+5. Cerrar P0.2 con la identidad ya verificada del fill v14.3, la conciliación
+   completa (posición exacta / agregado) y la evidencia de capital; no crear
+   operaciones de prueba. `history/orders` no se usa: el enlace deal→orden se
+   obtiene de `history/deals`.
 6. Con datos aceptados, cerrar P2.1 y L1 para H=20; medir L2 en desarrollo,
    congelar el protocolo/holdout nuevo en P0.3 y luego generar P1.3/P3.1.
 7. Calcular potencia; solo entonces ejecutar E2/E3 (PPO y LLM por separado),
@@ -865,6 +916,111 @@ un nuevo corte de reconciliación DB.
 
 **Estado de cierre:** no cambia ningún gate por esta alineación documental:
 P0/P0.3 siguen NO-GO; P1.1/P1.2/P3.1 no aceptados; no hay edge H=20 demostrado
-para PPO ni LLM. Sin cambios funcionales, DB, órdenes, EA, bundle o bridge. La
-memoria local `audits/memoria-de-trabajo.md` recibió el mismo estado y secuencia;
-ese directorio está ignorado por Git y no se fuerza su inclusión.
+para PPO ni LLM. La identidad del fill v14.3 queda verificada y P0.2b se
+reclasifica como ruta no requerida, pero el gate P0.2 sigue ABIERTO por las
+filas sin clave y el capital. Sin cambios funcionales, DB, órdenes, EA, bundle
+o bridge. La memoria local `audits/memoria-de-trabajo.md` recibió el mismo
+estado y secuencia; ese directorio está ignorado por Git y no se fuerza su
+inclusión.
+
+## Avance — P0.2a: la cadena exacta se cierra sin `history/orders` (2026-10-25)
+
+Verificación **read-only** sobre el fill posterior a v14.3 que ya estaba en la
+base de datos. La huella de versión es el propio payload: `opening_order_ticket`
+se introdujo con la EA v14.3 (commit `b66e933`) y solo ese webhook escribe
+`orders.mt5_order_id`. La cadena comprobada, sin joins temporales ni
+heurísticas, es:
+
+`orders.id` → `orders.mt5_order_id` (= `order` del deal de apertura) →
+`position_id` (= `orders.mt5_position_id`) → deal de cierre (`ticket` =
+`trade_outcomes.deal_ticket`) → `trade_outcomes.order_db_id`.
+
+Comprobaciones, todas verdaderas:
+
+- comentario del deal de apertura exactamente `AIQ:<orders.id>`;
+- `magic` del EA en el deal de apertura;
+- `order` del deal de apertura = `orders.mt5_order_id`;
+- `position_id` del deal = `orders.mt5_position_id`;
+- `ticket` del deal de cierre = `trade_outcomes.deal_ticket`;
+- PnL neto del deal (`profit+swap+commission+fee`) idéntico al almacenado;
+- `trade_outcomes.order_db_id` poblado.
+
+Reproducción (solo lectura): `GET {MT5_HTTP_URL}/api/v1/history/deals` con
+rango y símbolo, y `SELECT … FROM orders o JOIN trade_outcomes t ON
+t.order_db_id=o.id` dentro de una transacción `READ ONLY`.
+
+**Hallazgo de método:** en un deal de **cierre**, `order` es el ticket de la
+orden de cierre, no el de apertura. Un auditor que compare `deal["order"]`
+contra `orders.mt5_order_id` en todos los deals no puede encontrar los cierres.
+La corrección es determinista: emparejar cada cierre con el deal de apertura de
+su mismo `position_id` y usar el `order`/`comment` de ese deal.
+
+**Consecuencia:** `history/deals` entrega `order` y `position_id` en el 100% de
+los deals de la muestra (37/37), así que `history/orders` no añade nada al
+enlace deal→orden. P0.2b se reclasifica como ruta no requerida y deja de
+bloquear P0.2. El gate P0.2 sigue **ABIERTO**: quedan las 121/211 filas sin
+clave de bróker, la conciliación de capital contra extractos y el requisito de
+horas con offset validado (P1.1).
+
+## Avance — P1.1a: el reloj solo acepta fuentes contemporáneas y persistidas (2026-10-25)
+
+TDD: primero `fastapi/tests/test_timebase_hardening.py` (7 tests), después el
+productor. **Rojo**: 4 de los 7 tests fallaron y demostraron tres defectos
+reales en `services/timebase.py`:
+
+1. **Una cotización vieja se usaba como reloj.** El sello del endpoint de
+   precio se restaba del reloj real y se redondeaba a horas enteras; una
+   cotización de 30 min producía un offset "plausible" (2 h) y se validaba.
+   La prueba del defecto usa una cotización de 30 min con un offset aparente
+   de 3 h: el código anterior publicaba 2 h.
+2. **Las dos fuentes no se contrastaban.** Si el precio respondía, la vela H1
+   ni se consultaba: dos dominios incompatibles (precio 3 h vs H1 2 h) no se
+   detectaban nunca. El código anterior se quedaba con la primera.
+3. **El offset se publicaba antes de persistirse.** Un fallo de DB dejaba
+   `validated=true` y la caché envenenada con un valor que no sobrevivía a un
+   reinicio (y el fallo solo se registraba en el log). Además, si ya había un
+   offset válido, la medición nueva lo sustituía aunque la persistencia
+   fallara.
+
+**Hardening aplicado (mínimo, sin tocar consumidores):**
+
+- `_offset_from_price()`: rechaza sellos fuera de ±12 h y cotizaciones cuya
+  edad (resto entero de hora) supere `QUOTE_MAX_AGE_S = 300 s`.
+- `broker_offset_hours()`: consulta **ambas** fuentes y exige coincidencia
+  cuando las dos responden; si discrepan, no se acepta ninguna y se conserva
+  el último offset conocido. `CANDLE_MAX_AGE_S = 2 h` se mantiene como
+  frontera de la vela H1 (ahora como constante explícita).
+- Orden de publicación: `persist_broker_offset` → `set_broker_offset` →
+  `mark_broker_offset_persisted` → caché. Un fallo de DB (`DB_ERRORS`)
+  devuelve el offset anterior y deja intactos `_KNOWN_OFFSET` y
+  `_OFFSET_CACHE`.
+
+**Límite conocido y declarado:** el desfase son horas enteras, así que una
+única fuente congelada justo después de un cambio de hora puede confundirse
+con el offset anterior (ventana de ±5 min alrededor de 1 h, ±1 h alrededor de
+2 h…). El consenso quote/H1 lo reduce (ambas fuentes tendrían que congelarse
+en la misma frontera de hora) y la caché de 300 s obliga a remedir, pero no se
+puede eliminar con una sola muestra. No se fija offset ni calendario DST.
+
+**Ajuste de una prueba pre-existente (no funcional):**
+`test_pack_1_4_prompt_context.py::test_candles_fetch_requests_240` asumía que
+el primer GET de velas era el del router. Al dejar de cachear la ausencia de
+medición, el sondeo del reloj (`services/timebase`, URL sin query) pasa a ser
+el primero en el arranque. La prueba ahora exige que **alguna** petición pida
+`count=240`, que es su intención declarada. Se comprobó que el fallo ya existía
+con `services/timebase.py` en HEAD al ejecutar el fichero aislado; la suite
+completa en HEAD da **1328 passed, 2 xfailed**.
+
+**Evidencia:**
+
+- `pytest tests/ -q` → **1335 passed, 2 xfailed** (1328 + 7 nuevos).
+- Read-only contra el feed real (2026-10-25 16:18:31Z, mercado cerrado):
+  precio `2026-10-23T23:59:57Z` → descartado por implausible (−40 h);
+  vela H1 con edad +41,3 h → descartada; `quote → None`, `h1 → None`,
+  `validated=false`, `persisted=false`, `_OFFSET_CACHE` intacta.
+- Sin cambios de DB, órdenes, EA, bundle, bridge ni calendario. El contenedor
+  desplegado sigue en la build anterior hasta que se decida reconstruir.
+
+**Consecuencia:** P1.1a cierra el código; P1.1b sigue **BLOQUEADO** por ventana
+de mercado. El gate P1.1 no se acepta hasta que una cotización fresca y una H1
+contemporánea coincidan, el offset se persista y `/health` quede `ok`.

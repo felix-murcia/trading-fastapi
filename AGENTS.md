@@ -62,13 +62,13 @@ curl http://localhost:8090/docs
 
 ## CodeGraph
 
-`.codegraph/` exists. Use `codegraph explore "<question>"` or `codegraph node <symbol>` before grep/find when tracing call paths or understanding structure.
+`.codegraph/` exists. Use `codegraph sync` Use `codegraph explore "<question>"` or `codegraph node <symbol>` before grep/find when tracing call paths or understanding structure.
 
 ## Instruction Files
 
 - `CLAUDE.md` — Félix's working philosophy (simplicity, surgical changes, zero ambiguity, no invention).
 - `PROTOCOLO_ANTI_BUCLE.md` — Pre-change checklist and current system state.
-- `.claude/ARQUITECTURA-V4.md` — Detailed architecture history and n8n workflow integration.
+
 
 ## Custom Agents
-- `.opencode/agents/trading-auditor.md` — Agente `trading-auditor` (OpenCode): Forex Quant Auditor & AI Trading Architect. Experto en auditoría y optimización integral de sistemas de Trading Forex algorítmico, IA aplicada a mercados financieros, validación estadística, gestión del riesgo, MLOps, Arquitectura Hexagonal y principios SOLID. Modo `all`: seleccionable como agente principal o lanzado como subagente. (`TRADING_AGENT.md` es solo un puntero a este fichero.)
+- `.opencode/agents/trading-auditor.md` — Agente `trading-auditor` (OpenCode): Forex Quant Auditor & AI Trading Architect. Experto en auditoría y optimización integral de sistemas de Trading Forex algorítmico, IA aplicada a mercados financieros, validación estadística, gestión del riesgo, MLOps, Arquitectura Hexagonal y principios SOLID. Modo `all`: seleccionable como agente principal o lanzado como subagente.

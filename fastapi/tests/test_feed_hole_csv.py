@@ -107,6 +107,33 @@ class TestFillFeedHole:
         gaps_h = np.diff(times.values) / np.timedelta64(1, "h")
         assert float(gaps_h.max()) <= 168.0, f"el merge dejó un salto de {gaps_h.max()}h"
 
+    def test_agujero_con_tiempos_epoch_tambien_se_parcha(self, tmp_path, monkeypatch):
+        """El puerto de mercado entrega `time` en EPOCH de segundos (B5.2).
+
+        Regresión real: `pd.to_datetime` interpreta un entero como
+        NANOSEGUNDOS por defecto ⇒ un salto de 480 h se leía como 480 ns, la
+        guarda `>168 h` no disparaba y el CSV nunca reparaba el feed (fallo
+        silencioso). Epoch e ISO deben producir el MISMO parche.
+        """
+        monkeypatch.setattr(routers.ai.settings, "csv_history_dir", str(tmp_path))
+        _write_csv(tmp_path, "EURUSD", "H1", [
+            ("2026.10.11T20:00:00", 1.15),
+            ("2026.10.11T21:00:00", 1.16),
+        ])
+        candles = _mk_candles([
+            ("2025-12-31T22:00:00Z", 1.17),
+            ("2025-12-31T23:00:00Z", 1.18),
+            ("2026-10-12T00:00:00Z", 1.19),
+        ])
+        for c in candles:                       # mismo feed, sello epoch
+            c["time"] = int(pd.Timestamp(c["time"]).timestamp())
+        out = routers.ai._fill_feed_hole(candles, "EURUSD", "H1")
+        times = {c["time"] for c in out}
+        # el bloque viejo desaparece: el hueco de 480 h SÍ se detectó
+        assert 1767222000 not in times          # 2025-12-31T23:00:00Z
+        assert "2026-10-11T20:00:00Z" in times  # CSV (fuente histórica)
+        assert "2026-10-12T00:00:00Z" in times  # día vivo (ISO al fusionar)
+
     def test_csv_ausente_feed_intacto(self, tmp_path, monkeypatch):
         """Sin CSV para el símbolo → el feed pasa intacto (degradación honesta)."""
         monkeypatch.setattr(routers.ai.settings, "csv_history_dir", str(tmp_path))

@@ -58,27 +58,41 @@ async def get_prices() -> dict:
     return result
 
 
+async def get_price(symbol: str) -> dict:
+    """Payload completo del endpoint de precio (incluye `time` del servidor).
+
+    Usado por `timebase.broker_offset_hours` para medir el offset del bróker
+    sin consultar httpx directamente desde la base de tiempos.
+    """
+    data = await _get(f"/api/v1/market/price/{symbol}")
+    return data if isinstance(data, dict) else {}
+
+
 async def get_spread(symbol: str) -> float:
     data = await _get(f"/api/v1/market/price/{symbol}")
     return float(data.get("ask", 0.0)) - float(data.get("bid", 0.0))
 
 
 async def get_candles_with_offset(symbol: str, timeframe: str, count: int):
-    """Velas en UTC real + el desfase broker→UTC aplicado (para alinear marcas
-    que vienen en el reloj del broker).
+    """Velas normalizadas a UTC real + el desfase conocido del bróker.
 
     T-31 (2026-10-20): el `mt5_time` del audit lo manda el EA y está en el
-    RELOJ DEL BROKER (+3 h medidos), NO en UTC real (ej: ciclo creado a las
-    10:10 UTC → mt5_time 13:10). Las velas del MCP también venían en reloj
-    de broker. Al normalizar SÓLO las velas, la medición quedaba
-    desalineada 3 h ⇒ las cifras de skill publicadas eran basura.
+    RELOJ DEL BROKER (+3 h medidos), NO en UTC real. Las velas del MCP
+    también venían en reloj de broker. Al normalizar SÓLO las velas, la
+    medición quedaba desalineada 3 h.
 
     Aquí se devuelven AMBAS cosas: las velas ya en UTC real y el desfase
     aplicado, para que el consumidor alinee sus marcas (mt5_time − offset).
+
+    B6.1 (2026-10-25): esta función NO detecta el desfase — eso lo hace
+    `services.timebase.broker_offset_hours()` a través del puerto de mercado.
+    Aquí solo se aplica el offset ya conocido (`timebase.current_broker_offset()`);
+    si aún no se ha detectado, el desfase es 0 (sin corrección).
     """
     import httpx
     from config import settings
-    from services.market_time import broker_offset_hours_from_candles, correct_candle_epoch
+    from services.market_time import correct_candle_epoch
+    from services import timebase
 
     async with httpx.AsyncClient(timeout=settings.mt5_http_timeout) as c:
         r = await c.get(
@@ -94,7 +108,7 @@ async def get_candles_with_offset(symbol: str, timeframe: str, count: int):
             return float(t)
         return dt.datetime.fromisoformat(str(t).replace("Z", "+00:00")).timestamp()
 
-    offset_h = await _resolve_offset(symbol, timeframe, raw)
+    offset_h = timebase.current_broker_offset()
     candles = sorted(
         (
             {
@@ -120,31 +134,13 @@ async def get_candles(symbol: str, timeframe: str, count: int) -> list[dict]:
     return await normalize_candles(candles, symbol, timeframe)
 
 
-async def _resolve_offset(symbol: str, timeframe: str, raw: list) -> int:
-    """Desfase broker→UTC para normalizar una serie.
+async def get_deals() -> list[dict]:
+    """Historial de cierres (deals) del bróker.
 
-    Orden de preferencia (T-31.9, 2026-10-20):
-      1. el desfase YA CONOCIDO (reloj del servidor, cacheado) ⇒ es el del
-         SERVIDOR y vale para cualquier marco;
-      2. si no se conoce y la serie es H1: deducirlo de la vela en
-         formación (y publicarlo en la base de tiempos canónica);
-      3. si no se conoce y el marco NO es H1: 0 (sin corrección) — antes se
-         deducía de la última vela del marco y devolvía BASURA (+1 h en H4,
-         −19 h en D1) que envenenaba la caché global ⇒ el día de la cuenta
-         (riesgo) podía quedar 19 h descuadrado.
+    Usado por el endpoint de analítica SMC para el PnL diario.
     """
-    from services.market_time import broker_offset_hours_from_candles
-    from services.timebase import current_broker_offset, set_broker_offset
-
-    known = current_broker_offset()
-    if known:
-        return known
-    if str(timeframe).upper() != "H1":
-        return 0
-    offset_h = broker_offset_hours_from_candles(raw, timeframe="H1")
-    if offset_h:
-        set_broker_offset(offset_h, source="velas_h1")
-    return offset_h
+    data = await _get("/api/v1/history/deals")
+    return data if isinstance(data, list) else []
 
 
 async def normalize_candles(candles: list, symbol: str = "EURUSD",
@@ -153,14 +149,12 @@ async def normalize_candles(candles: list, symbol: str = "EURUSD",
 
     T-31 (2026-10-19): el feed sella las velas con el reloj del BROKER
     (+3 h medidos) marking them "Z" ⇒ cualquier emparejamiento con marcas
-    del EA/DB (UTC real) quedaba desplazado 3 h. Se corrige con el
-    auto-corrector ya probado (services/market_time, P2-3): el desfase se
-    deduce de la vela más reciente (la formándose) y se aplica a todas.
+    del EA/DB (UTC real) quedaba desplazado 3 h. Se corrige aplicando el
+    desfase ya conocido (`timebase.current_broker_offset()`); si aún no se
+    ha detectado, el desfase es 0 (sin corrección, B6.1).
     """
-    from services.market_time import (
-        broker_offset_hours_from_candles,
-        correct_candle_epoch,
-    )
+    from services.market_time import correct_candle_epoch
+    from services import timebase
 
     def _to_ts(t) -> int:
         if isinstance(t, (int, float)):
@@ -168,7 +162,7 @@ async def normalize_candles(candles: list, symbol: str = "EURUSD",
         from datetime import datetime
         return int(datetime.fromisoformat(str(t).replace("Z", "+00:00")).timestamp())
 
-    offset_h = await _resolve_offset(symbol, timeframe, candles)
+    offset_h = timebase.current_broker_offset()
     if offset_h:
         logger.warning(
             "[MT5] Sello de velas con desfase broker→UTC de %+d h → normalizado a UTC real",

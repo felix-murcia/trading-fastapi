@@ -10,6 +10,13 @@ class Settings(BaseSettings):
     hmac_secret: str
     mt5_http_url: str = "http://localhost:8000"
     mt5_http_timeout: float = 10.0
+    # B1.1 — Tipo de broker seleccionable por variable de entorno.
+    # mt5_demo = cuenta demo actual (comportamiento por defecto).
+    # mt5_real = cuenta real; se cambia solo editando .env, sin tocar código.
+    broker_type: Literal["mt5_demo", "mt5_real", "mock"] = "mt5_demo"
+    # URL del broker. Vacío = usar mt5_http_url (comportamiento actual).
+    broker_http_url: str = ""
+    broker_timeout: float = 10.0
     min_volume: float = 0.01
     max_volume: float = 0.50
     max_total_positions: int = 5   # P2-4: exposición agregada de TODA la cuenta (todas las estrategias y pares)

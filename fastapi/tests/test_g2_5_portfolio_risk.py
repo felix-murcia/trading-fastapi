@@ -24,6 +24,7 @@ import pytest
 import services.risk_guardian as rg
 from services.risk_guardian import RiskGuardian
 from services.order_manager import _total_risk_eur
+from core.adapters import MT5MarketDataAdapter
 
 
 @pytest.fixture
@@ -106,7 +107,7 @@ class TestTotalRiskComputation:
 
     @pytest.mark.asyncio
     async def test_empty_positions_is_zero(self):
-        risk, err = await _total_risk_eur([], 5000.0)
+        risk, err = await _total_risk_eur([], 5000.0, MT5MarketDataAdapter())
         assert (risk, err) == (0.0, "")
 
     @pytest.mark.asyncio
@@ -118,7 +119,7 @@ class TestTotalRiskComputation:
         ]
         with patch("services.mt5_client.get_candles",
                    AsyncMock(return_value=[{"close": 1.33}])):
-            risk, err = await _total_risk_eur(pos, 455.0)
+            risk, err = await _total_risk_eur(pos, 455.0, MT5MarketDataAdapter())
         assert err == ""
         assert risk == pytest.approx(2 * 50.0 / 1.33, rel=1e-6)
 
@@ -128,7 +129,7 @@ class TestTotalRiskComputation:
         with caplog.at_level(logging.WARNING, logger="services.order_manager"):
             with patch("services.mt5_client.get_candles",
                        AsyncMock(return_value=[{"close": 1.33}])):
-                risk, err = await _total_risk_eur(pos, 455.0)
+                risk, err = await _total_risk_eur(pos, 455.0, MT5MarketDataAdapter())
         assert err == ""
         # Fail-closed: contado al máximo teórico (equity × ppo_risk_pct)
         assert risk == pytest.approx(455.0 * rg.settings.ppo_risk_pct)
@@ -140,7 +141,7 @@ class TestTotalRiskComputation:
         with caplog.at_level(logging.WARNING, logger="services.order_manager"):
             with patch("services.mt5_client.get_candles",
                        AsyncMock(return_value=[{"close": 1.33}])):
-                risk, err = await _total_risk_eur(pos, 500.0)
+                risk, err = await _total_risk_eur(pos, 500.0, MT5MarketDataAdapter())
         assert err == ""
         assert risk == pytest.approx(500.0 * rg.settings.ppo_risk_pct)
 
@@ -149,7 +150,7 @@ class TestTotalRiskComputation:
         pos = [{"symbol": "EURUSD", "volume": 0.10, "price": 1.33, "sl": 1.32}]
         with patch("services.mt5_client.get_candles",
                    AsyncMock(side_effect=RuntimeError("feed caído"))):
-            risk, err = await _total_risk_eur(pos, 455.0)
+            risk, err = await _total_risk_eur(pos, 455.0, MT5MarketDataAdapter())
         assert err == "RISK_RATE_UNAVAILABLE"  # no se mide ⇒ no se añade
         assert risk == 0.0
 
@@ -160,7 +161,7 @@ class TestTotalRiskComputation:
         pos = [{"symbol": "GBPUSD", "volume": 0.10, "price": 1.3400, "sl": 1.3350}]
         with patch("services.mt5_client.get_candles",
                    AsyncMock(return_value=[{"close": 1.33}])):
-            risk, err = await _total_risk_eur(pos, 455.0)
+            risk, err = await _total_risk_eur(pos, 455.0, MT5MarketDataAdapter())
         assert err == ""
         assert risk == pytest.approx(50.0 / 1.33, rel=1e-6)
 

@@ -128,3 +128,17 @@ class TestLiveTrackRecordWinRule:
         assert "pnl >= $2" in pool.query
         assert "pnl < $2" in pool.query
         assert pool.args[1] == 3.0
+
+
+# ─── B4.2: desacoplamiento de broker ──────────────────────────────────────────
+
+class TestB42LedgerNoMt5ClientDirectImport:
+    """services/ledger.py no importa services.mt5_client directamente."""
+
+    def test_no_module_level_import_of_mt5_client(self):
+        """El módulo ledger no hace `from services import mt5_client` ni `from services.mt5_client import`."""
+        import services.ledger as ledger_mod
+        source = open(ledger_mod.__file__).read()
+        assert "from services import mt5_client" not in source
+        assert "from services.mt5_client import" not in source
+        assert "import services.mt5_client" not in source

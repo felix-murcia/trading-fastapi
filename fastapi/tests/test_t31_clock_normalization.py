@@ -214,3 +214,40 @@ class TestRetrainKeepsBrokerClock:
             "el retrain debe conservar el sello del broker (alinea con los "
             "outcomes, que viven en el mismo reloj)"
         )
+
+
+class TestCandleTimeSeries:
+    """`candle_time_series`: un solo dominio temporal para las guardas.
+
+    Los sellos circulan en dos formatos a propósito (epoch de segundos del
+    puerto de mercado, ISO del MCP crudo/CSV). Parsear un entero con
+    `pd.to_datetime` sin `unit` lo lee como NANOSEGUNDOS: un hueco de 480 h
+    pasa a 480 ns y cualquier guarda de continuidad (>168 h) queda ciega.
+    """
+
+    def test_epoch_e_iso_producen_el_mismo_instante(self):
+        from services.market_time import candle_time_series
+
+        iso = ["2026-10-12T00:00:00Z", "2026-10-12T01:00:00Z"]
+        epoch = [int(dt.datetime.fromisoformat(t.replace("Z", "+00:00")).timestamp())
+                 for t in iso]
+        a = candle_time_series(iso)
+        b = candle_time_series(epoch)
+        assert list(a) == list(b)
+        assert str(a.dtype) == "datetime64[ns, UTC]"
+
+    def test_epoch_mide_horas_reales_no_nanosegundos(self):
+        from services.market_time import candle_time_series
+
+        t0 = 1767222000          # 2025-12-31T23:00:00Z
+        times = candle_time_series([t0, t0 + 480 * 3600])
+        gap_h = (times.iloc[1] - times.iloc[0]).total_seconds() / 3600
+        assert gap_h == 480.0
+
+    def test_no_convertible_es_nat_nunca_invencion(self):
+        from services.market_time import candle_time_series
+
+        times = candle_time_series(["2026-10-12T00:00:00Z", "no-es-fecha", None])
+        assert not bool(times.isna().iloc[0])
+        assert bool(times.isna().iloc[1])
+        assert bool(times.isna().iloc[2])

@@ -61,6 +61,14 @@ logger = logging.getLogger(__name__)
 _OFFSET_CACHE: dict = {"offset_h": 0, "ts": 0.0}
 OFFSET_TTL_S = 300.0
 
+# P1.1a (2026-10-25): una fuente de reloj solo vale si es CONTEMPORÁNEA.
+# · cotización del servidor: ≤5 min (el último tick de una sesión cerrada o de
+#   un feed congelado no mide el reloj);
+# · vela H1 cerrada: ≤2 h (la vela viva es la hora en curso, así que su sello
+#   nunca puede ir por detrás; se usa como frontera superior conservadora).
+QUOTE_MAX_AGE_S = 300.0
+CANDLE_MAX_AGE_S = 2 * 3600.0
+
 # Desfase CONOCIDO (último detectado). Lo consultan los módulos SÍNCRONOS
 # (el guardián de riesgo, que no puede esperar a una llamada de red):
 # `current_broker_offset()` devuelve el último valor conocido (0 si nunca se
@@ -131,98 +139,141 @@ def mark_broker_offset_persisted(offset_h: int) -> None:
         _KNOWN_OFFSET["persisted"] = True
 
 
-async def broker_offset_hours(symbol: str = "EURUSD") -> int:
+async def broker_offset_hours(symbol: str = "EURUSD",
+                               market_port: Optional[object] = None) -> int:
     """Desfase del reloj del BRÓKER (horas enteras) respecto al UTC real.
 
-    Detección por el reloj del propio servidor (endpoint de precio): es
-    inequívoca y NO depende del minuto de la hora (a diferencia del método
-    del punto medio de la vela). Si el endpoint no responde, se cae a la
-    detección por la vela más reciente (aritmética de hora) y, en último
-    caso, al desfase cacheado.
+    Contrato (P1.1a, 2026-10-25; B6.2, 2026-10-25):
+
+      · `market_port` (obligatorio en código nuevo) provee `get_price(symbol)`
+        y `get_candles(symbol, "H1", 3)`; no se consulta httpx directamente.
+      · una cotización de más de `QUOTE_MAX_AGE_S` (precio) o `CANDLE_MAX_AGE_S`
+        (vela) no es una medición del reloj;
+      · si ambas responden y NO coinciden, el dominio de las dos no es el
+        mismo ⇒ no se acepta ninguna (no se elige la más cómoda);
+      · el valor solo se publica DESPUÉS de persistirse: un fallo de DB no
+        valida ni cachea nada y se conserva el último offset conocido.
     """
     now = time.time()
     cached_offset = int(_OFFSET_CACHE["offset_h"])
     if (now - _OFFSET_CACHE["ts"] < OFFSET_TTL_S
             and abs(cached_offset) <= 12):
         return cached_offset
-    offset_h: Optional[int] = None
-    source = "endpoint_precio"
+
+    quote_offset: Optional[int] = None
     try:
-        import httpx
-        from config import settings
-        async with httpx.AsyncClient(timeout=6.0) as c:
-            r = await c.get(f"{settings.mt5_http_url}/api/v1/market/price/{symbol}")
-            srv = r.json().get("time") if r.status_code == 200 else None
-        if srv:
-            if isinstance(srv, (int, float)):
-                srv_ts = float(srv)
-            else:
-                srv_ts = dt.datetime.fromisoformat(
-                    str(srv).replace("Z", "+00:00")).timestamp()
-            offset_h = int(round((srv_ts - time.time()) / 3600.0))
-            if abs(offset_h) > 12:
-                logger.warning(
-                    "[TIMEBASE] Timestamp de precio no contemporáneo o "
-                    "implausible (%+d h); se prueba la vela H1", offset_h,
-                )
-                offset_h = None
+        price_payload = await market_port.get_price(symbol)
+        quote_offset = _offset_from_price(price_payload, now)
     except LOOP_ERRORS:  # noqa: BLE001 — el desfase NUNCA tumba una operación
-        offset_h = None
-    if offset_h is None:
-        try:
-            offset_h = await _offset_from_candles(symbol)
-            if offset_h is not None:
-                source = "velas_h1"
-        except LOOP_ERRORS:  # noqa: BLE001
-            offset_h = None
-        if offset_h is not None and abs(offset_h) > 12:
-            logger.warning(
-                "[TIMEBASE] Desfase H1 implausible (%+d h); se conserva "
-                "el último desfase conocido", offset_h,
+        logger.warning("[TIMEBASE] Sin sello de precio para medir el reloj")
+        quote_offset = None
+
+    candles_offset: Optional[int] = None
+    try:
+        raw_candles = await market_port.get_candles(symbol, "H1", 3)
+        now_utc = dt.datetime.now(dt.timezone.utc)
+        candles_offset = _offset_from_candles(raw_candles, now=now_utc)
+    except LOOP_ERRORS:  # noqa: BLE001
+        logger.warning("[TIMEBASE] Sin vela H1 para medir el reloj")
+        candles_offset = None
+    if candles_offset is not None and abs(candles_offset) > 12:
+        logger.warning(
+            "[TIMEBASE] Desfase H1 implausible (%+d h); se descarta la fuente",
+            candles_offset,
+        )
+        candles_offset = None
+
+    offset_h: Optional[int] = None
+    source = ""
+    if quote_offset is not None and candles_offset is not None:
+        if quote_offset == candles_offset:
+            offset_h, source = quote_offset, "endpoint_precio+h1"
+        else:
+            logger.error(
+                "[TIMEBASE] Fuentes de reloj incompatibles (precio %+d h vs "
+                "H1 %+d h): no se acepta ninguna; se conserva el último "
+                "conocido (%+d h)",
+                quote_offset, candles_offset, current_broker_offset(),
             )
-            offset_h = None
-        if offset_h is None:
-            offset_h = current_broker_offset()
-            source = "ultimo_conocido"
+    elif quote_offset is not None:
+        offset_h, source = quote_offset, "endpoint_precio"
+    elif candles_offset is not None:
+        offset_h, source = candles_offset, "velas_h1"
+
+    if offset_h is None:
+        return current_broker_offset()
+
+    # Persistir PRIMERO: el reloj no se anuncia validado si no sobrevive a un
+    # reinicio. Si la DB falla, `_KNOWN_OFFSET` y la caché quedan intactos.
+    try:
+        from services.broker_clock_store import persist_broker_offset
+        await persist_broker_offset(int(offset_h), source)
+    except DB_ERRORS:
+        logger.exception(
+            "[TIMEBASE] No se pudo persistir el offset medido (%+d h, "
+            "fuente=%s); no se valida ni se cachea — se conserva el conocido "
+            "(%+d h)", offset_h, source, current_broker_offset(),
+        )
+        return current_broker_offset()
+
+    set_broker_offset(int(offset_h), source=source)
+    mark_broker_offset_persisted(int(offset_h))
     _OFFSET_CACHE["offset_h"] = int(offset_h)
     _OFFSET_CACHE["ts"] = now
-    if source != "ultimo_conocido":
-        set_broker_offset(int(offset_h), source=source)
-        try:
-            from services.broker_clock_store import persist_broker_offset
-            await persist_broker_offset(int(offset_h), source)
-        except DB_ERRORS + (RuntimeError,):
-            logger.exception(
-                "[TIMEBASE] No se pudo persistir el offset validado (%+d h)",
-                int(offset_h),
-            )
     return int(offset_h)
 
 
-async def _offset_from_candles(symbol: str = "EURUSD") -> Optional[int]:
+def _offset_from_price(price_payload: dict, now: float) -> Optional[int]:
+    """Desfase deducido del sello del endpoint de precio (UTC real vs bróker).
+
+    `price_payload` es el dict devuelto por `MarketDataPort.get_price(symbol)`.
+    El desfase son horas ENTERAS ⇒ el resto de la división por 3600 s es la
+    edad de la cotización. Si ese resto supera `QUOTE_MAX_AGE_S`, la
+    cotización no es contemporánea y no mide el reloj del servidor.
+    """
+    srv = price_payload.get("time") if price_payload else None
+    if not srv:
+        return None
+    if isinstance(srv, (int, float)):
+        srv_ts = float(srv)
+    else:
+        srv_ts = dt.datetime.fromisoformat(
+            str(srv).replace("Z", "+00:00")).timestamp()
+
+    delta = srv_ts - now
+    offset_h = int(round(delta / 3600.0))
+    if abs(offset_h) > 12:
+        logger.warning(
+            "[TIMEBASE] Timestamp de precio no contemporáneo o implausible "
+            "(%+d h); se descarta la fuente", offset_h,
+        )
+        return None
+    age_s = delta - offset_h * 3600.0
+    if abs(age_s) > QUOTE_MAX_AGE_S:
+        logger.warning(
+            "[TIMEBASE] Cotización no fresca (edad=%+.0f s con %+d h): "
+            "se descarta la fuente", age_s, offset_h,
+        )
+        return None
+    return offset_h
+
+
+def _offset_from_candles(candles: list, now: dt.datetime | None = None) -> Optional[int]:
     """Fallback: deducir el desfase de la vela EN FORMACIÓN (aritmética de
     hora, sin el punto medio ⇒ estable en toda la hora).
 
+    `candles` es la lista cruda devuelta por `MarketDataPort.get_candles()`.
     La vela más reciente está sellada en `floor(hora real) + desfase` ⇒ el
     desfase es la diferencia entre su hora y la hora real. Velas que ya no
     representan la hora viva del bróker no son una medición de offset.
     """
-    import httpx
-    from config import settings
     from services.market_time import broker_offset_hours_from_candles
 
-    async with httpx.AsyncClient(timeout=8.0) as c:
-        r = await c.get(
-            f"{settings.mt5_http_url}/api/v1/market/candles/latest",
-            params={"symbol_name": symbol, "timeframe": "H1", "count": 3},
-        )
-        data = r.json() if r.status_code == 200 else {}
-    raw = data if isinstance(data, list) else data.get("candles", [])
-    if not isinstance(raw, list) or not raw:
+    if not isinstance(candles, list) or not candles:
         return None
 
     newest = None
-    for candle in raw:
+    for candle in candles:
         stamp = candle.get("time") if isinstance(candle, dict) else None
         if stamp is None:
             continue
@@ -246,16 +297,17 @@ async def _offset_from_candles(symbol: str = "EURUSD") -> Optional[int]:
     if newest is None:
         return None
 
-    now_utc = dt.datetime.now(dt.timezone.utc)
-    age_seconds = (now_utc - newest).total_seconds()
-    if age_seconds > 2 * 3600 or age_seconds < -12 * 3600:
+    if now is None:
+        now = dt.datetime.now(dt.timezone.utc)
+    age_seconds = (now - newest).total_seconds()
+    if age_seconds > CANDLE_MAX_AGE_S or age_seconds < -12 * 3600:
         logger.warning(
             "[TIMEBASE] Se descarta la vela H1 no contemporánea "
             "(edad=%+.1f h)", age_seconds / 3600,
         )
         return None
 
-    return int(broker_offset_hours_from_candles(raw, now=now_utc))
+    return int(broker_offset_hours_from_candles(candles, now=now))
 
 
 def to_utc(ts_broker: float, offset_h: int) -> float:

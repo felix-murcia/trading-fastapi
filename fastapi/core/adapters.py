@@ -26,6 +26,10 @@ class MT5MarketDataAdapter:
         from services import mt5_client
         return await mt5_client.get_prices()
 
+    async def get_price(self, symbol: str) -> dict:
+        from services import mt5_client
+        return await mt5_client.get_price(symbol)
+
     async def get_spread(self, symbol: str) -> float:
         from services import mt5_client
         return await mt5_client.get_spread(symbol)
@@ -34,6 +38,10 @@ class MT5MarketDataAdapter:
         from services import mt5_client
         return await mt5_client.get_candles(symbol, timeframe, count)
 
+    async def get_candles_with_offset(self, symbol: str, timeframe: str, count: int) -> tuple[list[dict], float]:
+        from services import mt5_client
+        return await mt5_client.get_candles_with_offset(symbol, timeframe, count)
+
     async def get_positions(self) -> dict:
         from services import mt5_client
         return await mt5_client.get_positions()
@@ -41,6 +49,10 @@ class MT5MarketDataAdapter:
     async def get_candle_open(self, symbol: str, timeframe: str = "H1") -> float:
         from services import mt5_client
         return await mt5_client.get_candle_open(symbol, timeframe)
+
+    async def get_deals(self) -> list[dict]:
+        from services import mt5_client
+        return await mt5_client.get_deals()
 
 
 class MT5ExecutionDataAdapter:
@@ -81,6 +93,102 @@ class AiModelStoreAdapter:
     def reload(self, symbol: str) -> dict:
         from routers import ai
         return ai.reload_inference_artifacts(symbol)
+
+
+class MockBrokerAdapter:
+    """`MarketDataPort` + `ExecutionPort` con datos deterministas (SOLO TESTS).
+
+    B2.2 — Adaptador de prueba para `BROKER_TYPE=mock`. No toca la red ni
+    `services.mt5_client`. Devuelve valores constantes para que los tests de
+    integración puedan ejecutarse sin broker real.
+
+    Nunca se usa en producción: solo `mt5_demo` y `mt5_real` entran por
+    `core.broker_factory.build_adapters`.
+    """
+
+    # ─── MarketDataPort ──────────────────────────────────────────────────────
+
+    async def get_account(self) -> dict:
+        return {"balance": 10000.0, "equity": 10000.0, "currency": "EUR"}
+
+    async def get_prices(self) -> dict:
+        return {"EURUSD": 1.1000, "GBPUSD": 1.2500, "USDCHF": 0.8900}
+
+    async def get_price(self, symbol: str) -> dict:
+        from datetime import datetime, timezone
+        return {
+            "symbol": symbol,
+            "bid": 1.1000,
+            "ask": 1.1002,
+            "time": datetime.now(timezone.utc).isoformat(),
+        }
+
+    async def get_spread(self, symbol: str) -> float:
+        return 1.8  # pips, constante
+
+    async def get_candles(self, symbol: str, timeframe: str, count: int) -> list[dict]:
+        return [
+            {
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "open": 1.1000 + i * 0.0001,
+                "high": 1.1001 + i * 0.0001,
+                "low": 1.0999 + i * 0.0001,
+                "close": 1.1000 + i * 0.0001,
+                "volume": 100.0,
+            }
+            for i in range(count)
+        ]
+
+    async def get_candles_with_offset(self, symbol: str, timeframe: str, count: int) -> tuple[list[dict], float]:
+        candles = [
+            {
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "open": 1.1000 + i * 0.0001,
+                "high": 1.1001 + i * 0.0001,
+                "low": 1.0999 + i * 0.0001,
+                "close": 1.1000 + i * 0.0001,
+                "volume": 100.0,
+            }
+            for i in range(count)
+        ]
+        return candles, 0.0
+
+    async def get_positions(self) -> dict:
+        return {}
+
+    async def get_candle_open(self, symbol: str, timeframe: str = "H1") -> float:
+        return 1.1000
+
+    async def get_deals(self) -> list[dict]:
+        return []
+
+    # ─── ExecutionPort ───────────────────────────────────────────────────────
+
+    async def place_order(
+        self,
+        symbol: str,
+        order_type: str,
+        volume: float,
+        price: float,
+        sl: float,
+        tp: float,
+        comment: str = "",
+    ) -> dict:
+        return {
+            "ticket": 999999,
+            "symbol": symbol,
+            "type": order_type,
+            "volume": volume,
+            "price": price,
+            "sl": sl,
+            "tp": tp,
+            "comment": comment,
+        }
+
+    async def close_position(self, ticket: int) -> dict:
+        return {"ticket": ticket, "closed": True}
 
 
 class QwenLLMAdapter:

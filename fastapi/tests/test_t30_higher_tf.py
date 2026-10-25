@@ -131,13 +131,16 @@ class _FakeMT5:
         return False
 
     async def get(self, url, **kwargs):
-        type(self).requests.append(url)
+        params = kwargs.get("params", {}) or {}
+        qs = "&".join(f"{k}={v}" for k, v in params.items()) if params else ""
+        full_url = url + ("?" + qs if qs else "")
+        type(self).requests.append(full_url)
         if "/api/v1/account/info" in url:
             return self._response({"equity": 1000.0, "balance": 1000.0})
         if "/api/v1/market/candles/latest" in url:
             tf = "H1"
             for cand in ("H4", "D1", "H1"):
-                if f"timeframe={cand}" in url:
+                if f"timeframe={cand}" in full_url:
                     tf = cand
                     break
             if tf in type(self).fail_timeframes:

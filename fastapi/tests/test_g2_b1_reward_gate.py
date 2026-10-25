@@ -81,6 +81,7 @@ class TestRewardGatePerSymbol:
                 r.status_code = 200
                 r.json = lambda: payload
                 r.text = json.dumps(payload)
+                r.raise_for_status = lambda: None
                 return r
 
             async def get(self, url, **kwargs):

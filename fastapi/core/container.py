@@ -9,20 +9,32 @@ tests pueden parchear `services.*` antes de que exista ningún adapter, y un
 arranque con especificaciones inválidas falla de inmediato — sin mundos a
 medias.
 """
-from core.adapters import MT5ExecutionDataAdapter, MT5MarketDataAdapter, QwenLLMAdapter
+from core.adapters import QwenLLMAdapter
+from core.broker_factory import build_adapters
 from core.pair import PairConfig, PairContext, PairRegistry
 
 
-def build_registry(specs: list[dict]) -> PairRegistry:
+def build_registry(specs: list[dict], broker_type: str | None = None) -> PairRegistry:
     """Construye un mundo por cada especificación de par.
 
     Errores explícitos (sin silencios):
     - especificación inválida → TypeError/ValueError (ver PairConfig);
     - símbolo duplicado → ValueError (cada par se configura una vez);
-    - ningún par habilitado → ValueError (opera sin mundos activos = error).
+    - ningún par habilitado → ValueError (opera sin mundos activos = error);
+    - broker_type desconocido → ValueError (vía broker_factory).
+
+    `broker_type` se lee de `settings.broker_type` si no se pasa explícitamente,
+    de modo que los tests pueden inyectarlo sin recargar settings.
     """
     if not isinstance(specs, list) or not specs:
         raise ValueError(f"PAIRS: se espera una lista no vacía de pares, recibido: {specs!r}")
+
+    # Resuelve el tipo de broker: parámetro explícito > settings > default.
+    if broker_type is None:
+        from config import settings
+        broker_type = settings.broker_type
+
+    market_cls, execution_cls = build_adapters(broker_type)
 
     contexts: dict[str, PairContext] = {}
     for spec in specs:
@@ -35,8 +47,8 @@ def build_registry(specs: list[dict]) -> PairRegistry:
         # Juego de adapters propio por par: mundos sin acoplamiento.
         contexts[config.symbol] = PairContext(
             config=config,
-            market=MT5MarketDataAdapter(),
-            execution=MT5ExecutionDataAdapter(),
+            market=market_cls(),
+            execution=execution_cls(),
             llm=QwenLLMAdapter(),
         )
 

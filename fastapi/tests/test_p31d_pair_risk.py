@@ -97,7 +97,11 @@ class TestWiringAndDeadCode:
         with open(_MAIN, encoding="utf-8") as f:
             src = f.read()
         create = "get_risk_guardian(_ctx.config.symbol)"
-        assert "build_registry_from_settings().enabled()" in src
+        # El lifespan construye el registro desde settings (broker resuelto por
+        # configuración, no por imports directos de services.mt5_client) y crea
+        # el guardián de cada par habilitado a través de registry.enabled().
+        assert "build_registry_from_settings()" in src
+        assert "registry.enabled()" in src
         assert create in src
         # El guardián se crea ANTES de restaurar/ruedear el baseline del día
         # (P2-4: init_risk_state restaura desde DB o rueda según la fecha)

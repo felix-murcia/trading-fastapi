@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Optional
 
-import httpx
 import numpy as np
 import pandas as pd
 import gymnasium as gym
@@ -48,7 +47,11 @@ from services.auto_retrain import (
 from services.alignment_metric import pair_state, rolling_alignment
 from services.feed_breaker import h4d_breaker_is_open, h4d_breaker_trip
 from services.feed_patcher import fill_feed_hole as _fill_feed_hole
-from services.market_time import utc_hour_from_candle
+from services.market_time import (
+    candle_timestamp,
+    candle_time_series,
+    utc_hour_from_candle,
+)
 from services.rule_decider import (  # G3 (2026-10-20): decisor por REGLA
     RULE_MOMENTUM24_ACC,
     RULE_MOMENTUM24_VOLUME_NORM,
@@ -588,23 +591,28 @@ def _hf_candles_for_obs(res, symbol: str, tf: str, offset_h: Optional[int] = Non
     """
     if res is None or isinstance(res, Exception):
         return None
-    if getattr(res, "status_code", None) != 200:
-        return None
-    try:
-        data = res.json()
-    except ValueError:
-        return None
-    if isinstance(data, list):
-        raw = data
-    elif isinstance(data, dict):
-        raw = data.get("candles") or []
+    # El puerto de mercado ya devuelve list[dict] (velas normalizadas).
+    # Las respuestas HTTP (tests legacy / mock) se parsean como hasta ahora.
+    if isinstance(res, list):
+        raw = res
     else:
-        return None
+        if getattr(res, "status_code", None) != 200:
+            return None
+        try:
+            data = res.json()
+        except ValueError:
+            return None
+        if isinstance(data, list):
+            raw = data
+        elif isinstance(data, dict):
+            raw = data.get("candles") or []
+        else:
+            return None
     raw = _shift_to_utc(raw, f"{symbol}:{tf}", offset_h=offset_h)
     raw = _fill_feed_hole(raw, symbol, tf)
     if len(raw) < 205 or not raw or "time" not in raw[0]:
         return None
-    times = pd.to_datetime([c.get("time") for c in raw], errors="coerce", utc=True)
+    times = candle_time_series([c.get("time") for c in raw])
     if times.isna().any():
         return None
     gap_h = float(pd.Series(times).sort_values().diff()
@@ -650,21 +658,26 @@ def _higher_tf_context_line(tf: str, res, symbol: str, offset_h: Optional[int] =
     if isinstance(res, Exception):
         logger.warning("higher-TF %s fetch falló: %s", tf, res)
         return f"- {tf}: Unavailable"
-    status = getattr(res, "status_code", None)
-    if status != 200:
-        logger.warning("higher-TF %s HTTP %s del MCP", tf, status)
-        return f"- {tf}: Unavailable"
-    try:
-        data = res.json()
-    except ValueError:
-        logger.warning("higher-TF %s: payload sin JSON", tf)
-        return f"- {tf}: Unavailable"
-    if isinstance(data, list):
-        raw = data
-    elif isinstance(data, dict):
-        raw = data.get("candles") or []
+    # El puerto de mercado ya devuelve list[dict]; las respuestas HTTP se
+    # parsean como hasta ahora.
+    if isinstance(res, list):
+        raw = res
     else:
-        raw = []
+        status = getattr(res, "status_code", None)
+        if status != 200:
+            logger.warning("higher-TF %s HTTP %s del MCP", tf, status)
+            return f"- {tf}: Unavailable"
+        try:
+            data = res.json()
+        except ValueError:
+            logger.warning("higher-TF %s: payload sin JSON", tf)
+            return f"- {tf}: Unavailable"
+        if isinstance(data, list):
+            raw = data
+        elif isinstance(data, dict):
+            raw = data.get("candles") or []
+        else:
+            raw = []
     # T-31: sellos de vela al UTC real (desfase broker→UTC) antes del parche
     # con los CSV (UTC puro) — si no, la costura arrastra un salto de 3 h.
     # El desfase lo aporta H1 (`offset_h`): la autodetección sobre H4/D1 no
@@ -683,7 +696,7 @@ def _higher_tf_context_line(tf: str, res, symbol: str, offset_h: Optional[int] =
         # Continuidad: un hueco >7 días invalida la serie entera (el bloque
         # viejo y el reciente no forman una historia; los indicadores saldrían
         # de la mezcla). Ver docstring — feed real roto desde ≤2026-10-07.
-        times = pd.to_datetime(frame["time"], errors="coerce", utc=True).dropna()
+        times = candle_time_series(frame["time"]).dropna()
         if len(times) < len(frame):
             return f"- {tf}: Unavailable"
         gap_h = float(times.sort_values().diff().dt.total_seconds().div(3600).max())
@@ -756,15 +769,6 @@ def _build_qwen_candle_context(df: pd.DataFrame, count: int = 10) -> str:
 # Qwen functions moved to services/qwen_client.py
 
 
-
-# ── Helper: estimar equity desde MT5 ──────────────────────────────────────────
-async def _get_equity_estimate() -> float:
-    """Equity aproximado desde MT5 para logging."""
-    async with httpx.AsyncClient() as client:
-        r = await client.get(f"{settings.mt5_http_url}/api/v1/account/info", timeout=2.0)
-        if r.status_code == 200:
-            return float(r.json().get("equity", 0.0))
-    return 0.0
 
 class PredictRequest(BaseModel):
     symbol: str
@@ -918,37 +922,23 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     # del prompt se renderiza «Unavailable», esquema constante) y el
     # servidor queda solo para los críticos equity/H1.
     h4d_skipped = h4d_breaker_is_open()
+    market_port = ctx.market
     try:
-        async with httpx.AsyncClient() as client:
-            equity_task = client.get(
-                f"{settings.mt5_http_url}/api/v1/account/info",
-                timeout=2.0,
-            )
-            candles_task = client.get(
-                # Paquete 1-4: 240 velas para el SMA200 (contexto de estructura);
-                # las features del modelo se calculan sobre las 120 recientes
-                # (tail tras ordenar → obs byte-idéntico, ver test de wiring).
-                f"{settings.mt5_http_url}/api/v1/market/candles/latest?symbol_name={req.symbol}&timeframe=H1&count=240",
-                timeout=3.0,
-            )
-            _tasks = [equity_task, candles_task]
-            if not h4d_skipped:
-                # Foco ampliado H4/D (Félix 2026-10-12): marcos SUPERIORES para
-                # el contexto de Qwen — 250 velas por TF (SMA200 + 5 de margen).
-                # Van en el MISMO gather (sin latencia secuencial) y con
-                # return_exceptions: su fallo degrada la línea a «Unavailable»
-                # (son contexto, no críticos); equity/H1 conservan su camino
-                # HOLD. El fallo además ABRE el breaker (T-07, ver más abajo).
-                _tasks.append(client.get(
-                    f"{settings.mt5_http_url}/api/v1/market/candles/latest?symbol_name={req.symbol}&timeframe=H4&count=250",
-                    timeout=3.0,
-                ))
-                _tasks.append(client.get(
-                    f"{settings.mt5_http_url}/api/v1/market/candles/latest?symbol_name={req.symbol}&timeframe=D1&count=250",
-                    timeout=3.0,
-                ))
-            _results = await asyncio.gather(*_tasks, return_exceptions=True)
-    except (httpx.ConnectTimeout, httpx.TimeoutException, httpx.HTTPError) as exc:
+        _tasks = [
+            market_port.get_account(),
+            market_port.get_candles(sym, "H1", 240),
+        ]
+        if not h4d_skipped:
+            # Foco ampliado H4/D (Félix 2026-10-12): marcos SUPERIORES para
+            # el contexto de Qwen — 250 velas por TF (SMA200 + 5 de margen).
+            # Van en el MISMO gather (sin latencia secuencial) y con
+            # return_exceptions: su fallo degrada la línea a «Unavailable»
+            # (son contexto, no críticos); equity/H1 conservan su camino
+            # HOLD. El fallo además ABRE el breaker (T-07, ver más abajo).
+            _tasks.append(market_port.get_candles(sym, "H4", 250))
+            _tasks.append(market_port.get_candles(sym, "D1", 250))
+        _results = await asyncio.gather(*_tasks, return_exceptions=True)
+    except LOOP_ERRORS as exc:
         logger.warning("[%s] MT5 connection error in predict: %s", cycle_id, exc)
         return PredictResponse(cycle_id=cycle_id, ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
 
@@ -962,7 +952,7 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     # enmascarar su tratamiento de siempre (mismo camino HOLD / re-lanzado).
     for _critico in (equity_res, candles_res):
         if isinstance(_critico, Exception):
-            if isinstance(_critico, httpx.HTTPError):
+            if isinstance(_critico, LOOP_ERRORS):
                 logger.warning("[%s] MT5 connection error in predict: %s", cycle_id, _critico)
                 return PredictResponse(cycle_id=cycle_id, ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
             raise _critico
@@ -989,20 +979,17 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         h4d_context = "ok"
 
     try:
-        equity_val = (
-            float(equity_res.json().get("equity", 0.0))
-            if equity_res.status_code == 200 else 0.0
-        )
-    except (ValueError, TypeError, KeyError):
-        logger.error("[%s] payload de equity no numérico (HTTP %s)", cycle_id, equity_res.status_code)
+        equity_val = float(equity_res.get("equity", 0.0))
+    except (ValueError, TypeError):
+        logger.error("[%s] payload de equity no numérico", cycle_id)
         equity_val = 0.0
 
     # P2-2: sin equity fiable no hay sizing posible — se corta aquí en vez de
     # emitir órdenes de volumen 0 (auditoría: "equity=0 → volumen 0").
     if equity_val <= 0.0:
         logger.error(
-            "[%s] equity no disponible (HTTP %s, equity=%s) → HOLD",
-            cycle_id, equity_res.status_code, equity_val,
+            "[%s] equity no disponible (equity=%s) → HOLD",
+            cycle_id, equity_val,
         )
         return PredictResponse(cycle_id=cycle_id, ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
 
@@ -1012,11 +999,10 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     observe_equity(equity_val)
     await flush_risk_state(symbol=req.symbol)
 
-    if candles_res.status_code != 200:
-        logger.warning("[%s] candles HTTP %s from MT5", cycle_id, candles_res.status_code)
+    if not isinstance(candles_res, list):
+        logger.warning("[%s] candles no válidas desde el puerto de mercado", cycle_id)
         return PredictResponse(cycle_id=cycle_id, ml_prob=0.5, llm_bias="ERROR", decision="HOLD")
-    data = candles_res.json()
-    candles = data if isinstance(data, list) else data.get("candles", [])
+    candles = candles_res
     # T-31 (2026-10-19): el feed sella las velas con el reloj del BROKER
     # (+3 h medidos). Se normalizan a UTC REAL antes de tocar nada más:
     #  (a) la costura con los CSV de `resultadosBT/` (que son UTC puro)
@@ -1380,7 +1366,7 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
         # −120…+240 min (lo reciente ya reaccionado + lo próximo), orden
         # ascendente y tope 3 (presupuesto de tokens). `None` con el filtro
         # de noticias deshabilitado (el prompt lo dice explícitamente). Fetch
-        # DESPUÉS del bloque MT5: httpx está garantizado parcheado en suite.
+        # DESPUÉS del bloque MT5: el puerto de mercado está garantizado parcheado en suite.
         calendar_events: Optional[list[dict]] = None
         if settings.news_filter_enabled:
             upcoming = await get_upcoming_news([req.symbol])
@@ -1405,7 +1391,7 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
                 decision=decision,
                 rsi=float(df['rsi14'].iloc[-1]) * 100.0,
                 adx=float(df['adx'].iloc[-1]) if 'adx' in df.columns else None,
-                hour=utc_hour_from_candle(pd.to_datetime(df['time'].iloc[-1])),
+                hour=utc_hour_from_candle(candle_timestamp(df['time'].iloc[-1])),
             )
             _mem_cands = await fetch_relevant_memories(_memory_q, req.symbol)
             logger.info("[%s] MEMORY query=%r | n=%d top_score=%s",
@@ -1451,7 +1437,7 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             bb_pos=float(df['bb_pos'].iloc[-1]),
             range_pct=float(df['range'].iloc[-1]),
             last_ret=float(df['returns'].iloc[-1]),
-            hour=utc_hour_from_candle(pd.to_datetime(df['time'].iloc[-1])),
+            hour=utc_hour_from_candle(candle_timestamp(df['time'].iloc[-1])),
             news=live_news,
             candle_context=candle_context,
             cycle_id=cycle_id,
@@ -2037,12 +2023,22 @@ async def pipeline_health() -> HealthCheckResponse:
     components["database"] = {"ok": True, "trade_count": trade_count, "error": None}
 
     # 2. MT5 connectivity
-    async with httpx.AsyncClient() as client:
-        r = await client.get(f"{settings.mt5_http_url}/api/v1/account/info", timeout=5.0)
-        mt5_ok = r.status_code == 200
-    components["mt5"] = {"ok": mt5_ok, "error": None if mt5_ok else f"HTTP {r.status_code}"}
+    mt5_ok = False
+    try:
+        registry = _get_registry()
+        ctx_health = registry.get("EURUSD")
+        if ctx_health is None:
+            enabled = registry.enabled()
+            if not enabled:
+                raise ValueError("PAIRS: ningún par habilitado para el health check")
+            ctx_health = enabled[0]
+        account = await ctx_health.market.get_account()
+        mt5_ok = "balance" in account or "equity" in account
+    except LOOP_ERRORS as exc:
+        logger.warning("[pipeline_health] MT5 connectivity error: %s", exc)
+    components["mt5"] = {"ok": mt5_ok, "error": None if mt5_ok else "MT5 no disponible"}
     if not mt5_ok:
-        raise RuntimeError(f"MT5 connectivity failed: HTTP {r.status_code}")
+        raise RuntimeError("MT5 connectivity failed")
 
     # 3. PPO model file exists
     MODEL_PATH = "/app/ml/ppo_trading_bot_v3.zip"

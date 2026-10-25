@@ -26,7 +26,6 @@ import statistics
 import asyncpg
 
 from config import settings
-from services.mt5_client import get_account, get_candles_with_offset
 
 MIN_N = 30
 HORIZON_BARS = 48
@@ -191,12 +190,16 @@ def _counterfactual(order: dict, outcome: dict, bars: list[dict],
     }
 
 
-async def main() -> int:
+async def main(market_port=None) -> int:
     conn = await asyncpg.connect(settings.database_url)
     try:
         stops = await conn.fetch(STOPS_SQL)
     finally:
         await conn.close()
+
+    if market_port is None:
+        from core.container import build_registry_from_settings
+        market_port = build_registry_from_settings().get("EURUSD").market
 
     candle_cache: dict[str, tuple[list[dict], list[dict], float]] = {}
     units: list[dict] = []
@@ -204,7 +207,7 @@ async def main() -> int:
     for s in stops:
         symbol = s["symbol"]
         if symbol not in candle_cache:
-            raw, offset_h = await get_candles_with_offset(symbol, "H1", 1000)
+            raw, offset_h = await market_port.get_candles_with_offset(symbol, "H1", 1000)
             now = dt.datetime.now(dt.timezone.utc).timestamp()
             all_bars = sorted(raw, key=lambda c: c["time"])
             closed = [c for c in all_bars if c["time"] + 3600 <= now]
@@ -267,7 +270,7 @@ async def main() -> int:
     ]
 
     try:
-        acct = await get_account()
+        acct = await market_port.get_account()
         equity = float(acct.get("equity", 0.0)) or None
     except Exception:  # noqa: BLE001
         equity = None

@@ -47,6 +47,7 @@ from config import settings
 from main import app
 from ml.trading_env_v2 import engineer_market_features as _real_engineer
 from routers.ai import Brain
+from services.market_time import candle_time_series
 
 
 # ─── Datos sintéticos ─────────────────────────────────────────────────────────
@@ -112,7 +113,13 @@ class _FakeMT5:
         return False
 
     async def get(self, url, **kwargs):
-        type(self).requests.append(url)
+        # El puerto de mercado manda `count`/`symbol_name` en `params`, no en
+        # la URL: se reconstruye la query para que el test de cableado pueda
+        # seguir verificando `count=240` (B5.2).
+        params = kwargs.get("params", {}) or {}
+        qs = "&".join(f"{k}={v}" for k, v in params.items()) if params else ""
+        full_url = url + ("?" + qs if qs else "")
+        type(self).requests.append(full_url)
         if "/api/v1/account/info" in url:
             return self._response({"equity": 1000.0, "balance": 1000.0})
         if "/api/v1/market/candles/latest" in url:
@@ -287,8 +294,11 @@ class TestPredictWiring:
         assert resp.status_code == 200, resp.text
         candle_urls = [u for u in _FakeMT5.requests if "market/candles/latest" in u]
         assert candle_urls, "sin fetch de velas"
-        assert "count=240" in candle_urls[0], (
-            f"la serie completa debe llegar para el SMA200: {candle_urls[0]}"
+        # El primer GET de velas puede ser el sondeo del reloj del bróker
+        # (`services/timebase`, URL sin query). Lo que fija esta prueba es que
+        # /predict pida la serie completa de 240 para el SMA200.
+        assert any("count=240" in u for u in candle_urls), (
+            f"la serie completa debe llegar para el SMA200: {candle_urls}"
         )
 
     def test_structure_context_forwarded_to_qwen(self, monkeypatch):
@@ -319,8 +329,11 @@ class TestPredictWiring:
         (raw_input,) = eng.call_args_list[0].args
         assert len(raw_input) == 120, f"features deben salir de 120 velas, no {len(raw_input)}"
         assert raw_input["time"].is_monotonic_increasing
-        assert raw_input["time"].iloc[0] == "2026-01-06T00:00:00Z"
-        assert raw_input["time"].iloc[-1] == "2026-01-10T23:00:00Z"
+        # B5.2: el puerto entrega epoch de segundos; el contrato temporal se
+        # verifica sobre los instantes, no sobre el formato del sello.
+        stamps = candle_time_series(raw_input["time"])
+        assert stamps.iloc[0] == pd.Timestamp("2026-01-06T00:00:00Z")
+        assert stamps.iloc[-1] == pd.Timestamp("2026-01-10T23:00:00Z")
 
     def test_calendar_filtered_sorted_and_capped(self, monkeypatch):
         events = [

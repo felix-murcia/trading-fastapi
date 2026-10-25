@@ -34,7 +34,7 @@ LEDGER_PATH = os.environ.get(
 )
 
 
-async def build_daily_entry(symbol: str = "EURUSD") -> dict:
+async def build_daily_entry(symbol: str = "EURUSD", market_port=None) -> dict:
     """Construye la línea del día (sólo lectura del sistema)."""
     from db.connection import get_pool
 
@@ -63,9 +63,21 @@ async def build_daily_entry(symbol: str = "EURUSD") -> dict:
     # UTC (declarado en la línea: `day_basis`), que es el día del informe.
     try:
         from services.timebase import broker_offset_hours, utc_day_bounds
-        # detección propia (endpoint de precio del servidor): el registro
-        # NO depende de que otro módulo haya refrescado la caché.
-        broker_off = await broker_offset_hours(symbol)
+        # B6.2: el desfase se obtiene a través del puerto de mercado, no
+        # mediante httpx directo desde timebase.
+        if market_port is None:
+            from core.container import build_registry_from_settings
+            _registry = build_registry_from_settings()
+            _mp = _registry.get("EURUSD").market
+            if _mp is None:
+                _enabled = _registry.enabled()
+                _mp = _enabled[0].market if _enabled else None
+            market_port = _mp
+        if market_port is not None:
+            broker_off = await broker_offset_hours(symbol, market_port)
+        else:
+            from services.timebase import current_broker_offset
+            broker_off = current_broker_offset()
         day_start = utc_day_bounds(now)[0]
     except LOOP_ERRORS:  # noqa: BLE001
         try:

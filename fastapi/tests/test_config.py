@@ -60,3 +60,96 @@ class TestSettings:
         from config import Settings
         settings = Settings()
         assert settings.news_filter_enabled is True
+
+    def test_broker_type_defaults_to_mt5_demo(self):
+        """broker_type defaults to mt5_demo."""
+        os.environ["database_url"] = "postgresql://user:pass@localhost/db"
+        os.environ["internal_token"] = "test-token"
+        os.environ["hmac_secret"] = "test-hmac"
+        import importlib
+        import config
+        importlib.reload(config)
+        from config import Settings
+        settings = Settings()
+        assert settings.broker_type == "mt5_demo"
+
+    def test_broker_type_read_from_env(self):
+        """broker_type is read from BROKER_TYPE env var."""
+        os.environ["database_url"] = "postgresql://user:pass@localhost/db"
+        os.environ["internal_token"] = "test-token"
+        os.environ["hmac_secret"] = "test-hmac"
+        os.environ["BROKER_TYPE"] = "mt5_real"
+        import importlib
+        import config
+        importlib.reload(config)
+        from config import Settings
+        settings = Settings()
+        assert settings.broker_type == "mt5_real"
+
+    def test_broker_type_invalid_raises(self):
+        """An invalid broker_type raises ValidationError during module reload."""
+        saved_env = dict(os.environ)
+        try:
+            os.environ["database_url"] = "postgresql://user:pass@localhost/db"
+            os.environ["internal_token"] = "test-token"
+            os.environ["hmac_secret"] = "test-hmac"
+            os.environ["BROKER_TYPE"] = "binance"
+            import importlib
+            import config
+            with pytest.raises(ValidationError):
+                importlib.reload(config)
+        finally:
+            os.environ.clear()
+            os.environ.update(saved_env)
+
+    def test_broker_http_url_defaults_empty(self):
+        """broker_http_url defaults to empty (falls back to mt5_http_url)."""
+        saved_env = dict(os.environ)
+        try:
+            os.environ["database_url"] = "postgresql://user:pass@localhost/db"
+            os.environ["internal_token"] = "test-token"
+            os.environ["hmac_secret"] = "test-hmac"
+            import importlib
+            import config
+            importlib.reload(config)
+            from config import Settings
+            settings = Settings()
+            assert settings.broker_http_url == ""
+        finally:
+            os.environ.clear()
+            os.environ.update(saved_env)
+
+    def test_broker_http_url_read_from_env(self):
+        """broker_http_url is read from BROKER_HTTP_URL env var."""
+        saved_env = dict(os.environ)
+        try:
+            os.environ["database_url"] = "postgresql://user:pass@localhost/db"
+            os.environ["internal_token"] = "test-token"
+            os.environ["hmac_secret"] = "test-hmac"
+            os.environ["BROKER_HTTP_URL"] = "http://100.81.112.95:8000"
+            import importlib
+            import config
+            importlib.reload(config)
+            from config import Settings
+            settings = Settings()
+            assert settings.broker_http_url == "http://100.81.112.95:8000"
+        finally:
+            os.environ.clear()
+            os.environ.update(saved_env)
+
+    def test_broker_timeout_defaults(self):
+        """broker_timeout defaults to 10.0."""
+        saved_env = dict(os.environ)
+        try:
+            os.environ["database_url"] = "postgresql://user:pass@localhost/db"
+            os.environ["internal_token"] = "test-token"
+            os.environ["hmac_secret"] = "test-hmac"
+            import importlib
+            import config
+            importlib.reload(config)
+            from config import Settings
+            settings = Settings()
+            assert settings.broker_timeout == 10.0
+        finally:
+            os.environ.clear()
+            os.environ.update(saved_env)

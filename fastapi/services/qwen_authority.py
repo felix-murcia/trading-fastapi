@@ -102,10 +102,13 @@ def _to_epoch(bar: dict) -> float:
     return float(t)
 
 
-async def _measure(symbol: str) -> dict:
+async def _measure(symbol: str, market_port=None) -> dict:
     """Mide la skill direccional del LLM en la ventana reciente (live)."""
     from db.connection import get_pool
-    from services.mt5_client import get_candles_with_offset
+
+    if market_port is None:
+        from core.container import build_registry_from_settings
+        market_port = build_registry_from_settings().get(symbol).market
 
     pool = get_pool()
     since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=QWEN_AUTHORITY_WINDOW_DAYS)
@@ -138,7 +141,7 @@ async def _measure(symbol: str) -> dict:
     if not rows:
         return result
 
-    raw, offset_h = await get_candles_with_offset(symbol, "H1", 600)
+    raw, offset_h = await market_port.get_candles_with_offset(symbol, "H1", 600)
     # Sólo velas H1 CERRADAS (fix 2026-10-20): la vela en formación lleva el
     # precio ACTUAL como "close" y.tickea. Como cierre terminal del horizonte
     # +24 h la usaba para ~12 ciclos (los de la hora en curso) ⇒ la skill

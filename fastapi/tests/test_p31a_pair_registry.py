@@ -19,7 +19,12 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from core.adapters import MT5ExecutionDataAdapter, MT5MarketDataAdapter, QwenLLMAdapter
+from core.adapters import (
+    MT5ExecutionDataAdapter,
+    MT5MarketDataAdapter,
+    QwenLLMAdapter,
+)
+from core.broker_factory import build_adapters
 from core.container import build_registry, build_registry_from_settings
 from core.pair import PairConfig, PairRegistry, default_model_path
 from core.ports import ExecutionPort, LLMPort, MarketDataPort
@@ -115,6 +120,38 @@ class TestBuildRegistry:
         assert eurusd.market is not gbpusd.market
         assert eurusd.execution is not gbpusd.execution
         assert eurusd.llm is not gbpusd.llm
+
+    def test_build_registry_uses_mt5_adapters_by_default(self):
+        """build_registry(specs) sin broker_type usa mt5_demo → adapters MT5."""
+        registry = build_registry([
+            {"symbol": "EURUSD", "enabled": True},
+        ])
+        ctx = registry.get("EURUSD")
+        assert isinstance(ctx.market, MT5MarketDataAdapter)
+        assert isinstance(ctx.execution, MT5ExecutionDataAdapter)
+
+    def test_build_registry_mt5_real_uses_mt5_adapters(self):
+        """build_registry(specs, broker_type='mt5_real') → adapters MT5."""
+        registry = build_registry([
+            {"symbol": "EURUSD", "enabled": True},
+        ], broker_type="mt5_real")
+        ctx = registry.get("EURUSD")
+        assert isinstance(ctx.market, MT5MarketDataAdapter)
+        assert isinstance(ctx.execution, MT5ExecutionDataAdapter)
+
+    def test_build_registry_unknown_broker_raises(self):
+        """broker_type desconocido → ValueError."""
+        with pytest.raises(ValueError, match="desconocido"):
+            build_registry([
+                {"symbol": "EURUSD", "enabled": True},
+            ], broker_type="binance")
+
+    def test_build_registry_from_settings_uses_mt5_adapters(self):
+        """build_registry_from_settings() usa el broker_type de settings (mt5_demo por defecto)."""
+        registry = build_registry_from_settings()
+        ctx = registry.get("EURUSD")
+        assert isinstance(ctx.market, MT5MarketDataAdapter)
+        assert isinstance(ctx.execution, MT5ExecutionDataAdapter)
 
 
 class TestPairRegistryLookup:

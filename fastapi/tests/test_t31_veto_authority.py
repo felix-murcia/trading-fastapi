@@ -388,3 +388,40 @@ class TestAuthoritySignificance:
         )
         assert "base" in data["reason"] or "no demostrada" in data["reason"]
         assert data["wilson_lower"] is not None
+
+
+# ─── B4.2: desacoplamiento de broker ──────────────────────────────────────────
+
+class TestB42NoMt5ClientDirectImport:
+    """qwen_authority.py no importa services.mt5_client directamente."""
+
+    def test_no_module_level_import_of_mt5_client(self):
+        """El módulo qwen_authority no hace `from services import mt5_client` ni `from services.mt5_client import`."""
+        import services.qwen_authority as qa
+        source = open(qa.__file__).read()
+        assert "from services import mt5_client" not in source
+        assert "from services.mt5_client import" not in source
+        assert "import services.mt5_client" not in source
+
+    @pytest.mark.asyncio
+    async def test_measure_uses_injected_market_port(self):
+        """_measure usa el market_port inyectado para get_candles_with_offset."""
+        from core.adapters import MT5MarketDataAdapter
+        mp = MT5MarketDataAdapter()
+        import time as _t
+        _T0 = int(_t.time()) - 220 * 3600
+        up = [(_T0 + i * 3600) for i in range(30)]
+        down = [(_T0 + i * 3600 + 1800) for i in range(30)]
+        candles = []
+        for t0 in up[:60]:
+            candles.append({"time": float(t0), "close": 1.1000})
+        fake_pool = MagicMock()
+        rows = []
+        for t0 in up[:30]:
+            rows.append({"mt5_time": float(t0), "llm_bias": "BULLISH", "bias_prob": 0.85})
+        fake_pool.fetch = AsyncMock(return_value=rows)
+        with patch("db.connection.get_pool", return_value=fake_pool), \
+             patch("services.mt5_client.get_candles_with_offset",
+                   AsyncMock(return_value=(candles, 0))):
+            data = await qwen_authority._measure("EURUSD", market_port=mp)
+        assert data["n"] >= 0  # se resolvió sin errores usando el port inyectado

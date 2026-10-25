@@ -142,8 +142,14 @@ class TestBlackoutWiringContract:
         return (Path(__file__).parents[1] / "routers" / "ai.py").read_text()
 
     def test_blackout_checked_before_mt5_fetch(self):
+        """El blackout se resuelve ANTES de tocar el puerto de mercado.
+
+        B5.2: /predict ya no construye URLs del MCP — el fetch pasa por
+        `market_port`. La propiedad (cero fetch si hay blackout) se ancla al
+        acceso al puerto, no al literal de la URL retirada.
+        """
         src = self._src()
-        assert src.index("is_news_blackout(sym)") < src.index("market/candles/latest")
+        assert src.index("is_news_blackout(sym)") < src.index("market_port.get_candles(")
 
     def test_session_hour_comes_from_utc_converter(self):
         src = self._src()

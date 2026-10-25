@@ -115,11 +115,16 @@ class _FakeMT5:
 
     async def get(self, url, **kwargs):
         type(self).requests.append(url)
+        params = kwargs.get("params", {}) or {}
+        qs = "&".join(f"{k}={v}" for k, v in params.items()) if params else ""
+        if qs:
+            type(self).requests[-1] = url + "?" + qs
         if "/api/v1/account/info" in url:
             return self._response({"equity": 1000.0, "balance": 1000.0})
         if "/api/v1/market/candles/latest" in url:
+            url_tf = params.get("timeframe", "")
             for tf in type(self).fail_timeframes:
-                if f"timeframe={tf}" in url:
+                if f"timeframe={tf}" in url or url_tf == tf:
                     raise httpx.ConnectTimeout(f"{tf} caído")
             return self._response(type(self).candles)
         return self._response({})

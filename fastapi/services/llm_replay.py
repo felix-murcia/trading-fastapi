@@ -34,9 +34,12 @@ INITIAL_BALANCE = 1000.0    # el ledger compara en € por trade (sizing de /pre
 ACCOUNT_EQUITY = 475.0      # equity real de la cuenta (para el % de riesgo)
 
 
-async def _candles(symbol: str, count: int = 900):
-    from services.mt5_client import get_candles_with_offset
-    candles, offset_h = await get_candles_with_offset(symbol, "H1", count)
+async def _candles(symbol: str, count: int = 900,
+                   market_port=None):
+    if market_port is None:
+        from core.container import build_registry_from_settings
+        market_port = build_registry_from_settings().get(symbol).market
+    candles, offset_h = await market_port.get_candles_with_offset(symbol, "H1", count)
     return candles, offset_h
 
 

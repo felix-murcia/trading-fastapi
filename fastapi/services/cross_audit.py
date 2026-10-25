@@ -51,10 +51,15 @@ def _status_error(mt5_alive: bool) -> str:
     return "error" if mt5_alive else "sin_datos_mt5"
 
 
-async def run_cross_audit(symbol: str = "EURUSD") -> dict:
+async def run_cross_audit(symbol: str = "EURUSD",
+                          market_port=None) -> dict:
     """Recomputa y compara. Devuelve el veredicto (nunca lanza)."""
     checks: list = []
     ts = dt.datetime.now(dt.timezone.utc).isoformat()
+
+    if market_port is None:
+        from core.container import build_registry_from_settings
+        market_port = build_registry_from_settings().get(symbol).market
 
     # T-31.9 (2026-10-20): si el servidor MT5 no responde, los checks que
     # dependen de él no se pueden recalcular. Se distingue de una
@@ -108,11 +113,10 @@ async def run_cross_audit(symbol: str = "EURUSD") -> dict:
     # ── 3) PSI de drift (recomputado sobre la ventana viva) ────────────────
     try:
         from services import drift_monitor
-        from services.mt5_client import get_candles_with_offset
         from ml.trading_env_v2 import engineer_market_features
         import pandas as pd
 
-        candles, _off = await get_candles_with_offset(symbol, "H1", drift_monitor.LIVE_CANDLES)
+        candles, _off = await market_port.get_candles_with_offset(symbol, "H1", drift_monitor.LIVE_CANDLES)
         if candles:
             frame = pd.DataFrame(candles)
             live_df = engineer_market_features(frame)
@@ -145,9 +149,8 @@ async def run_cross_audit(symbol: str = "EURUSD") -> dict:
             canonical_direction,
             skill_vs_base,
         )
-        from services.mt5_client import get_candles_with_offset
 
-        candles, _off = await get_candles_with_offset(symbol, "H1", 400)
+        candles, _off = await market_port.get_candles_with_offset(symbol, "H1", 400)
         if candles:
             bt = [float(c["time"]) for c in candles]
             bc = [float(c["close"]) for c in candles]

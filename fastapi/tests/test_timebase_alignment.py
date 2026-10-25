@@ -36,7 +36,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from services import timebase
+from services import broker_clock_store, timebase
 from services.market_time import (
     broker_offset_hours_from_candles,
     detect_utc_offset_hours,
@@ -94,46 +94,38 @@ class TestOffsetDetection:
 
 
 class TestStaleBrokerClockSources:
-    class _Response:
-        status_code = 200
+    """Sources de reloj viejas o implausibles no validan ni envenenan la caché."""
 
-        def __init__(self, payload):
-            self._payload = payload
+    class _FakeMarketPort:
+        """MarketDataPort ficticio para estos tests."""
 
-        def json(self):
-            return self._payload
+        def __init__(self, price_payload=None, candles=None):
+            self.price_payload = price_payload or {}
+            self.candles = candles or []
 
-    class _Client:
-        def __init__(self, payload):
-            self._payload = payload
+        async def get_price(self, symbol):
+            return dict(self.price_payload)
 
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_):
-            return None
-
-        async def get(self, *_args, **_kwargs):
-            return TestStaleBrokerClockSources._Response(self._payload)
+        async def get_candles(self, symbol, timeframe, count):
+            return list(self.candles)
 
     @pytest.mark.asyncio
     async def test_implausible_price_timestamp_uses_fresh_h1_offset(self, monkeypatch):
-        import httpx
-
         now = dt.datetime.now(dt.timezone.utc)
         stale_time = (now - dt.timedelta(hours=13)).isoformat()
-        monkeypatch.setattr(
-            httpx, "AsyncClient",
-            lambda **_kwargs: self._Client({"time": stale_time}),
-        )
-        monkeypatch.setattr(
-            timebase, "_offset_from_candles",
-            AsyncMock(return_value=2),
+        # Vela H1 fresca con offset 2
+        fresh_candle = now.replace(minute=0, second=0, microsecond=0) + dt.timedelta(hours=2)
+        port = self._FakeMarketPort(
+            price_payload={"time": stale_time},
+            candles=[{"time": fresh_candle.isoformat()}],
         )
         monkeypatch.setattr(timebase, "_OFFSET_CACHE", {"offset_h": 3, "ts": 0.0})
         monkeypatch.setattr(timebase, "_KNOWN_OFFSET", {"offset_h": 3, "source": "test"})
+        monkeypatch.setattr(
+            broker_clock_store, "persist_broker_offset", AsyncMock()
+        )
 
-        offset = await timebase.broker_offset_hours("EURUSD")
+        offset = await timebase.broker_offset_hours("EURUSD", port)
 
         assert offset == 2
         assert timebase._OFFSET_CACHE["offset_h"] == 2
@@ -144,22 +136,24 @@ class TestStaleBrokerClockSources:
     async def test_unavailable_fresh_clock_preserves_last_known_offset(
         self, monkeypatch, candle_offset
     ):
-        import httpx
-
         now = dt.datetime.now(dt.timezone.utc)
         stale_time = (now - dt.timedelta(hours=13)).isoformat()
-        monkeypatch.setattr(
-            httpx, "AsyncClient",
-            lambda **_kwargs: self._Client({"time": stale_time}),
-        )
-        monkeypatch.setattr(
-            timebase, "_offset_from_candles",
-            AsyncMock(return_value=candle_offset),
+        if candle_offset is None:
+            candles = []  # sin velas ⇒ ninguna fuente
+        else:
+            # Vela con offset implausible: -19 h
+            implausible_candle = now.replace(
+                minute=0, second=0, microsecond=0
+            ) + dt.timedelta(hours=candle_offset)
+            candles = [{"time": implausible_candle.isoformat()}]
+        port = self._FakeMarketPort(
+            price_payload={"time": stale_time},
+            candles=candles,
         )
         monkeypatch.setattr(timebase, "_OFFSET_CACHE", {"offset_h": 3, "ts": 0.0})
         monkeypatch.setattr(timebase, "_KNOWN_OFFSET", {"offset_h": 3, "source": "test"})
 
-        offset = await timebase.broker_offset_hours("EURUSD")
+        offset = await timebase.broker_offset_hours("EURUSD", port)
 
         assert offset == 3
         assert timebase._OFFSET_CACHE["offset_h"] == 3
@@ -169,55 +163,50 @@ class TestStaleBrokerClockSources:
     async def test_no_validated_offset_stays_unvalidated_when_sources_are_stale(
         self, monkeypatch
     ):
-        import httpx
-
         now = dt.datetime.now(dt.timezone.utc)
         stale_time = (now - dt.timedelta(hours=13)).isoformat()
-        monkeypatch.setattr(
-            httpx, "AsyncClient",
-            lambda **_kwargs: self._Client({"time": stale_time}),
-        )
-        monkeypatch.setattr(
-            timebase, "_offset_from_candles", AsyncMock(return_value=None)
+        # Ambas fuentes viejas: precio a 13 h, vela a 20 h
+        stale_candle = (now - dt.timedelta(hours=20)).isoformat()
+        port = self._FakeMarketPort(
+            price_payload={"time": stale_time},
+            candles=[{"time": stale_candle}],
         )
         monkeypatch.setattr(timebase, "_OFFSET_CACHE", {"offset_h": 0, "ts": 0.0})
         monkeypatch.setattr(timebase, "_KNOWN_OFFSET", {
             "offset_h": 0, "source": "sin_detecccion", "validated": False,
         })
 
-        assert await timebase.broker_offset_hours("EURUSD") == 0
+        assert await timebase.broker_offset_hours("EURUSD", port) == 0
         assert not timebase.broker_offset_is_validated()
 
     @pytest.mark.asyncio
-    async def test_stale_h1_candles_are_not_a_detected_offset(self, monkeypatch):
-        import httpx
-
+    async def test_stale_h1_candles_are_not_a_detected_offset(self):
+        """Vela H1 de 20 h no es una medición de offset."""
         stale_time = (
             dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=20)
         ).isoformat()
-        monkeypatch.setattr(
-            httpx, "AsyncClient",
-            lambda **_kwargs: self._Client({"candles": [{"time": stale_time}]}),
-        )
-
-        assert await timebase._offset_from_candles("EURUSD") is None
+        now = dt.datetime.now(dt.timezone.utc)
+        assert timebase._offset_from_candles([{"time": stale_time}], now) is None
 
     @pytest.mark.asyncio
     async def test_implausible_cached_offset_is_not_returned(self, monkeypatch):
-        import httpx
-
         now = dt.datetime.now(dt.timezone.utc)
+        # Precio fresco da offset +2 (válido); la caché tiene 13 (implausible, TTL vencido)
         server_time = (now + dt.timedelta(hours=2)).isoformat()
-        monkeypatch.setattr(
-            httpx, "AsyncClient",
-            lambda **_kwargs: self._Client({"time": server_time}),
-        )
+        # TTL vencido: _OFFSET_CACHE ts muy antiguo para forzar re-detección
         monkeypatch.setattr(timebase, "_OFFSET_CACHE", {
-            "offset_h": 13, "ts": timebase.time.time(),
+            "offset_h": 13, "ts": 0.0,
         })
         monkeypatch.setattr(timebase, "_KNOWN_OFFSET", {"offset_h": 3, "source": "test"})
+        monkeypatch.setattr(
+            broker_clock_store, "persist_broker_offset", AsyncMock()
+        )
+        port = self._FakeMarketPort(
+            price_payload={"time": server_time},
+            candles=[],  # sin velas ⇒ solo precio
+        )
 
-        offset = await timebase.broker_offset_hours("EURUSD")
+        offset = await timebase.broker_offset_hours("EURUSD", port)
 
         assert offset == 2
         assert timebase._OFFSET_CACHE["offset_h"] == 2

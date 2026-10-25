@@ -18,11 +18,24 @@ La corrección detecta el desfase con la vela formándose
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
+import services.timebase as timebase
 from main import app
 
 AUTH_HEADERS = {"x-internal-token": "test-token", "x-cycle-id": "d3-utc-day"}
+
+
+@pytest.fixture(autouse=True)
+def _reset_offset_cache():
+    """Cada test parte del caché de offset a 0 (sin detección previa) para
+    que no haya contaminación entre el feed broker (+3) y el feed honesto (0)."""
+    timebase.set_broker_offset(0, source="test-reset")
+    timebase._OFFSET_CACHE = {"offset_h": 0, "ts": 0.0}
+    yield
+    timebase.set_broker_offset(0, source="test-reset")
+    timebase._OFFSET_CACHE = {"offset_h": 0, "ts": 0.0}
 
 
 def _deal(profit, time_msc, entry=1, symbol="EURUSD"):
@@ -48,6 +61,16 @@ def _fake_httpx_client(deals, candle_times, candle_status=200):
         def __init__(self, payload, status_code=200):
             self._payload = payload
             self.status_code = status_code
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                import httpx
+                request = httpx.Request("GET", "http://test")
+                raise httpx.HTTPStatusError(
+                    f"HTTP {self.status_code}",
+                    request=request,
+                    response=httpx.Response(self.status_code, request=request),
+                )
 
         def json(self):
             return self._payload
@@ -80,7 +103,9 @@ def _analytics(deals, candle_times, candle_status=200):
          patch("main.close_pool", AsyncMock()), \
          patch("routers.ai.load_inference_artifacts"), \
          patch("httpx.AsyncClient",
-               _fake_httpx_client(deals, candle_times, candle_status)):
+               _fake_httpx_client(deals, candle_times, candle_status)), \
+         patch("services.broker_clock_store.persist_broker_offset",
+               AsyncMock()):
         with TestClient(app) as client:
             return client.get("/v1/smc/analytics", headers=AUTH_HEADERS)
 

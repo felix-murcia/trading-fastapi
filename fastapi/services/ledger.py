@@ -154,7 +154,8 @@ EDGE_MAP_SYMBOLS: tuple = (
 )
 
 
-async def _edge_decay_map(symbols: tuple = EDGE_MAP_SYMBOLS) -> dict:
+async def _edge_decay_map(symbols: tuple = EDGE_MAP_SYMBOLS,
+                          market_port=None) -> dict:
     """DECAIMIENTO DEL EDGE por par y por ventana (solo lectura).
 
     Orden Félix 2026-10-20: «cada par tiene su propia idiosincrasia» ⇒ el
@@ -170,14 +171,17 @@ async def _edge_decay_map(symbols: tuple = EDGE_MAP_SYMBOLS) -> dict:
         canonical_direction,
         skill_vs_base,
     )
-    from services.mt5_client import get_candles_with_offset
     import datetime as _dt
+
+    if market_port is None:
+        from core.container import build_registry_from_settings
+        market_port = build_registry_from_settings().get(symbols[0]).market
 
     out: dict = {}
     now = _dt.datetime.now(_dt.timezone.utc).timestamp()
     for sym in symbols:
         try:
-            cands, _off = await get_candles_with_offset(sym, "H1", 1200)
+            cands, _off = await market_port.get_candles_with_offset(sym, "H1", 1200)
             if not cands:
                 continue
             bt = [float(c["time"]) for c in cands]

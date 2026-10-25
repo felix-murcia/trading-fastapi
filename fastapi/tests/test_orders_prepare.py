@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 
 import config
 import services.order_manager as order_manager
+from services import timebase
 from main import app
 
 TOKEN = {"x-internal-token": "test-token", "x-cycle-id": "gate-test"}
@@ -394,6 +395,11 @@ class TestG25RiskWiring:
     def test_d2_off_skips_rate_fetch(self, monkeypatch):
         # default None → sin llamada a get_candles (cero cambio de comportamiento)
         monkeypatch.setattr(order_manager.settings, "max_total_risk_pct", None)
+        # B6.2: broker_offset_hours ahora llama a market_port.get_candles()
+        # durante el lifespan; se mockea para que no interfiera con esta prueba
+        # de que order_manager no llama a get_candles cuando D2 está apagado.
+        monkeypatch.setattr(timebase, "broker_offset_hours",
+                            AsyncMock(return_value=0))
         positions = {"open": [
             {"symbol": "EURUSD", "type": "buy", "volume": 0.10,
              "price": 1.3300, "sl": 1.3250},
@@ -403,3 +409,15 @@ class TestG25RiskWiring:
             response, pool = _prepare(_order(), positions=positions)
         assert response.json()["approved"] is True
         assert pool.risk_check.call_args.kwargs["total_risk_eur"] == 0.0
+
+
+class TestB41NoMt5ClientDirectImport:
+    """B4.1: order_manager.py no importa services.mt5_client directamente."""
+
+    def test_no_module_level_import_of_mt5_client(self):
+        """El módulo order_manager no hace `from services import mt5_client` ni `from services.mt5_client import`."""
+        import services.order_manager as om
+        source = open(om.__file__).read()
+        assert "from services import mt5_client" not in source
+        assert "from services.mt5_client import" not in source
+        assert "import services.mt5_client" not in source

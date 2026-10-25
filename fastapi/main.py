@@ -45,7 +45,7 @@ async def _persist_validated_broker_offset() -> None:
         logger.exception("[TIMEBASE] No se pudo persistir el offset validado")
 
 
-async def _recover_broker_clock_and_risk(data: dict) -> None:
+async def _recover_broker_clock_and_risk(data: dict, market_port) -> None:
     global _risk_state_ready
     from services.timebase import (
         broker_clock_ready,
@@ -55,7 +55,7 @@ async def _recover_broker_clock_and_risk(data: dict) -> None:
 
     if not broker_offset_is_validated():
         try:
-            await broker_offset_hours("EURUSD")
+            await broker_offset_hours("EURUSD", market_port)
         except LOOP_ERRORS as exc:
             logger.warning(
                 "[TIMEBASE] No se pudo refrescar el offset del bróquer: %s",
@@ -77,21 +77,18 @@ async def _recover_broker_clock_and_risk(data: dict) -> None:
         )
 
 
-async def _mcp_health_loop():
+async def _mcp_health_loop(market_port) -> None:
     was_connected = None
     fallos_consecutivos = 0
     alerta_caida_emitida = False
     while True:
         try:
-            async with httpx.AsyncClient(timeout=5.0) as c:
-                r = await c.get(settings.mt5_http_url + "/api/v1/account/info")
-                r.raise_for_status()
-                data = r.json()
+            data = await market_port.get_account()
             connected = "balance" in data
             _mcp_status["connected"] = connected
             _mcp_status["detail"] = f"equity={data.get('equity')}" if connected else data.get("detail", "unknown")
             if connected:
-                await _recover_broker_clock_and_risk(data)
+                await _recover_broker_clock_and_risk(data, market_port)
         except LOOP_ERRORS as exc:
             connected = False
             _mcp_status["connected"] = False
@@ -174,9 +171,19 @@ async def lifespan(app: FastAPI):
     # P3-1d: UN guardián POR PAR habilitado — se crea ANTES del baseline del
     # día (un par sin guardián = sin protección diaria). Fuera del try: una
     # PAIRS inválida debe impedir el arranque, no dejar guardianes a medias.
+    # Un mismo registro sirve para guardianes, el health loop y el equity de
+    # arranque: el broker se resuelve por configuración (settings.broker_type),
+    # nunca por imports directos de services.mt5_client.
     from core.container import build_registry_from_settings
     from services.risk_guardian import get_risk_guardian
-    for _ctx in build_registry_from_settings().enabled():
+    registry = build_registry_from_settings()
+    market_port = registry.get("EURUSD").market
+    if market_port is None:
+        enabled = registry.enabled()
+        if not enabled:
+            raise ValueError("PAIRS: ningún par habilitado para el health loop")
+        market_port = enabled[0].market
+    for _ctx in registry.enabled():
         get_risk_guardian(_ctx.config.symbol)
 
     # P2-4: estado de riesgo persistente — RESTAURA el baseline del día (un
@@ -195,9 +202,9 @@ async def lifespan(app: FastAPI):
     except (HTTP_ERRORS + PARSE_ERRORS) as exc:
         logger.warning("[RISK-STATE] No se pudo leer equity para el baseline: %s", exc)
         boot_equity = None
-    await _initialize_clock_and_risk(boot_equity)
+    await _initialize_clock_and_risk(boot_equity, market_port)
 
-    _bg_tasks.add(asyncio.create_task(_mcp_health_loop()))
+    _bg_tasks.add(asyncio.create_task(_mcp_health_loop(market_port)))
     # P3-2b: backup programado del bundle (primera pasada a los 60 s).
     from services.model_backup import _model_backup_loop
     _bg_tasks.add(asyncio.create_task(_model_backup_loop()))
@@ -246,7 +253,7 @@ async def lifespan(app: FastAPI):
     logger.info("Shutdown completo")
 
 
-async def _initialize_clock_and_risk(boot_equity: float | None) -> None:
+async def _initialize_clock_and_risk(boot_equity: float | None, market_port) -> None:
     global _risk_state_ready
     from services.timebase import (
         broker_clock_ready,
@@ -261,7 +268,7 @@ async def _initialize_clock_and_risk(boot_equity: float | None) -> None:
         logger.exception("[TIMEBASE] No se pudo restaurar el offset persistido")
 
     try:
-        offset_h = await broker_offset_hours("EURUSD")
+        offset_h = await broker_offset_hours("EURUSD", market_port)
         if broker_offset_is_validated():
             logger.info(
                 "[TIMEBASE] Offset validado disponible al arrancar: %+d h",

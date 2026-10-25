@@ -28,6 +28,7 @@ import os
 import pandas as pd
 
 from config import settings
+from services.market_time import candle_time_series
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +106,7 @@ def fill_feed_hole(candles: list[dict], symbol: str, tf: str) -> list[dict]:
         frame = pd.DataFrame(candles)
         if "time" not in frame.columns:
             return candles
-        times = pd.to_datetime(frame["time"], errors="coerce", utc=True)
+        times = candle_time_series(frame["time"])
         if times.isna().any():
             return candles
     except (KeyError, ValueError, TypeError):
@@ -121,9 +122,7 @@ def fill_feed_hole(candles: list[dict], symbol: str, tf: str) -> list[dict]:
             symbol, tf, gap_h, settings.csv_history_dir,
         )
         return candles
-    csv_last = pd.to_datetime(
-        pd.Series([c["time"] for c in csv_candles]), utc=True
-    ).max()
+    csv_last = candle_time_series([c["time"] for c in csv_candles]).max()
     # Se reutiliza `times` (ya coercido en la comprobación superior) en vez de
     # re-parsear: un feed con formatos mezclados haría lanzar ValueError aquí
     # (→ 500) — el contrato es jamás excepción. Y la `time` de las vivas se

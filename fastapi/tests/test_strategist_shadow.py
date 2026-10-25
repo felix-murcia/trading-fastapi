@@ -107,7 +107,7 @@ async def _deliberate(narrative=None, *, spread=0.00012, fetch_side_effect=None,
     kwargs = {**_DEFAULTS, **over}
     narr = NARRATIVE if narrative is None else narrative
     with patch.object(strategist, "fetch_narrative", AsyncMock(return_value=narr)) as fn, \
-         patch.object(strategist, "get_spread", AsyncMock(return_value=spread)):
+         patch("services.mt5_client.get_spread", AsyncMock(return_value=spread)):
         if fetch_side_effect is not None:
             fn.side_effect = fetch_side_effect
         return await strategist.deliberate(**kwargs)
@@ -357,8 +357,8 @@ class TestCriteria:
     @pytest.mark.asyncio
     async def test_c7_spread_failure_degrades_only_c7(self):
         with patch.object(strategist, "fetch_narrative", AsyncMock(return_value=NARRATIVE)), \
-             patch.object(strategist, "get_spread",
-                          AsyncMock(side_effect=httpx.ConnectError("precio caído"))):
+             patch("services.mt5_client.get_spread",
+                   AsyncMock(side_effect=httpx.ConnectError("precio caído"))):
             d = await strategist.deliberate(**_DEFAULTS)
         c7 = _c(d, "C7_costs_vs_edge")
         assert c7["pass"] is None
@@ -603,7 +603,7 @@ def _post_predict(action, monkeypatch, position=0, *, deliberate_side_effect=Non
         stack.enter_context(patch("routers.ai.PPO.load", return_value=model))
         stack.enter_context(patch("services.news_scraper.get_macro_news", AsyncMock(return_value="No macro news")))
         stack.enter_context(patch.object(strategist, "fetch_narrative", AsyncMock(return_value=NARRATIVE)))
-        stack.enter_context(patch.object(strategist, "get_spread", AsyncMock(return_value=0.00012)))
+        stack.enter_context(patch("services.mt5_client.get_spread", AsyncMock(return_value=0.00012)))
         stack.enter_context(patch("httpx.AsyncClient", FakeAsyncClient))
         audit_mock = stack.enter_context(patch("routers.ai.log_to_audit", AsyncMock()))
         if deliberate_side_effect is not None:
@@ -678,3 +678,27 @@ class TestRouterDeliberation:
         warns = [r for r in caplog.records if "deliberación falló" in r.getMessage()]
         assert len(warns) == 1
         assert warns[0].levelno == logging.WARNING
+
+
+# ─── B4.2: desacoplamiento de broker ──────────────────────────────────────────
+
+class TestB42NoMt5ClientDirectImport:
+    """strategist.py no importa services.mt5_client directamente."""
+
+    def test_no_module_level_import_of_mt5_client(self):
+        """El módulo strategist no hace `from services import mt5_client` ni `from services.mt5_client import`."""
+        import services.strategist as st
+        source = open(st.__file__).read()
+        assert "from services import mt5_client" not in source
+        assert "from services.mt5_client import" not in source
+        assert "import services.mt5_client" not in source
+
+    @pytest.mark.asyncio
+    async def test_sample_spread_uses_injected_market_port(self):
+        """_sample_spread usa el market_port inyectado en lugar de mt5_client directo."""
+        from core.adapters import MT5MarketDataAdapter
+        mp = MT5MarketDataAdapter()
+        with patch("services.mt5_client.get_spread", AsyncMock(return_value=0.00012)):
+            spread, err = await strategist._sample_spread("EURUSD", 0.0001, market_port=mp)
+        assert err is None
+        assert spread == pytest.approx(1.2)  # 0.00012 / 0.0001 = 1.2 pips

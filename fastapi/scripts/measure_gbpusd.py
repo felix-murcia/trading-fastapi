@@ -21,7 +21,6 @@ import statistics
 import time
 
 from services.measurement import canonical_direction, skill_vs_base, wilson_lower_bound
-from services.mt5_client import get_candles_with_offset
 
 SYMBOL = "GBPUSD"
 COUNT = 1999
@@ -106,8 +105,11 @@ RULES = {
 }
 
 
-async def main() -> int:
-    raw, offset_h = await get_candles_with_offset(SYMBOL, "H1", COUNT)
+async def main(market_port=None) -> int:
+    if market_port is None:
+        from core.container import build_registry_from_settings
+        market_port = build_registry_from_settings().get(SYMBOL).market
+    raw, offset_h = await market_port.get_candles_with_offset(SYMBOL, "H1", COUNT)
     now = time.time()
     pairs = sorted(
         (float(c["time"]), float(c["open"]), float(c["high"]), float(c["low"]), float(c["close"]))

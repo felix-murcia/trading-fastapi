@@ -104,3 +104,17 @@ class TestCrossAuditEndpoint:
         assert r.status_code == 200, r.text
         body = r.json()
         assert "checks" in body and "verdict" in body
+
+
+# ─── B4.2: desacoplamiento de broker ──────────────────────────────────────────
+
+class TestB42CrossAuditNoMt5ClientDirectImport:
+    """services/cross_audit.py no importa services.mt5_client directamente."""
+
+    def test_no_module_level_import_of_mt5_client(self):
+        """El módulo cross_audit no hace `from services import mt5_client` ni `from services.mt5_client import`."""
+        import services.cross_audit as ca_mod
+        source = open(ca_mod.__file__).read()
+        assert "from services import mt5_client" not in source
+        assert "from services.mt5_client import" not in source
+        assert "import services.mt5_client" not in source

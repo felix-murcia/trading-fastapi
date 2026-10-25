@@ -69,6 +69,62 @@ rechazo de órdenes. **Validación:** `pytest fastapi/tests/ -q` →
 `fastapi/main.py`, `fastapi/services/order_manager.py` y tests temporales/de
 órdenes.
 
+### Evidencia — desacoplamiento de broker B5.2 (routers vía puerto de mercado, 2026-10-25)
+
+`routers/ai.py` y `routers/smc.py` ya no construyen URLs del MCP con
+`httpx` directo a `settings.mt5_http_url`; resuelven los puertos desde
+`build_registry_from_settings()`/`_get_registry()` y consumen
+`MarketDataPort` (`get_account`, `get_candles`, `get_deals`,
+`get_candles_with_offset`). `predict_direction` y `pipeline_health` usan
+`ctx.market`; `get_analytics` usa `get_deals()/get_account()/get_candles_with_offset()`.
+`_hf_candles_for_obs` y `_higher_tf_context_line` aceptan tanto
+`list[dict]` (puerto) como objetos de respuesta HTTP legacy para mantener
+los harnesses existentes. Se eliminó `import httpx` de `routers/ai.py` y
+`detect_utc_offset_hours` de `routers/smc.py`. Se corrigió la detección de
+huecos de feed sobre sellos en epoch de segundos (el puerto de mercado
+entrega epoch; `pd.to_datetime` sin `unit` los leía como nanosegundos y
+dejaba ciega la guarda >168 h) mediante `services.market_time.candle_time_series`
+y `candle_timestamp`, usados en `services/feed_patcher.py` y `routers/ai.py`.
+Se añadieron 4 pruebas de regresión (`test_feed_hole_csv.py` epoch vs ISO,
+3 en `test_t31_clock_normalization.py`) y se fijaron fakes httpx de los
+harnesses legacy (`params=` + `raise_for_status()`). **Validación:**
+`pytest fastapi/tests/ -q` → **1388 passed, 2 xfailed**.
+Archivos funcionales: `fastapi/routers/ai.py`, `fastapi/routers/smc.py`,
+`fastapi/services/feed_patcher.py`, `fastapi/services/market_time.py`.
+Regresión: `fastapi/tests/test_feed_hole_csv.py`,
+`fastapi/tests/test_t31_clock_normalization.py`,
+`fastapi/tests/test_pack_1_4_prompt_context.py`,
+`fastapi/tests/test_t30_higher_tf.py`.
+
+### Evidencia — desacoplamiento de broker B6.1/B6.2 (offset y timebase vía puerto, 2026-10-25)
+
+**B6.1 — `mt5_client.py` sin lógica de offset**: eliminado `_resolve_offset`;
+`normalize_candles` y `get_candles_with_offset` aplican el offset ya conocido
+vía `timebase.current_broker_offset()` en lugar de auto-detectarlo. La
+detección de offset es responsabilidad exclusiva de
+`services.timebase.broker_offset_hours()`.
+
+**B6.2 — `timebase.broker_offset_hours(symbol, market_port)` vía puerto**:
+`timebase.py` ya no importa `httpx` para consultar al broker; obtiene precio
+y velas a través de `MarketDataPort.get_price(symbol)` y
+`MarketDataPort.get_candles(symbol, "H1", 3)`. Añadido `get_price(symbol)` al
+`MarketDataPort` (core/ports.py) con implementación en `MT5MarketDataAdapter`
+y `MockBrokerAdapter` (core/adapters.py). `main.py` y
+`services/daily_ledger.py` inyectan `market_port` en las llamadas a
+`broker_offset_hours`. `main.py` pasa `market_port` a
+`_initialize_clock_and_risk` y `_recover_broker_clock_and_risk`.
+
+**Validación:** `pytest fastapi/tests/ -q` → **1390 passed, 2 xfailed**.
+Archivos funcionales: `fastapi/services/timebase.py`,
+`fastapi/services/mt5_client.py`, `fastapi/core/ports.py`,
+`fastapi/core/adapters.py`, `fastapi/main.py`,
+`fastapi/routers/smc.py`, `fastapi/services/daily_ledger.py`.
+Regresión: `fastapi/tests/test_timebase_hardening.py`,
+`fastapi/tests/test_timebase_alignment.py`,
+`fastapi/tests/test_d3_utc_day_domain.py`,
+`fastapi/tests/test_orders_prepare.py`,
+`fastapi/tests/test_g2_b1_reward_gate.py`.
+
 ## Arquitectura
 
 ```

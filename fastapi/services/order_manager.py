@@ -125,7 +125,8 @@ async def mark_order_filled(
     return row["id"]
 
 
-async def _total_risk_eur(open_all: list[dict], equity: float) -> tuple[float, str]:
+async def _total_risk_eur(open_all: list[dict], equity: float,
+                          market_port) -> tuple[float, str]:
     """G2-5/D2 (orden Félix 2026-10-17): riesgo-1R agregado de las posiciones
     abiertas de la cuenta, en EUR (moneda de la cuenta).
 
@@ -145,7 +146,6 @@ async def _total_risk_eur(open_all: list[dict], equity: float) -> tuple[float, s
     """
     if not open_all:
         return 0.0, ""
-    from services.mt5_client import get_candles
     from services.position_sizing import (
         PIP_SIZE, expected_close_eur, is_supported,
     )
@@ -153,7 +153,7 @@ async def _total_risk_eur(open_all: list[dict], equity: float) -> tuple[float, s
     try:
         # H1×1 probado en el endpoint (M1 no verificado): para conversión de
         # riesgo, el cierre H1 más reciente tiene precisión de sobra.
-        rows = await get_candles("EURUSD", "H1", 1)
+        rows = await market_port.get_candles("EURUSD", "H1", 1)
         if rows:
             rate = float(rows[-1]["close"])
     except LOOP_ERRORS as exc:   # logueado + bloqueo explícito (no silencioso)
@@ -219,10 +219,9 @@ async def prepare(req: OrderPrepareRequest) -> OrderPrepareResponse:
     # 1c. Risk Guardian: ¿se puede abrir nueva posición en ESTE par?
     from services.risk_guardian import check_risk
     from services.risk_state_store import flush_risk_state
-    from services.mt5_client import get_account, get_positions
     try:
-        acct = await get_account()
-        positions_data = await get_positions()
+        acct = await pair_ctx.market.get_account()
+        positions_data = await pair_ctx.market.get_positions()
         # P3-1d: el cupo de posiciones es POR PAR — solo cuentan las de este
         # mundo; un par jamás consume la capacidad de otro.
         open_all = [
@@ -263,7 +262,7 @@ async def prepare(req: OrderPrepareRequest) -> OrderPrepareResponse:
         if settings.max_total_risk_pct is not None:
             # D2 activo (canario 0.09): medir el riesgo-1R agregado en EUR.
             total_risk_eur, risk_err = await _total_risk_eur(
-                open_all, acct["equity"]
+                open_all, acct["equity"], pair_ctx.market
             )
             if risk_err:
                 # No se pudo medir la exposición ⇒ no se añade (fail-closed).

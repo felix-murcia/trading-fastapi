@@ -183,6 +183,52 @@ def correct_candle_epoch(candle_epoch: float, offset_hours: int) -> float:
     return float(candle_epoch) - offset_hours * 3600.0
 
 
+def candle_time_series(values):
+    """Sellos de vela → `pd.Series` de timestamps UTC (NaT si no convertible).
+
+    En el sistema conviven DOS formatos de sello a propósito:
+
+      - epoch en SEGUNDOS — lo que devuelve `mt5_client.normalize_candles`
+        (convención `_to_ts`; en este sistema no circulan milisegundos);
+      - ISO-8601 con `Z` — la respuesta cruda del MCP y los CSV de
+        `resultadosBT/`.
+
+    `pd.to_datetime` interpreta un entero como NANOSEGUNDOS por defecto: sin
+    esta conversión un hueco de 480 h se lee como 480 ns y las guardas de
+    continuidad (>168 h) no disparan jamás (regresión B5.2, 2026-10-25: el
+    parche de agujero quedó desactivado en silencio). El dominio se decide
+    POR ELEMENTO — nunca se adivina una unidad distinta de segundos.
+
+    Un valor no convertible es `NaT`, no una fecha inventada: el consumidor
+    decide (feed intacto / serie no servible).
+    """
+    import pandas as pd
+
+    series = values if isinstance(values, pd.Series) else pd.Series(list(values))
+
+    def _one(value):
+        if value is None or isinstance(value, bool):
+            return pd.NaT
+        if isinstance(value, (int, float)):
+            if value != value:          # NaN
+                return pd.NaT
+            return pd.Timestamp(float(value), unit="s", tz="UTC")
+        try:
+            return pd.Timestamp(value, tz="UTC")
+        except (ValueError, TypeError, OverflowError):
+            return pd.NaT
+
+    return pd.Series(
+        [_one(value) for value in series], index=series.index,
+        dtype="datetime64[ns, UTC]",
+    )
+
+
+def candle_timestamp(value):
+    """Un sello de vela (epoch segundos o ISO) → `pd.Timestamp` UTC (o NaT)."""
+    return candle_time_series([value]).iloc[0]
+
+
 def shift_candle_times(candles: list, offset_hours: int) -> list:
     """Desplaza los sellos de vela al UTC real CONSERVANDO su formato.
 

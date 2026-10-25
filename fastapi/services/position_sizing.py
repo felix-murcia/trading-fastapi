@@ -49,13 +49,15 @@ _USD_QUOTE_NON_EUR_BASE = {"GBPUSD", "AUDUSD", "NZDUSD", "XAUUSD"}
 _PIP_10_QUOTE = {"EURUSD", "GBPUSD", "AUDUSD", "NZDUSD", "XAUUSD", "USDCHF"}
 
 
-async def eurusd_price() -> float:
+async def eurusd_price(market_port=None) -> float:
     """Precio EURUSD vigente (para la conversión honesta USD→EUR del gate de
     recompensa). Misma fuente que usa el risk_guardian (G2-5/D2): la última
     vela H1 del feed. Sin precio ⇒ el llamador falla ruidosamente.
     """
-    from services.mt5_client import get_candles
-    rows = await get_candles("EURUSD", "H1", 1)
+    if market_port is None:
+        from core.container import build_registry_from_settings
+        market_port = build_registry_from_settings().get("EURUSD").market
+    rows = await market_port.get_candles("EURUSD", "H1", 1)
     if not rows:
         raise ValueError("eurusd_price: feed sin velas")
     return float(rows[-1]["close"])

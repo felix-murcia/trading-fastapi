@@ -57,6 +57,9 @@ def _fake_httpx_client(deals):
         def __init__(self, payload):
             self._payload = payload
 
+        def raise_for_status(self):
+            return None
+
         def json(self):
             return self._payload
 
@@ -142,6 +145,9 @@ class TestJournalWinLossLabel:
 
         class _Resp:
             status_code = 200
+
+            def raise_for_status(self):
+                return None
 
             def json(self):
                 return {"choices": [{"message": {"content":

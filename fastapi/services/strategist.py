@@ -61,7 +61,6 @@ import pandas as pd
 from config import settings
 from core.rules import is_winning_close
 from db.connection import get_pool
-from services.mt5_client import get_spread
 from services.risk_guardian import get_account_state, registered_guardians
 
 logger = logging.getLogger(__name__)
@@ -205,14 +204,18 @@ def _spread_stats(symbol: str) -> dict:
     }
 
 
-async def _sample_spread(symbol: str, pip_size: float) -> tuple[Optional[float], Optional[str]]:
+async def _sample_spread(symbol: str, pip_size: float,
+                         market_port=None) -> tuple[Optional[float], Optional[str]]:
     """Muestra viva de spread para C7 — contención SOLO a nivel de criterio.
 
     Un fallo del endpoint de precio degrada C7 con `error` explícito en la
     traza; el resto de la deliberación (narrativo, C1–C6, C8) se emite igual.
     """
+    if market_port is None:
+        from core.container import build_registry_from_settings
+        market_port = build_registry_from_settings().get(symbol).market
     try:
-        spread_price = await get_spread(symbol)
+        spread_price = await market_port.get_spread(symbol)
     except (httpx.HTTPError, ValueError, TypeError, AttributeError) as exc:
         return None, f"{type(exc).__name__}: {exc}"
     spread_pips = float(spread_price) / pip_size

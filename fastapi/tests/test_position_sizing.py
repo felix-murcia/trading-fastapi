@@ -10,6 +10,7 @@ Cubren las funciones con valores numéricos verificados de forma independiente
 - `expected_close_eur`: paridad con el deal del bróker y fallo ruidoso sin tasa.
 """
 import pytest
+from unittest.mock import AsyncMock, patch
 
 from core import rules
 from core.rules import MIN_WIN_EUR, is_winning_close
@@ -167,3 +168,27 @@ class TestExpectedCloseEur:
     def test_non_positive_inputs_raise(self, pips, volume, price):
         with pytest.raises(ValueError):
             ps.expected_close_eur("EURUSD", pips, volume, price)
+
+
+# ─── B4.2: desacoplamiento de broker ──────────────────────────────────────────
+
+class TestB42NoMt5ClientDirectImport:
+    """position_sizing.py no importa services.mt5_client directamente."""
+
+    def test_no_module_level_import_of_mt5_client(self):
+        """El módulo position_sizing no hace `from services import mt5_client` ni `from services.mt5_client import`."""
+        import services.position_sizing as ps_mod
+        source = open(ps_mod.__file__).read()
+        assert "from services import mt5_client" not in source
+        assert "from services.mt5_client import" not in source
+        assert "import services.mt5_client" not in source
+
+    @pytest.mark.asyncio
+    async def test_eurusd_price_uses_injected_market_port(self):
+        """eurusd_price usa el market_port inyectado para get_candles."""
+        from core.adapters import MT5MarketDataAdapter
+        mp = MT5MarketDataAdapter()
+        with patch("services.mt5_client.get_candles",
+                   AsyncMock(return_value=[{"close": 1.33}])):
+            price = await ps.eurusd_price(market_port=mp)
+        assert price == pytest.approx(1.33)

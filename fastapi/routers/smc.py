@@ -1,12 +1,13 @@
 import json
 import logging
 from fastapi import APIRouter, Depends
+from core.container import build_registry_from_settings
 from core.rules import is_winning_close
 from db.connection import get_pool
-from services.market_time import detect_utc_offset_hours
 from config import settings
 from .deps import verify_token
 from services.error_taxonomy import LOOP_ERRORS
+from services.timebase import broker_offset_hours
 
 logger = logging.getLogger(__name__)
 
@@ -52,52 +53,43 @@ async def get_all_news(_: None = Depends(verify_token)):
 
 @router.get("/analytics")
 async def get_analytics(_: None = Depends(verify_token)):
-    import httpx
     from collections import defaultdict
     from datetime import datetime, timedelta, timezone
 
-    async with httpx.AsyncClient() as client:
-        try:
-            res = await client.get(f"{settings.mt5_http_url}/api/v1/history/deals")
-            deals = res.json()
-            res_acc = await client.get(f"{settings.mt5_http_url}/api/v1/account/info")
-            account_info = res_acc.json() if res_acc.status_code == 200 else {}
+    registry = build_registry_from_settings()
+    market_port = registry.get("EURUSD").market
+    if market_port is None:
+        enabled = registry.enabled()
+        if not enabled:
+            return {"error": "PAIRS: ningún par habilitado para el analytics"}
+        market_port = enabled[0].market
 
-            # D-3 (R-2): el límite diario de riesgo agrupa por UTC real
-            # (risk_state_store/risk_guardian: now(utc).date()), pero los
-            # time_msc de MT5 son reloj BROKER vendido como epoch — verificado
-            # 2026-09-30: orders.created_at 06:50:17.456 (UTC real, DB) ↔
-            # deal de apertura 09:50:17.535 (epoch→UTC) = +3h exactos, mismos
-            # ms. Sin corregir, un cierre de 21:00–00:00 UTC cae en el día
-            # broker: el dashboard y el límite miden ventanas distintas.
-            # El desfase se detecta con la vela formándose (market_time,
-            # auto-corrector ya probado en P2-3): 0 si el feed pasa a sellar
-            # UTC honesto o cambia el DST del broker — cero hardcode. Si no
-            # hay vela detectable no se agrupa en falso: se propaga el error
-            # (convención: sin fallbacks silenciosos).
-            broker_offset_h = 0
-            if deals:
-                res_cdl = await client.get(
-                    f"{settings.mt5_http_url}/api/v1/market/candles/latest"
-                    f"?symbol_name={deals[0]['symbol']}&timeframe=H1&count=1",
+    try:
+        deals = await market_port.get_deals()
+        account = await market_port.get_account()
+        account_info = account if isinstance(account, dict) else {}
+
+        # D-3 (R-2): el desfase broker→UTC se detecta a través del puerto de
+        # mercado (`timebase.broker_offset_hours`, B6.2) y se reutiliza para
+        # agrupar los deals por día UTC real, alineada con el límite diario
+        # de riesgo.
+        broker_offset_h = 0
+        if deals:
+            symbol = deals[0].get("symbol", "EURUSD")
+            broker_offset_h = await broker_offset_hours(symbol, market_port)
+            # Sin vela detectable no se agrupa en falso: con deals pero sin
+            # feed de velas no hay offset fiable, y agrupar con 0 sería un
+            # silent fallback (D-3 / R-2: el día debe ser UTC real).
+            offset_candles = await market_port.get_candles(symbol, "H1", 1)
+            if not offset_candles:
+                logger.error(
+                    "[ANALYTICS] deals sin velas H1 detectables → sin offset "
+                    "broker→UTC fiable; no se agrupa"
                 )
-                if res_cdl.status_code != 200:
-                    raise RuntimeError(
-                        f"candles/latest HTTP {res_cdl.status_code} (desfase broker→UTC)"
-                    )
-                raw = res_cdl.json()
-                cdl = raw if isinstance(raw, list) else raw.get("candles", [])
-                t = cdl[0]["time"] if cdl else None
-                if isinstance(t, (int, float)):
-                    candle_time = datetime.fromtimestamp(t, tz=timezone.utc)
-                elif isinstance(t, str):
-                    candle_time = datetime.fromisoformat(t.replace("Z", "+00:00"))
-                else:
-                    raise ValueError(f"vela sin 'time' para desfase broker→UTC: {t!r}")
-                broker_offset_h = detect_utc_offset_hours(candle_time)
-        except LOOP_ERRORS as e:
-            logger.error(f"Error fetching deals for stats: {e}")
-            return {"error": str(e)}
+                return {"error": "no hay velas H1 para detectar el desfase broker→UTC"}
+    except LOOP_ERRORS as e:
+        logger.error(f"Error fetching deals for stats: {e}")
+        return {"error": str(e)}
 
     daily_pnl = defaultdict(float)
     wins = 0

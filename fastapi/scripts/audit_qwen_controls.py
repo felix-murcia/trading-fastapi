@@ -40,7 +40,6 @@ import asyncpg
 import httpx
 
 from services.measurement import canonical_direction, skill_vs_base
-from services.mt5_client import get_candles_with_offset
 
 MIN_N = 30
 HORIZON_H = 24
@@ -163,9 +162,13 @@ async def _rows(conn, days: int, symbols: list[str]) -> list[dict]:
     )
 
 
-async def _measure_symbol(conn, symbol: str, days: int) -> dict:
+async def _measure_symbol(conn, symbol: str, days: int,
+                          market_port=None) -> dict:
     rows = await _rows(conn, days, [symbol])
-    raw, offset_h = await get_candles_with_offset(symbol, "H1", 2000)
+    if market_port is None:
+        from core.container import build_registry_from_settings
+        market_port = build_registry_from_settings().get(symbol).market
+    raw, offset_h = await market_port.get_candles_with_offset(symbol, "H1", 2000)
     now = time.time()
     closed = [c for c in raw if float(c["time"]) + 3600 <= now]
     pairs = sorted((float(c["time"]), float(c["close"])) for c in closed)
