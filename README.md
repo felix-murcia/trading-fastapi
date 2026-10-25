@@ -169,8 +169,8 @@ cerrado, y no usa información posterior a `t0 + 20 h`.
 - `trade_outcomes` gana columnas: `entry_price`, `commission`, `fee`, `slippage_pips`, `quote_bid`, `quote_ask`, `quote_time` (migración `ADD COLUMN IF NOT EXISTS` en `db/schema.sql`)
 - `/predict` guarda el quote por `cycle_id` en caché de memoria; `/trade/filled` calcula `slippage_pips = |entry_price − quote_relevante| / pip_size` (ask para BUY, bid para SELL) y lo guarda con los costes
 - EA v14.3 actual no envía los nuevos campos → degradación honesta (valores None/0, sin romper)
-- **EA v15.0 pendiente:** Félix debe compilar y desplegar el EA con los nuevos campos (ver `mql5/AI_Quant_Terminal.mq5`, `#property version "15.0"`)
-- Suite: 1398 passed, 2 xfailed (incluyendo tests actualizados de `test_trade_filled_webhook.py`)
+- EA v15.0 desplegado y conectado (2026-10-25 23:20 MT5) — envía bid/ask/quote_time en /predict y entry_price/commission/fee en /trade/filled; backend calcula slippage_pips y guarda todos los costes en trade_outcomes
+- Suite: 1398 passed, 2 xfailed (incluyendo tests actualizados de test_trade_filled_webhook.py)
 
 Archivos funcionales: `fastapi/routers/ai.py`, `fastapi/services/auto_retrain.py`, `fastapi/db/schema.sql`.
 Regresión: `fastapi/tests/test_trade_filled_webhook.py`, `fastapi/tests/architecture_baseline.py`.
