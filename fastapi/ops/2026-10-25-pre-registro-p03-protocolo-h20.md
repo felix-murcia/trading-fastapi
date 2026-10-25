@@ -204,10 +204,12 @@ Los benchmarks se miden con **la misma función** `canonical_direction()` que lo
 | **Azar** | 50% BUY / 50% SELL (base condicional) |
 
 **Definiciones de límites de riesgo (C8):**
-- **Drawdown diario**: `(peak_equity_día − equity_actual) / peak_equity_día`, medido a cierre de cada día UTC.
-- **Exposición por par**: `volumen × precio × 100.000 / equity_cuenta`, medida en cada operación abierta.
-- **Exposición correlacionada EURUSD+GBPUSD**: suma de exposición de ambos pares, dado ρ≈0.7-0.9 medido en ventana de 30 días.
-- **Drawdown semanal**: `(peak_equity_semana − equity_actual) / peak_equity_semana`, medido al cierre de cada domingo UTC.
+- **Drawdown diario**: `(peak_equity_día − equity_actual) / peak_equity_día`, medido a cierre de cada día UTC. Regla de falla: cualquier día con drawdown > 5% hace fallar C8. equity_actual = equity al cierre UTC.
+- **Drawdown semanal**: `(peak_equity_semana − equity_actual) / peak_equity_semana`, medido al cierre de cada domingo UTC (lunes 00:00 UTC a domingo 23:59 UTC, peak_equity_semana = máximo equity intradía de la semana). Regla de falla: cualquier semana con drawdown > 10% hace fallar C8.
+- **Exposición por par**: `volumen × precio × 100.000 / equity_cuenta`, medida en cada operación abierta. Límite: ≤ 3% por operación.
+- **Exposición agregada por par**: suma de exposiciones de todas las posiciones abiertas simultáneas de un mismo par (posiciones en dirección opuesta se netsan: valor absoluto de la suma neta). Límite: ≤ 15% del equity_cuenta.
+- **Exposición correlacionada EURUSD+GBPUSD**: `(Exp_EURUSD + Exp_GBPUSD) × ρ₃₀`, donde `Exp` es la exposición agregada del par y `ρ₃₀` es la correlación de retornos log horarios medidos en ventana móvil de 30 sesiones de mercado de Forex (lunes a viernes, excluyendo fines de semana y festivos). Límite: ≤ 5% del equity_cuenta. ρ₃₀ se recalcula al inicio de cada sesión de trading.
+- **Día/semana sin operaciones**: si no hay operaciones abiertas ni cierres en un día o semana dado, el drawdown se reporta como 0 % y no cuenta como violación; `peak_equity_día` / `peak_equity_semana` se mantienen del último valor válido; exposición agregada por par = 0; exposición correlacionada = 0; el día/semana se cuenta como cumplimiento de C8 (no como violación).
 
 El criterio T-31 de >55% con n≥100 se reporta como diagnóstico, **no** como prueba de edge sin comparación/IC.
 
