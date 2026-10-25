@@ -6,10 +6,10 @@ Terminal de Ejecución y Telemetría para Cerebro Autónomo (FastAPI + PPO v3).
 - Rol del Servidor: Decisión direccional, dimensionamiento de lotes, SL, TP y gestión de riesgo.
 */
 #property copyright "AI Quant Terminal"
-#property version   "14.3"
+#property version   "15.0"
 #property strict
 
-#define EA_VERSION "14.3"
+#define EA_VERSION "15.0"
 
 #include <Trade\Trade.mqh>
 
@@ -428,12 +428,15 @@ void OnTick()
                   "no las cuenta (su contrato es su magic); el backend las ve en MT5 "
                   "y bloquea el duplicado", Symbol(), foreignPositions);
 
-     // Construcción del payload extendido (v14.0: magic + recuentos visibles)
+     // Construcción del payload extendido (v14.0: magic + recuentos visibles; v15.0: quote para slippage)
      double mt5_now = (double)TimeCurrent();
+     MqlTick tick;
+     SymbolInfoTick(Symbol(), tick);
      string body = StringFormat(
-        "{\"symbol\":\"%s\",\"timeframe\":\"M5\",\"position\":%d,\"entry_price\":%.5f,\"sl_price\":%.5f,\"tp_price\":%.5f,\"steps_in_trade\":%d,\"mt5_time\":%.3f,\"magic\":%d,\"my_positions\":%d,\"foreign_positions\":%d}",
+        "{\"symbol\":\"%s\",\"timeframe\":\"M5\",\"position\":%d,\"entry_price\":%.5f,\"sl_price\":%.5f,\"tp_price\":%.5f,\"steps_in_trade\":%d,\"mt5_time\":%.3f,\"magic\":%d,\"my_positions\":%d,\"foreign_positions\":%d,\"bid\":%.5f,\"ask\":%.5f,\"quote_time\":%.3f}",
         Symbol(), currentPos, entryPrice, currentSL, currentTP, stepsInTrade, mt5_now,
-        (int)MagicNumber, myPositions, foreignPositions
+        (int)MagicNumber, myPositions, foreignPositions,
+        tick.bid, tick.ask, mt5_now
      );
 
    // 2. LLAMADA AL CEREBRO
@@ -1027,7 +1030,11 @@ void CloseAllPositions()
        }
 
      // Enviar webhook de telemetría a FastAPI
-    string body = "";
+     // P1.2b: costes de ejecución (commission del apertura, fee del cierre)
+     double dealCommission = openingDeal > 0 ? HistoryDealDouble(openingDeal, DEAL_COMMISSION) : 0.0;
+     double dealFee        = HistoryDealDouble(dealTicket, DEAL_FEE);
+     string cycle_id       = IntegerToString((long)closeTime);
+     string body = "";
     StringConcatenate(body, "{",
        "\"symbol\":\"", Symbol(), "\",",
        "\"entry_time\":\"", IntegerToString(entryTime), "\",",
@@ -1046,7 +1053,11 @@ void CloseAllPositions()
        "\"opening_deal\":", IntegerToString((long)openingDeal), ",",
        "\"opening_magic\":", IntegerToString(openingMagic), ",",
        "\"opening_deal_found\":", openingDeal > 0 ? "true" : "false", ",",
-       "\"magic_match\":", (openingDeal > 0 && openingMagic == (long)MagicNumber) ? "true" : "false",
+       "\"magic_match\":", (openingDeal > 0 && openingMagic == (long)MagicNumber) ? "true" : "false", ",
+       "\"cycle_id\":\"", cycle_id, "\",",
+       "\"entry_price\":", DoubleToString(entryPrice, 5), ",",
+       "\"commission\":", DoubleToString(dealCommission, 2), ",",
+       "\"fee\":", DoubleToString(dealFee, 2),
        "}"
     );
     PrintFormat("[AI Terminal] Webhook body: %s", body);
