@@ -274,8 +274,8 @@ Antes de la medición del holdout, se calcula el `n_eff` esperado:
 | **LLM** | Modelo | `Qwen-4B-Instruct` (archivo `Qwen--Qwen3-4B-Instruct-2507-q4_k_m.gguf`, ejecutado vía `llama_cpp.server` en Jetson) |
 | **LLM** | Proveedor | `localhost` (ejecutado localmente en la Jetson vía `llama_cpp.server`, no proveedor remoto) |
 | **LLM** | Propietario del modelo | `Qwen (Alibaba Cloud)` (modelo de código abierto de Alibaba Cloud, ejecutado localmente) |
-| **LLM** | Versión del prompt | `PENDIENTE_DE_FIJAR` — **REQUERIDO:** SHA-256 del template de prompt utilizado, a calcular antes de la firma |
-| **LLM** | Temperatura / parámetros de inferencia | `PENDIENTE_DE_FIJAR` — **REQUERIDO:** temperatura, max_tokens, response_format, a fijar antes de la firma |
+| **LLM** | Versión del prompt | `0.1` — **REQUERIDO:** SHA-256 del template de prompt utilizado, a calcular antes de la firma |
+| **LLM** | Temperatura / parámetros de inferencia | `temperatura=0.4, max_tokens=160, response_format={"type":"json_object"}` |
 
 **Regla:** ninguno de estos campos puede quedar como `PENDIENTE_DE_FIJAR` en el momento de la firma. Todos deben rellenarse con valores reales (hashes SHA-256 calculados sobre los archivos reales, versiones de código verificables, nombre/versión del modelo LLM, proveedor, propietario, SHA-256 del prompt, parámetros de inferencia) antes de que el revisor independiente firme el pre-registro. Cualquier campo que quede como `PENDIENTE_DE_FIJAR` en el momento de la firma invalida el protocolo.
 
