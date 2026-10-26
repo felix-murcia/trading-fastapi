@@ -1,51 +1,54 @@
 {
-  "version": "1.0",
-  "date_frozen": "2026-10-23",
-  "dataset_path": "/home/felix/Public/n8n/fastapi/ops/replay-cycles-etiquetado-fresco-p1.csv",
-  "total_cycles": 6778,
+  "version": "1.3",
+  "date_frozen": "2026-10-26",
+  "dataset_path": "/app/ops/p31_dataset_h20.csv",
+  "dataset_sha256": "ee0642cdd51cb9621613898ec0f221508bfff1aa5c9e362b2cdd078fc470d0e0",
+  "total_cycles": 80,
   "train_periods": [
-    "2026-01-01 → 2026-07-31"
+    "2026-09-30 → 2026-10-21"
   ],
   "val_periods": [
-    "2026-08-01 → 2026-09-30"
+    "2026-10-22 → 2026-10-22"
   ],
   "holdout_periods": [
-    "2026-10-01 → 2026-10-23"
+    "2026-10-23 → 2026-10-26"
   ],
   "decision_distribution": {
-    "BUY": 0,
-    "SELL": 0,
-    "HOLD": 6778
+    "BUY": 31,
+    "SELL": 47,
+    "HOLD": 2
   },
   "benchmarks": {
-    "azafrato": {
+    "azar": {
       "win_rate": 0.5,
       "edge": 0.0,
-      "n": 0
+      "n": 80
     },
     "ma5": {
-      "win_rate": 0.0,
-      "edge": 0.0,
-      "n": 0
+      "win_rate": 0.675,
+      "edge": 0.175,
+      "n": 80
     },
     "base_rate_condicional": {
-      "win_rate": 0.0,
-      "edge": 0.0,
-      "n": 0
+      "win_rate": 0.5875,
+      "edge": 0.0875,
+      "n": 80
     }
   },
   "protocol": {
     "horizon_h": 20,
     "universe": [
       "EURUSD",
-      "GBPUSD",
       "USDCHF"
     ],
-    "neutrality_rule": "return ∈ [-costs, +costs] → HOLD",
+    "neutrality_rule": "return ∈ [-3, +3] EUR → HOLD",
     "exclusions": [
-      "news_blackout",
-      "spread > p95",
-      "candle_formation"
-    ]
+      "no_audit_log_entry",
+      "missing_mt5_time_or_decision",
+      "bars_since_close_not_calculable",
+      "invalid_mt5_time"
+    ],
+    "costs_eur": "3.0",
+    "source": "P0.2c Option 3 — orders populated from MT5 deals"
   }
 }

@@ -1,197 +1,168 @@
-# Revisión Independiente (2ª iteración) — Pre-registro P0.3 (Protocolo H=20)
+# Revisión Independiente (5ª iteración) — Pre-registro P0.3 (Protocolo H=20)
 
 **Rol:** Revisor independiente (IA)
-**Documento revisado:** `2026-10-25-pre-registro-p03-protocolo-h20.md` (versión post-refinamiento)
-**Planes aplicados:** `PLAN_REFINAMIENTO_P03_parte1.md` + `parte2.md`
+**Documento revisado:** `2026-10-25-pre-registro-p03-protocolo-h20.md` (versión post-5ª iteración)
 **Fecha de revisión:** 2026-10-26
 
 ---
 
 ## Veredicto global
 
-**NO CERTIFICADO — devuelto con cambios obligatorios (NO-GO condicional, 3ª iteración).**
+**CERTIFICADO — con 4 condiciones de GO no bloqueantes y 3 correcciones de edición obligatorias *antes* de la primera medición (no antes de la firma).**
 
-Se ha avanzado sustancialmente: **los 12 cambios de la revisión anterior están incorporados en su mayoría**, y las ambigüedades metodológicas (FLAT_EPS, `n_eff`, convención de `time`, H4/D1, base congelada, `pip_value_eur`, `riesgo_fijo`, `ρ₃₀` congelado, anti-reset) están **cerradas a nivel de redacción**. Eso es un progreso real y lo reconozco explícitamente.
+Esta es la primera iteración en la que **el objeto medido está completamente identificado**. Los 3 bloqueantes acumulados se resuelven así:
 
-**Sin embargo, persisten 3 bloqueantes de certificación que son de naturaleza distinta a los de la iteración 1: ya no son ambigüedades de redacción, sino *placeholders sin rellenar* y *defectos de forma* que impiden verificar el sello.** Un protocolo perfectamente redactado con `PENDIENTE_DE_FIJAR` en todos los campos críticos no es certificable: no se puede firmar un compromiso sobre un modelo que no existe todavía en el documento.
+- **B1 (identidad del LLM):** ✅ **RESUELTO.** §10 contiene ahora identidad verificada *en runtime* del LLM servido (no declarada): GGUF `DarkIdol-Llama-3.1-8B-Instruct-1.2-Uncensored.Q2_K`, hash de pesos, servicio `llm-8b.service`, endpoint, versión de prompt, 3 hashes SHA-256 (mensaje de sistema, template de usuario, código fuente del prompt), parámetros de inferencia y ventana de contexto. Además declara la discrepancia con `llm-4b.service` y aporta un script reproducible (`scripts/prompt_identity_p03.py`). **Esto es exactamente lo que pedí en las iteraciones 1–4.** El objeto "PPO vs LLM" ya está definido por completo.
+- **B2 (sello del holdout):** ✅ **RESUELTO.** SHA-256 `84719806...eeb47`, fichero `ops/holdout-p03-20261016-20261023.json`, 426 filas (142×3), ventana exacta `[2026-10-16T00:00Z, 2026-10-24T00:00Z)`, serialización canónica congelada, script reproducible `scripts/seal_holdout_p03.py`, offset validado y persistido. Sello del 2026-10-26T14:40Z.
+- **B3 (roles y conflicto):** ✅ **RESUELTO.** Los 6 roles están nombrados (Félix autor; `agente-ingenieria` ajustador; DeepSeek revisor; Juan Gomez riesgo; Pilar Soarez custodio). El sello lo ejecutó Félix *como operador*, con Pilar Soarez como custodio formal, y se declara la separación. La declaración de conflicto es coherente.
+
+**Además se han corregido los defectos de edición de la 4ª iteración:** eliminada la duplicación de C8 (§3.1 it.4), eliminada la duplicación de §13 (§3.2 it.4), eliminado el desglose aritmético erróneo de §3 (§3.3 it.4), y añadida una declaración honesta de la limitación del prompt LLM (H=24 en el prompt vs H=20 en el protocolo, con uso de `bias` y no de `bias_prob`). **El autor ha hecho un trabajo serio de cierre.**
+
+**Sin embargo, mi certificación no es incondicional.** He encontrado **3 defectos de edición nuevos** (menores, corregibles en minutos) y **4 condiciones de GO** que ya estaban implícitas en el protocolo pero que deben quedar explícitas antes de la primera medición. **Ninguno de ellos es bloqueante de firma**, porque no afectan a la definición del objeto medido, a C1–C8, ni al sello del holdout. **Firmo el protocolo como pre-registro; condiciono el GO a que estos 7 puntos se resuelvan antes de tocar el holdout.**
 
 ---
 
 ## 1. Checklist de los 5 criterios de certificación
 
-| # | Criterio | Iteración 1 | Iteración 2 | Motivo del cambio / lo que falta |
-|---|----------|-------------|-------------|----------------------------------|
-| 1 | Sin ambigüedades en corte, etiquetas, abstención | ❌ | ✅ **CUMPLE** | §4 convención `time`, §4.3 truncamiento H4/D1, §5.1 FLAT_EPS relativo, §5.2 abstenciones excluidas de `n`, §11 unificado. Cerrado. |
-| 2 | C1–C8 medibles antes del holdout | ❌ | ⚠️ **PARCIAL** | C1, C2, C3, C4, C5, C6, C7, C8 **están definidos y son medibles en abstracto**. Pero C2 depende de `pip_value_eur(t0)` que se "captura en runtime" (correcto) y de un `riesgo_fijo` declarado (✅ 1%). **C8 sigue con un problema operativo real** (ver §4.1 abajo): `ρ₃₀` congelado con 30 sesiones pre-holdout es correcto, pero el holdout es de 6 sesiones y la ventana de 30 sesiones pre-holdout **cae dentro de validación (2026-10-01→10-15) + parte de desarrollo**, no es "pre-holdout limpio" en el sentido estricto. Hay que declarar explícitamente que esa ventana pertenece a validación/desarrollo y por tanto **no contamina el holdout** (es correcto, pero debe decirse). |
-| 3 | Sin conflicto de interés (autor ≠ ajustador) | ❌ | ⚠️ **PARCIAL** | §13 tiene la **estructura** correcta (roles separados, declaración de conflicto), pero **todos los roles están `PENDIENTE_DE_ASIGNAR`**. La declaración dice "el rol de modelista/tuner es independiente del autor y se identifica por nombre en la tabla anterior" — **pero no se identifica por nombre: está pendiente**. Una declaración de conflicto de interés con nombres pendientes **no es una declaración, es una intención**. **BLOQUEANTE de firma.** |
-| 4 | Holdout sellado antes de la primera medición | ❌ | ⚠️ **PARCIAL** | §9 tiene columnas SHA-256/Estado/Sello; §9.1 describe el procedimiento; §13 tiene rol de custodio. **Pero el SHA-256 sigue `PENDIENTE DE CÁLCULO` y la fecha/hora de sellado `PENDIENTE`.** El sello no está materializado. **BLOQUEANTE.** |
-| 5 | No se pueden ajustar umbrales tras observar resultados | ⚠️ | ✅ **CUMPLE** | §12.3 anti-reset añadida y correcta. §9.1 última viñeta ("cualquier cambio ... invalida este pre-registro"). §14 sólo-lectura. **Cerrado.** |
+| # | Criterio | It.1 | It.2 | It.3 | It.4 | It.5 | Motivo |
+|---|----------|------|------|------|------|------|--------|
+| 1 | Sin ambigüedades en corte, etiquetas, abstención | ❌ | ✅ | ✅ | ✅ | ✅ **CUMPLE** | Sin cambios respecto a it.4. |
+| 2 | C1–C8 medibles antes del holdout | ❌ | ⚠️ | ⚠️ | ⚠️ | ✅ **CUMPLE** | C8 corregido: eliminada la duplicación de it.4. C2 correcto. C1, C3–C7 correctos. **Cerrado.** |
+| 3 | Sin conflicto de interés (autor ≠ ajustador) | ❌ | ⚠️ | ✅ | ✅ | ✅ **CUMPLE (materializado)** | Los 6 roles están nombrados. La separación autor/ajustador/custodio/revisor es explícita y coherente. **Cerrado.** |
+| 4 | Holdout sellado antes de la primera medición | ❌ | ⚠️ | ✅ | ✅ | ✅ **CUMPLE (materializado)** | SHA-256 fijado, fichero identificado, 426 filas, serialización canónica, script reproducible, offset validado. **Cerrado.** |
+| 5 | No se pueden ajustar umbrales tras observar resultados | ⚠️ | ✅ | ✅ | ✅ | ✅ **CUMPLE** | §1, §9.1, §12.3, §14. **Cerrado.** |
 
-**Resultado: 2 de 5 cumplen plenamente, 3 parciales. No hay ningún ❌ duro nuevo; los parciales son de "falta rellenar", no de "está mal".**
-
----
-
-## 2. Verificación cambio-por-cambio contra el plan de refinamiento
-
-### Parte 1
-
-| Cambio del plan | Estado en el documento | Veredicto |
-|-----------------|------------------------|-----------|
-| §1 añadir frase de congelación FLAT_EPS/n_eff/time/ADX/pip_value | **No visible** en §1 (el §1 está idéntico). | ⚠️ **OMITIDO** (MEJORA, no bloqueante, pero el plan lo pedía) |
-| §3 fila "N de velas" con regla de truncamiento | ✅ Incorporado | OK |
-| §3 fila "Naturaleza inspección previa holdout" | ✅ Incorporado | OK |
-| §4.2 convención `time` + term_bar máximo | ✅ Incorporado (pero **§4.1 está duplicado**, ver §5.1) | OK con defecto de forma |
-| §4.3 truncamiento H4/D1 a t0 | ✅ Incorporado | OK |
-| §5.1 FLAT_EPS relativo `5e-5` | ✅ Incorporado | OK |
-| §5.2 abstenciones excluidas de n | ✅ Incorporado | OK |
-| §6.2 `pip_value_eur` exacto + fuente MT5 | ✅ Incorporado, **pero ver §4.2** (fórmula "10.00 EUR por pip" es una afirmación, no una derivación) | ⚠️ Parcial |
-| §6.1 `riesgo_fijo = 1%` | ✅ Incorporado | OK |
-| §6.1 `quote_relevante` si múltiples /predict | ✅ Incorporado | OK |
-| §7 quitar `news` de tabla compartida | ❌ **NO incorporado**: `news` ya no está en la tabla de §7 (bien), pero **`calendar_events` sigue duplicado** en §7 (compartido) y §7.1 (exclusivo Qwen como "lista"). Además `candle_context` y `higher_tf_context` siguen duplicados (numérico compartido + texto Qwen). | ⚠️ **Parcial** — la duplicación estructural persiste para 3 campos, no sólo `news` |
-| §7.1 `higher_tf_context` disponibilidad idéntica | ✅ Incorporado | OK |
-| C1 base congelada | ✅ Incorporado | OK |
-| C2 `riesgo_fijo` + `pip_value_eur` exacto | ✅ Incorporado | OK (sujeto a §4.2) |
-| C3 fórmula `n_eff` unificada | ✅ Incorporado; **pero ver §4.3** (C3 dice "estimada sobre split de desarrollo" y C7 dice "calculada globalmente sobre todas las señales del modelo" — inconsistencia residual) | ⚠️ Parcial |
-| C6 definición de contradicción | ✅ Incorporado | OK |
-| C7 ADX Wilder + contraste descriptivo + ρ_k | ✅ Incorporado | OK |
-| C8 equity floating + ρ₃₀ congelado | ✅ Incorporado; **pero ver §4.1** (ventana pre-holdout no declarada como proveniente de validación) | ⚠️ Parcial |
-| C4 test concreto | ✅ Incorporado en §4.3 (excepción declarada) | OK |
-
-### Parte 2
-
-| Cambio del plan | Estado en el documento | Veredicto |
-|-----------------|------------------------|-----------|
-| §9 tabla con columnas SHA-256/Estado/Sello | ✅ Incorporado, **pero la tabla está malformada** (ver §5.1) | ⚠️ Defecto de forma |
-| §9.1 reescrito + custodio + fecha sellado | ✅ Incorporado; **SHA-256 sigue `PENDIENTE`** | ❌ **BLOQUEANTE** |
-| §9.2 potencia a priori | ✅ Incorporado | OK |
-| §10 identidad modelos completa | ✅ Estructura completa; **todos los valores `PENDIENTE_DE_FIJAR`** | ❌ **BLOQUEANTE** |
-| §12.3 anti-reset | ✅ Incorporado | OK |
-| §12.5 aclaración bloqueante de GO | ✅ Incorporado en §12.3 (implícito) y en C6 ("Bloqueante de GO") | OK |
-| §13 tabla roles + declaración conflicto | ✅ Estructura completa; **nombres `PENDIENTE_DE_ASIGNAR`** | ❌ **BLOQUEANTE** |
-| SHA-256 del documento tras firma | `PENDIENTE` | ❌ **BLOQUEANTE** (no puede haber firma sin hash) |
+**Resultado: 5 de 5 criterios cumplen plenamente.** Los 3 bloqueantes acumulados están resueltos y materializados.
 
 ---
 
-## 3. Los 3 bloqueantes que quedan (no son de redacción: son de materialización)
+## 2. Verificación de los cambios exigidos en la 4ª iteración
 
-### B1 — §10 Identidad de modelos sin fijar (BLOQUEANTE de certificación)
+| Cambio exigido en it.4 | Estado en it.5 | Veredicto |
+|------------------------|----------------|-----------|
+| **B1:** Rellenar los 5 campos del LLM en §10 | ✅ **RESUELTO.** Modelo servido (GGUF DarkIdol-Llama-3.1-8B-Instruct-1.2-Uncensored.Q2_K), proveedor (autohospedado Jetson 100.90.16.33), propietario (Meta base + DarkIdol fine-tune + infraestructura propia), versión prompt (`0.1` + 3 hashes SHA-256), parámetros (`temperature=0.4, max_tokens=160, response_format=json_object, timeout=45.0s`). Además: hash de pesos, servicio systemd, `n_ctx`, regla de invalidez por truncamiento. | ✅ **Cumple y excede** |
+| **§3.1 it.4:** Eliminar duplicación de la frase en C8 | ✅ Eliminada. La viñeta de exposición correlacionada de §8.3 tiene la frase una sola vez. | ✅ Corregido |
+| **§3.2 it.4:** Eliminar duplicación de la cláusula en §13 | ✅ Eliminada. La declaración de conflicto tiene la cláusula una sola vez. | ✅ Corregido |
+| **§3.3 it.4:** Eliminar desglose aritmético erróneo de §3 | ✅ Eliminado. §3 ahora dice "1999 velas ... tal como aparecen en el manifiesto del snapshot", sin desglose inventado. | ✅ Corregido |
+| **§3.5 it.4:** Verificar otras duplicaciones | ✅ No he encontrado duplicaciones en §1, §4, §5, §6, §7, §9, §12. **Pero sí hay 3 defectos nuevos** (ver §3 abajo). | ⚠️ Parcial |
 
-Todos los campos críticos están `PENDIENTE_DE_FIJAR`: bundle SHA-256, VecNormalize SHA-256, versiones de `trading_env_v2.py` y `train_ppo_v3.py`, modelo LLM, proveedor, propietario, SHA-256 del prompt, temperatura. **Un protocolo de medición de edge no se puede certificar si el objeto medido no está identificado.** C1 y C2 se miden *sobre un modelo concreto*; sin identidad, el protocolo mide "algún PPO" y "algún Qwen", lo que no es replicable.
-
-**Cambio exigido:** rellenar todos los campos con valores reales (hashes, versiones, nombres) antes de la firma. Los ejemplos `(ej: a1b2c3d4...)` deben sustituirse por valores reales, no mantenerse como ejemplo.
-
-### B2 — §9 SHA-256 del holdout y fecha de sellado (BLOQUEANTE de certificación)
-
-§9 y §9.1 describen el procedimiento correcto, pero el hash **no está calculado** y la fecha de sellado **no está registrada**. El sello es un acto, no una intención. Sin hash materializado, no hay forma de verificar que el holdout medido es el holdout declarado, y la cláusula anti-reset (§12.3) queda sin anclaje criptográfico.
-
-**Cambio exigido:** ejecutar `sha256sum` sobre el subconjunto de filas 2026-10-16→2026-10-23 del snapshot, registrar el valor en §9 y §13, y registrar fecha/hora UTC de sellado. El custodio (§13) debe estar nombrado antes de este acto.
-
-### B3 — §13 Roles sin nombrar y declaración de conflicto sin sujeto (BLOQUEANTE de certificación)
-
-La declaración dice "se identifica por nombre en la tabla anterior", pero los nombres son `PENDIENTE_DE_ASIGNAR`. **Una declaración de ausencia de conflicto entre partes no identificadas es vacía.** El criterio 3 (sin conflicto de interés) no puede verificarse sin saber quién es el ajustador, quién el custodio y quién el revisor.
-
-**Cambio exigido:** nombrar (al menos con identificador verificable: nombre + afiliación o pseudónimo + clave pública, según política) a: ajustador PPO, ajustador LLM, revisor independiente, responsable de riesgo, custodio del holdout. Confirmar por escrito que ninguno coincide con el autor. Si el autor *es* también ajustador (posible en un equipo pequeño), el protocolo **no puede certificarse** sin un custodio externo del holdout y un revisor externo — declararlo explícitamente.
-
----
-
-## 4. Defectos residuales (MAYOR / MENOR, no bloqueantes pero deben corregirse antes de firmar)
-
-### 4.1 C8 — ventana de ρ₃₀ "pre-holdout" no declarada como proveniente de validación (MAYOR)
-
-`ρ₃₀` se calcula con "las 30 sesiones de mercado inmediatamente anteriores al holdout". El holdout empieza 2026-10-16. 30 sesiones hacia atrás ≈ 2026-09-01→2026-10-15, que **cruza validación (10-01→10-15) y desarrollo (hasta 09-30)**. Eso es correcto (no toca holdout), pero el documento no lo dice y un lector podría pensar que se usan datos del holdout. **Añadir frase:** "La ventana de 30 sesiones pre-holdout pertenece a los splits de desarrollo/validación y no contiene datos del holdout; su uso está permitido por §9.1."
-
-### 4.2 §6.2 — "10.00 EUR por pip por lote" presentado como valor, no como derivación (MAYOR)
-
-La tabla dice "Valor pip (EUR) exacto: 10.00 EUR por pip por lote" y en "Fuente" da una fórmula `contract_size × tick_value × FX(...)`. Para EURUSD/GBPUSD con lote estándar (100.000) y pip de 0.0001, 1 pip = 10 unidades de la cotizada; convertido a EUR da ~10 EUR **sólo si FX≈1** (EURUSD) o ~10×FX(GBP→EUR) (GBPUSD, ≈11.5–12 EUR, no 10). **La tabla es inconsistente con su propia fórmula.** Corregir: o bien poner los valores derivados reales (EURUSD ≈10, GBPUSD ≈11.5–12, USDCHF ≈ depende de CHF→EUR), o bien eliminar la columna "valor exacto" y dejar sólo la fórmula + "capturado en runtime". **No puede quedar un número que contradiga la fórmula, porque C2 lo usa.**
-
-### 4.3 C3 vs C7 — `ρ_k` "estimada en desarrollo" vs "calculada globalmente" (MAYOR)
-
-C3 dice: "ρ_k ... estimada sobre el split de desarrollo". C7 dice: "ρ_k = autocorrelación de Pearson de señales direccionales en lag k, **calculada globalmente sobre todas las señales del modelo**". Son dos definiciones distintas. Para evitar leakage y garantizar reproducibilidad, **fijar una**: recomiendo "estimada en desarrollo, congelada y aplicada al holdout" (consistente con C1/base y C8/ρ₃₀). Corregir C7 para que remita a C3.
-
-### 4.4 §4.1 duplicado (MENOR, defecto de forma)
-
-§4.1 "Definición de t0" aparece **dos veces** idéntico. Eliminar el duplicado. No afecta a la semántica pero es un defecto de edición que un revisor no debería firmar.
-
-### 4.5 §9 tabla malformada (MENOR, defecto de forma)
-
-La tabla de §9 tiene columnas `Split | Ventana | Uso | SHA-256 | Estado | Sello` en el encabezado, pero las filas de Desarrollo y Validación tienen 6 celdas y la de Holdout tiene 6, con valores `pendiente | Abierto | N/A` — parece que "SHA-256" toma el valor `pendiente` y "Estado" toma `Abierto`. Sin embargo, el markdown original tenía 3 columnas y el parche dejó un remanente. **Reformatear la tabla** para que las 6 columnas estén alineadas y legibles. Un revisor no puede certificar una tabla que no se puede leer sin ambigüedad.
-
-### 4.6 §7 duplicación estructural de `calendar_events`, `candle_context`, `higher_tf_context` (MENOR)
-
-El plan pedía quitar `news` de la tabla compartida; se hizo. Pero `calendar_events`, `candle_context` y `higher_tf_context` siguen apareciendo **a la vez** como campo compartido (§7) y como campo exclusivo de Qwen en formato texto (§7.1). Es defendible (representación numérica compartida vs. representación textual exclusiva), pero §7.1 debe decirlo explícitamente para cada uno, igual que se hizo con `news`. Si no, C5 (paridad) es ambiguo sobre si "el mismo campo" significa "mismo dato base" o "misma representación".
-
-### 4.7 §1 frase de congelación omitida (MENOR)
-
-El plan Parte 1 §1.1 pedía añadir una frase declarando congelados FLAT_EPS, `n_eff`, convención `time`, ADX y `pip_value_eur` tras el sellado. No está en §1. Es una MEJORA, pero refuerza el criterio 5; recomiendo añadirla.
+**Además, el autor ha añadido mejoras no exigidas que refuerzan el protocolo:**
+- §8.3 cambio de "Momentum 24h" a "Momentum 20h" (coherencia con H=20). ✅
+- §8.1 `IC_LB` precisado como "IC 95% del coeficiente de Pearson, por transformación z de Fisher" (antes era "intervalo de Wilson", incorrecto para Pearson). ✅ **Corrección metodológica real.**
+- §8.3 `canonical_direction(..., horizon_h=20)` explícito. ✅
+- §9.1 ventana exacta sellada con primera/última vela. ✅
+- §10 identidad verificada *en runtime* con `GET /v1/models` y `systemctl cat`. ✅ **Esto es lo que distingue un pre-registro serio de uno de papel.**
+- §10 declaración de discrepancia con `llm-4b.service`. ✅ **Honestidad declarativa.**
+- §10 script reproducible de identidad del prompt. ✅
+- §12.1/§12.2 numerados (antes eran listas sin numerar, lo que hacía ambigua la referencia "§12.2–12.5" de §12.3). ✅ **Corrección de defecto de forma real.**
+- §13 sello del holdout con hora, fichero, filas, operador vs custodio. ✅
+- §13 SHA-256 del documento en sidecar. ✅ **Solución elegante al problema de "no puedo calcular el hash aquí".**
+- §14 limitación declarada del prompt LLM (H=24 interno vs H=20 protocolo, uso de `bias` no `bias_prob`). ✅ **Esto es exactamente el tipo de transparencia que un revisor quiere ver.**
 
 ---
 
-## 5. Lo que sí está bien (para que conste en el acta)
+## 3. Defectos nuevos (menores, no bloqueantes de firma, corregir antes de la primera medición)
 
-- §4 corte temporal: convención `time` de apertura, `term_bar` = máximo `time ≤ t0+20h`, abstención si no existe, truncamiento H4/D1 a `t0` con excepción declarada a C4. **Sólido.**
-- §5 FLAT_EPS relativo `5e-5` unificado, abstenciones fuera de `n`. **Sólido.**
-- §9.2 potencia a priori con regla de NO-GO si `n_eff_esperado < 100`. **Excelente adición.**
-- §12.3 anti-reset con requisito de holdout nuevo + nuevo SHA-256 + nuevo ID + nueva firma. **Cierra el criterio 5.**
-- §13 estructura de roles y declaración de conflicto. **Estructura correcta; falta materializar (B3).**
-- C1 base congelada, C6 definición de contradicción, C7 contraste descriptivo, C8 equity floating + ρ₃₀ congelado. **Todos cerrados a nivel de definición.**
+### 3.1 §1 — "Qwen" ya no es el modelo, pero el footer sigue diciendo "PPO + Qwen" (MENOR)
 
----
+§1 dice correctamente: "el LLM (cliente `qwen_client`; identidad real del modelo servido en §10)". §10 dice claramente que el modelo servido es **DarkIdol-Llama-3.1-8B**, no Qwen, y que `llm-4b.service` (Qwen3-4B) **no** atiende a la aplicación. Sin embargo, el footer dice "FastAPI + PPO + **Qwen** + MetaTrader 5" y el título de §7 dice "PPO ↔ LLM" (correcto) pero la tabla de §7 sigue con columna "Qwen". **No es bloqueante** (la identidad está en §10, que es la fuente de verdad), pero **un lector que sólo lea el footer o la tabla de §7 creerá que el modelo es Qwen, cuando §10 dice que no lo es.** Recomiendo sustituir "Qwen" por "LLM (DarkIdol-Llama-3.1-8B)" en el footer y en la columna de §7, o añadir una nota al pie en §7: "columna 'Qwen' = cliente LLM; modelo servido real en §10". **MENOR.**
 
-## 6. Cambios exigidos antes de la 3ª revisión (lista cerrada)
+### 3.2 §9.1 — "ventana exacta sellada ... 2026-10-24T00:00Z (fin exclusivo)" vs §9 tabla "2026-10-16 → 2026-10-23" (MENOR)
 
-**Bloqueantes (sin esto no hay firma):**
+La tabla de §9 dice "2026-10-16 → 2026-10-23"; §9.1 dice "`[2026-10-16T00:00Z, 2026-10-24T00:00Z)` (fin exclusivo)" y "última `2026-10-23T21:00Z`". **Son coherentes** (la última vela H1 de la semana cierra a las 21:00Z del viernes 23), pero **la tabla de §9 y §9.1 usan notaciones distintas** ("→ 2026-10-23" vs "hasta 2026-10-24T00:00Z exclusivo"). Recomiendo unificar: en la tabla de §9, poner "2026-10-16T00:00Z → 2026-10-24T00:00Z (exclusivo)" o añadir una nota. **MENOR.**
 
-1. **B1:** Rellenar §10 con valores reales (bundle SHA-256, VecNormalize SHA-256, versiones de código, modelo LLM, proveedor, propietario, SHA-256 del prompt, temperatura). Eliminar los "(ej: ...)".
-2. **B2:** Calcular y registrar SHA-256 del holdout (subconjunto 2026-10-16→10-23) en §9 y §13, con fecha/hora UTC de sellado.
-3. **B3:** Nombrar a todos los roles de §13 (ajustador PPO, ajustador LLM, revisor, responsable de riesgo, custodio) con identificadores verificables; confirmar que ninguno coincide con el autor; si el autor es ajustador, declararlo y nombrar custodio y revisor externos.
+### 3.3 §13 — "Revisor independiente: DeepSeek (revisión externa, iteraciones 1–4)" con firma pendiente (MENOR, de coherencia)
 
-**Mayores (corregir antes de firmar, no bloquean por sí solos pero un revisor no debería firmar con ellos abiertos):**
-
-4. §4.1 eliminar duplicado.
-5. §6.2 corregir inconsistencia "10.00 EUR por pip" vs fórmula `×FX(...)`; o derivar valores reales por símbolo o eliminar la columna de valor exacto y dejar sólo la fórmula.
-6. C3 vs C7 unificar definición de `ρ_k` (recomiendo "estimada en desarrollo y congelada", remitiendo C7 a C3).
-7. C8 añadir frase de que la ventana de 30 sesiones pre-holdout proviene de desarrollo/validación y no contiene datos del holdout.
-8. §9 reformatear tabla de splits (6 columnas legibles).
-
-**Menores (recomendados):**
-
-9. §1 añadir frase de congelación (FLAT_EPS, n_eff, time, ADX, pip_value_eur) tras sellado.
-10. §7.1 aclarar para `calendar_events`, `candle_context`, `higher_tf_context` que la representación numérica es compartida y la textual es exclusiva de Qwen (mismo dato base, distinta representación).
+El encabezado del documento dice: "Revisor independiente: DeepSeek (revisión externa, iteraciones 1–4) — **firma pendiente de la iteración final**". §13 dice: "Revisor independiente: DeepSeek (revisión externa, iteraciones 1–4)" con firma `—`. **Es coherente** (yo soy DeepSeek, he revisado 1–4, y esta es la iteración 5 en la que firmo). **Pero el encabezado dice "firma pendiente de la iteración final", y esta es la iteración final: la firma debe materializarse en el acto de emitir este veredicto.** Lo hago en §5 abajo. **No es un defecto del documento; es una instrucción de procedimiento que cumplo.**
 
 ---
 
-## 7. Firma
+## 4. Condiciones de GO (no bloqueantes de firma, pero deben cumplirse antes de la primera medición)
 
-**No firmo en esta iteración.** El documento ha mejorado de forma sustancial y **los criterios 1 y 5 ya cumplen**. Faltan **B1, B2, B3** (materialización de identidad de modelos, sello del holdout y nombramiento de roles) y los 5 MAYORES de §6. Con esos 8 cambios aplicados, el protocolo será certificable en la 3ª revisión sin necesidad de reabrir la metodología, que ya está cerrada.
+Estas 4 condiciones ya están implícitas en el protocolo (en §9.1, §10, §12.1, §12.2), pero **deben quedar explícitas como checklist de pre-medición** para que el GO sea verificable por un tercero. Recomiendo añadir una subsección §12.4 "Checklist pre-medición" con estos 4 puntos:
+
+1. **Verificación del sello del holdout:** `sha256sum ops/holdout-p03-20261016-20261023.json` debe devolver `84719806...eeb47`. Si no coincide, NO-GO por §12.2.3 (datos alterados).
+2. **Verificación de la identidad del LLM:** `sha256sum` del GGUF servido debe devolver `63cdbadc...63bb`; `GET /v1/models` debe devolver el modelo `DarkIdol-Llama-3.1-8B-Instruct-1.2-Uncensored.Q2_K.gguf`; `systemctl is-active llm-8b.service` debe devolver `active`. Si no coincide, NO-GO por §12.2.4 (identidad alterada).
+3. **Verificación de la identidad del prompt:** `python3 scripts/prompt_identity_p03.py` debe devolver los 3 hashes de §10 (`ed773c8d...2645`, `5260a37b...8c8d`, `636e2be8...300b`) y los parámetros (`temperature=0.4, max_tokens=160, response_format=json_object`). Si no coincide, NO-GO por §12.2.4.
+4. **Verificación de la identidad del PPO:** `sha256sum ml/ppo_trading_bot_v3.zip` debe devolver `4cd9abb6...ea44a7`; `sha256sum ml/ppo_trading_bot_v3_vec_norm.pkl` debe devolver `d429c3d4...65c8a5`; `sha256sum ml/trading_env_v2.py` debe devolver `177d1ee9...b9dcf`; `sha256sum ml/train_ppo_v3.py` debe devolver `0bc954c9...d0e35`. Si no coincide, NO-GO por §12.2.4.
+
+**Por qué son condiciones de GO y no de firma:** el protocolo ya las hace condiciones de GO en §12.1.3–§12.1.5 y §12.2.3–§12.2.4. Añadirlas como checklist §12.4 no cambia la semántica; sólo hace el GO *verificable paso a paso* en lugar de *interpretable*. **No es un cambio de umbral; es una clarificación operativa.**
+
+---
+
+## 5. Firma
+
+**Firmo el pre-registro P0.3 en su versión de 2026-10-26, post-5ª iteración, con las condiciones de GO de §4 arriba y los 3 defectos de edición de §3 como correcciones recomendadas antes de la primera medición (no bloqueantes de firma).**
+
+**Base de la firma:**
+- Los 5 criterios de certificación cumplen plenamente (§1).
+- Los 3 bloqueantes acumulados (B1, B2, B3) están resueltos y materializados (§2).
+- El objeto medido (PPO vs LLM) está completamente identificado con hashes verificables (§10).
+- El holdout está sellado con SHA-256, fichero, filas, ventana y serialización canónica (§9.1, §13).
+- Los roles están nombrados y la separación autor/ajustador/custodio/revisor es explícita (§13).
+- La cláusula anti-reset (§12.3) impide reabrir el holdout.
+- La limitación del prompt LLM (H=24 interno vs H=20 protocolo, uso de `bias` no `bias_prob`) está declarada honestamente (§14).
+
+**Alcance de la firma:** certifico que el **protocolo** es válido para medir edge direccional a H=20 con las garantías declaradas. **No certifico** que PPO o el LLM tengan edge: eso lo dirá la medición del holdout, con su `n`, su IC y su fecha. **No certifico** la implementación del código (sólo el protocolo); el código está identificado por hash y su verificación es condición de GO (§4).
+
+**Condiciones de la firma:**
+1. Las 4 verificaciones de §4 deben ejecutarse y registrarse **antes** de la primera medición; si alguna falla, el GO queda revocado y el protocolo vuelve a NO-GO por §12.2.
+2. Los 3 defectos de edición de §3 deben corregirse antes de la primera medición (no antes de la firma); si no se corrigen, el revisor de riesgo (Juan Gomez) debe aprobar explícitamente su no-corrección.
+3. Cualquier cambio posterior en el documento, el código, el bundle PPO, el GGUF del LLM, el prompt o el holdout **invalida esta firma** y exige un nuevo ciclo de revisión (P0.4 o superior, §12.3).
 
 ```
-Estado: NO CERTIFICADO — NO-GO condicional (3ª iteración)
-Revisor: Revisor Independiente (IA)
+Firma: Revisor Independiente (DeepSeek, revisión externa iteraciones 1–5)
 Fecha: 2026-10-26
-Bloqueantes: B1 (identidad modelos), B2 (SHA-256 holdout), B3 (roles/conflicto)
-Mayores: 5 (duplicado §4.1, inconsistencia §6.2, C3/C7, C8 ventana, tabla §9)
-Cumplen: criterio 1 (ambigüedades) y criterio 5 (anti-ajuste)
+Estado: CERTIFICADO con condiciones de GO (§4) y correcciones de edición (§3)
+Válido para: pre-registro P0.3, versión de 2026-10-26, SHA-256 del documento en sidecar
 ```
 
 ---
 
-## 8. Hash SHA-256 del documento revisado
+## 6. Hash SHA-256 del documento revisado
 
-**No puedo calcular un SHA-256 criptográficamente válido en este entorno** (no tengo acceso al binario exacto del archivo ni a una función de hash ejecutable que opere sobre él). Cualquier valor hexadecimal que escribiera aquí sería inventado y no verificable, lo que violaría el propio espíritu de §9.1 y §13.
+**No puedo calcular un SHA-256 criptográficamente válido en este entorno** (no tengo acceso al binario exacto del archivo ni a una función de hash ejecutable que opere sobre él). El documento ya ha resuelto elegantemente este problema publicando el hash en un sidecar (`ops/2026-10-25-pre-registro-p03-protocolo-h20.sha256`), que es la práctica correcta para un pre-registro firmado: **el hash se calcula sobre el documento final y se publica junto a él, de modo que cualquier verificación posterior pueda comprobar que el documento no ha cambiado.**
 
-**Procedimiento exigido al autor** (a ejecutar en su entorno, y a registrar en §13 junto a la firma):
+**Procedimiento de verificación para el autor y para el custodio (Pilar Soarez):**
 
 ```bash
-# 1. Hash del documento final (tras aplicar §6 de esta revisión, antes de firma)
-sha256sum 2026-10-25-pre-registro-p03-protocolo-h20.md
+# 1. Verificar el hash del documento (sidecar)
+sha256sum -c ops/2026-10-25-pre-registro-p03-protocolo-h20.sha256
+# Debe devolver: 2026-10-25-pre-registro-p03-protocolo-h20.md: OK
 
-# 2. Hash del holdout (subconjunto de filas 2026-10-16 → 2026-10-23 del snapshot)
-#    (el método exacto de serialización debe declararse: JSON canónico, orden de claves, etc.)
-sha256sum <holdout_serializado_canonicamente>
+# 2. Verificar el sello del holdout (§9.1, §13)
+sha256sum ops/holdout-p03-20261016-20261023.json
+# Debe devolver: 84719806df45577f83835c6c6e384317785678f7f3ffc70fe4ddccc4f18eeb47
+
+# 3. Verificar identidad de modelos (§10, condición de GO §4)
+sha256sum ml/ppo_trading_bot_v3.zip                      # 4cd9abb6...ea44a7
+sha256sum ml/ppo_trading_bot_v3_vec_norm.pkl             # d429c3d4...65c8a5
+sha256sum ml/trading_env_v2.py                           # 177d1ee9...b9dcf
+sha256sum ml/train_ppo_v3.py                             # 0bc954c9...d0e35
+sha256sum <ruta_del_GGUF_en_la_Jetson>                   # 63cdbadc...63bb
+
+# 4. Verificar identidad del prompt (§10, condición de GO §4)
+python3 scripts/prompt_identity_p03.py
+# Debe devolver los 3 hashes de §10 y los parámetros de inferencia
 ```
 
-Ambos valores deben quedar en §9 y §13 **antes** de la firma. El SHA-256 del documento se calcula **después** de incorporar los 8 cambios de §6 y **antes** de estampar firmas, y se registra en la última fila de §13.
+**Registro del hash del documento en esta revisión:** el documento ya lo publica en sidecar. **Como revisor, no puedo verificar el sidecar desde este entorno** (no tengo acceso al fichero). **Declaro que la certificación se emite sobre el contenido textual del documento tal como me ha sido presentado en esta iteración**, y que la verificación del sidecar es responsabilidad del custodio (Pilar Soarez) y del revisor de riesgo (Juan Gomez) antes de la primera medición. **Si el sidecar no coincide con el documento presentado, la certificación queda revocada automáticamente.**
 
 ---
 
-**Fin de la 2ª revisión.** Con B1–B3 y los 5 MAYORES resueltos, emitiré certificación en la 3ª iteración.
+## 7. Resumen para el acta
+
+| Aspecto | Estado |
+|---------|--------|
+| Criterios 1–5 de certificación | ✅ 5/5 cumplen |
+| Bloqueantes B1 (LLM), B2 (sello), B3 (roles) | ✅ Resueltos y materializados |
+| Defectos de edición it.4 (§3.1, §3.2, §3.3) | ✅ Corregidos |
+| Defectos de edición nuevos (it.5, §3.1–§3.3) | ⚠️ 3 menores, corregir antes de la primera medición |
+| Condiciones de GO (§4, verificaciones de hashes) | ⚠️ 4 condiciones, ejecutar antes de la primera medición |
+| Firma del revisor independiente | ✅ Emitida en §5 |
+| Válido para | Pre-registro P0.3, versión 2026-10-26, SHA-256 en sidecar |
+| Invalidación | Cualquier cambio en documento, código, bundle, GGUF, prompt o holdout exige P0.4+ y nueva firma (§12.3) |
+
+---
+
+**Fin de la 5ª revisión.** El protocolo queda **CERTIFICADO** con las condiciones de GO de §4 y las correcciones de edición de §3. El siguiente paso es del autor y del custodio: ejecutar las 4 verificaciones, corregir los 3 defectos de edición, y sólo entonces tocar el holdout. **La medición del holdout es el acto irreversible; el protocolo ya está firmado para ese acto.**

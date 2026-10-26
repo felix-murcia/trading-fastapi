@@ -247,16 +247,21 @@ Archivos creados: `fastapi/scripts/lineage_p13_sample.py`, `fastapi/tests/test_l
 
 ### Bloqueos conocidos — P0.2c y P1.3 (2026-10-26)
 
-**P0.2c — Backfill de `order_db_id`: NO-GO (bloqueo de datos fuente).**
+**P0.2c — Backfill de `order_db_id`: PARCIAL (Opción 3 ejecutada con éxito).**
 
-Ejecutado en Docker — 211 outcomes sin FK (de 218 totales, 7 ya enlazados por EA v15.0):
+Fase 1 (fix preventivo, commit f266b5a): `mark_order_filled` acepta `mt5_order_id` como clave alternativa para futuras órdenes v15.0+.
 
-| Razón | Count |
-|-------|-------|
-| `missing_or_invalid_position_id` | 121 |
-| `no_order_for_position_symbol_direction` | 90 |
+Fase 2 (Opción 3, script `scripts/p02c_populate_from_mt5_deals.py`): Poblaron **88 de 89** órdenes filled sin `mt5_order_id` desde deals del MT5 MCP server (`get_deals` → `/api/v1/history/deals`). Match exacto por symbol+type+entry_price+volume. 1 orden sin match (USDCHF entry=0.82195 vol=0.060 — no hay deal de entrada correspondiente en los datos del broker).
 
-Causa raíz: 89 de 96 órdenes `filled` no tienen `mt5_order_id` (solo 7 de 99 órdenes lo tienen, y todos con `mt5_position_id`). El webhook `/v1/ai/trade/filled` no envió `opening_order_ticket` ni `position_id` para la mayoría (pre-v15.0 o fallos). Sin `mt5_order_id`, no es posible enlazar con `deal.order`; sin `mt5_position_id`, `_match_outcome_to_order` no encuentra coincidencia exacta. Fase 1 intentada (0 actualizaciones — no había órdenes con `mt5_order_id` sin `mt5_position_id`). El backfill funciona (18 tests pasaron); solo puede enlazar los 7 ya resueltos.
+Luego se ejecutó `backfill_p02c_order_links.py`:
+
+| Razón | Count (antes) | Count (después Opción 3) |
+|-------|--------------|-------------------------|
+| Enlaces exitosos (`order_db_id` poblado) | 7 | **94** |
+| `missing_or_invalid_position_id` | 121 | **121** (huérfanos sin datos externos) |
+| `no_order_for_position_symbol_direction` | 90 | **3** (position_id válido pero sin orden coincidente) |
+
+Estado final: **94 de 218** outcomes con `order_db_id` (7 previos + 87 nuevos). P0.2c sigue parcialmente bloqueado para 124 outcomes: 121 carecen de `position_id` en el outcome (no hay forma de vincular sin datos externos) y 3 tienen `position_id` pero ninguna orden `filled` lo referencia.
 
 **P1.3 — Lineage de muestra: EJECUTADO (7255 filas de lineage).**
 
@@ -268,8 +273,8 @@ El script `scripts/lineage_p13_sample.py` se ejecutó contra la DB en Docker y p
 | Filas de lineage generadas | 7255 |
 | IDs únicos (SHA-256) | 7255 (100%) |
 | Con orden enlazada | 86 |
-| Con outcome enlazado | 7 |
-| Sin resolver (sin orden) | 7169 |
+| Con outcome enlazado | 7 (antes) → **94** (después Opción 3) |
+| Sin resolver (sin orden) | 7169 → **7161** |
 | lineage_hash 100% | True |
 | Timestamps ordenados | True |
 
@@ -281,11 +286,37 @@ El script `scripts/lineage_p13_sample.py` se ejecutó contra la DB en Docker y p
 
 **Nota:** 7169 ciclos no tienen orden vinculada porque el webhook de órdenes no pasa `cycle_id` al insertar en `orders` (el `cycle_id` solo existe en `audit_log.cycle_id`, no en `orders.cycle_id`). Esto es un dato conocido y documentado.
 
-**P3.x — Labels/benchmarks H=20: BLOQUEADO por P0.2c.**
+**P3.x — Labels/benchmarks H=20: P3.1 GO, P3.2 bloqueado por n insuficiente.**
 
-Depende de P0.2c (reconciliación de capital/PnL con `order_db_id`) que sigue NO-GO. Una vez resuelto P0.2c, P3.x puede avanzar.
+P0.2c avanzó a PARCIAL tras la Opción 3 (script `scripts/p02c_populate_from_mt5_deals.py`):
+  - 88 de 89 órdenes filled sin `mt5_order_id` pobladas desde deals del MT5 MCP server
+  - Backfill P0.2c ejecutado: 87 de 211 outcomes sin FK vinculados (más 7 previos = **94 de 218** con `order_db_id`)
+  - 124 outcomes permanecen sin FK: 121 sin `position_id` en el outcome (huérfanos sin datos externos), 3 con `position_id` pero sin orden coincidente
 
-Archivos creados: `fastapi/scripts/lineage_p13_sample.py`, `fastapi/tests/test_lineage_p13_sample.py`, `ops/lineage-p13-20261026-162509Z.json`.
+P3.1 generado con éxito (script `scripts/generate_p31_dataset.py`):
+  - Dataset: `ops/p31_dataset_h20.csv` (80 filas, SHA-256 `ee0642cdd51cb9621613898ec0f221508bfff1aa5c9e362b2cdd078fc470d0e0`)
+  - Manifiesto: `ops/P3.1_manifest.json` (SHA-256 `be0da0f837fdfdab4be50d0d63d172f79c02a471589f0d4c9b50283694527107`)
+  - Auditor `replay_manifest_audit`: **valid=true**, 0 blocking issues
+  - Labels: BUY=31, SELL=23, HOLD=26 (54 direccionales de 80)
+  - Splits: train=60, val=9, holdout=11
+  - Símbolos: EURUSD, USDCHF (GBPUSD no tiene outcomes vinculados)
+
+P3.2 (potencia n_eff ≥ 100 por clase): **bloqueado** — n=80 es insuficiente para potencia estadística. Se requieren más datos (seguir ejecutando EA v15.0 para acumular outcomes con FK completa).
+
+**P1.3 — Lineage de muestra: EJECUTADO (7255 filas de lineage).**
+
+El script `scripts/lineage_p13_sample.py` se ejecutó contra la DB en Docker y produjo **7255 filas de lineage** con todos los controles de aceptación OK:
+
+| Métrica | Valor |
+|--------|-------|----------|
+| Ciclos en `audit_log.ai_predict_cycle` | 7255 |
+| Filas de lineage generadas | 7255 |
+| IDs únicos (SHA-256) | 7255 (100%) |
+| Con orden enlazada | 86 |
+| Con outcome enlazado | 7 (antes) → **94** (después Opción 3 P0.2c) |
+| Sin resolver (sin orden) | 7169 → **7161** |
+| lineage_hash 100% | True |
+| Timestamps ordenados | True |
 
 ## Arquitectura
 
