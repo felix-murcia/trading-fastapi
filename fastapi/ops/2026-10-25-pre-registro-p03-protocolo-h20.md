@@ -1,16 +1,16 @@
-# P0.3 — Pre-registro Protocolo H=20 (PPO vs Qwen)
+# P0.3 — Pre-registro Protocolo H=20 (PPO vs LLM)
 
 > **Estado:** pre-registro (borrador para certificación por revisor independiente).
 > **Fecha:** 2026-10-26
 > **Autor:** Félix (ingeniería)
-> **Revisor independiente:** pendiente de asignación
-> **SHA-256 del documento:** pendiente de cálculo tras firma
+> **Revisor independiente:** DeepSeek (revisión externa, iteraciones 1–4) — firma pendiente de la iteración final
+> **SHA-256 del documento:** ver sidecar `ops/2026-10-25-pre-registro-p03-protocolo-h20.sha256`
 
 ---
 
 ## 1. Pregunta de investigación
 
-¿Tienen PPO (modelo de ML) y Qwen (LLM) **edge direccional demostrable** a un horizonte de **20 horas transcurridas** (H=20), consumiendo **exactamente el mismo snapshot** por oportunidad de decisión, con mismo corte temporal, mismos campos compartidos y misma regla de abstención?
+¿Tienen PPO (modelo de ML) y el LLM (cliente `qwen_client`; identidad real del modelo servido en §10) **edge direccional demostrable** a un horizonte de **20 horas transcurridas** (H=20), consumiendo **exactamente el mismo snapshot** por oportunidad de decisión, con mismo corte temporal, mismos campos compartidos y misma regla de abstención?
 
 ---
 
@@ -185,7 +185,7 @@ Los campos de texto de Qwen se derivan de los mismos datos base que los campos n
 | `base` | Tasa base condicional (mejor predicción constante) |
 | `skill` | `acc − base` (en puntos porcentuales) |
 | `IC` | Coeficiente de correlación de Pearson entre predicción y retorno real |
-| `IC_LB` | Límite inferior del IC al 95% (intervalo de Wilson) |
+| `IC_LB` | Límite inferior del IC 95% del coeficiente de Pearson, por transformación z de Fisher |
 | `expectancy_neta` | Expectativa neta a riesgo fijo, descontando costes |
 | `expectancy_neta_LB` | Límite inferior del IC de expectancy neta al 95% |
 
@@ -204,11 +204,11 @@ Los campos de texto de Qwen se derivan de los mismos datos base que los campos n
 
 ### 8.3 Benchmarks (comparadores)
 
-Los benchmarks se miden con **la misma función** `canonical_direction()` que los modelos:
+Los benchmarks se miden con **la misma función** `canonical_direction(..., horizon_h=20)` que los modelos:
 
 | Benchmark | Definición |
 |-----------|-----------|
-| **Momentum 24h** | `close[t+20h] > close[t]` |
+| **Momentum 20h** | `close[t+20h] > close[t]` |
 | **SMA200 + pendiente** | Precio sobre SMA200 y SMA200 subiendo |
 | **Barra previa** | Dirección = dirección de la vela anterior |
 | **RSI** | RSI > 50 → BUY, RSI < 50 → SELL |
@@ -232,12 +232,16 @@ El criterio T-31 de >55% con n≥100 se reporta como diagnóstico, **no** como p
 |-------|---------|-----|---------|--------|-------|
 | Desarrollo | 2026-06-30 → 2026-09-30 | Tuning y selección de umbrales | `PENDIENTE` | Abierto | N/A |
 | Validación | 2026-10-01 → 2026-10-15 | Ajuste fino y selección de modelo | `PENDIENTE` | Abierto | N/A |
-| Holdout (OOS) | 2026-10-16 → 2026-10-23 | **Una sola consulta confirmatoria** | **PENDIENTE_DE_CÁLCULO** | **Sin sellar** | **Pendiente** |
+| Holdout (OOS) | 2026-10-16T00:00Z → 2026-10-24T00:00Z (fin exclusivo) | **Una sola consulta confirmatoria** | `84719806df45577f83835c6c6e384317785678f7f3ffc70fe4ddccc4f18eeb47` | **Sellado** | 2026-10-26T14:40Z |
 
 ### 9.1 Reglas del holdout
 
 - El holdout se sella **antes** de leer cualquier predicción de PPO/LLM.
 - **SHA-256 del holdout**: se calcula sobre el subconjunto de filas del snapshot correspondiente a las fechas 2026-10-16 a 2026-10-23 (inclusive), antes de la primera medición, y se registra en la tabla de §9 y en §13.
+- **Ventana exacta sellada:** velas H1 con `time` ∈ `[2026-10-16T00:00:00Z, 2026-10-24T00:00:00Z)`. Total: **426 filas** (142 por símbolo: EURUSD, GBPUSD, USDCHF), primera `2026-10-16T00:00Z`, última `2026-10-23T21:00Z` (cierre semanal). El offset del bróker se detectó y validó en runtime (**+2 h**, `validated=true`, `persisted=true`) **antes** de normalizar: `time` está en UTC real, no en reloj de bróker.
+- **Serialización canónica (congelada):** JSON Lines UTF-8 sin BOM; una fila por vela `{"close","high","low","open","symbol","time","volume"}` con claves ordenadas alfabéticamente; `time` entero epoch UTC; OHLCV como float JSON; orden por `(time ascendente, symbol ascendente)`; separadores `,` y `:` sin espacios; `\n` final tras la última fila. Fichero sellado: `ops/holdout-p03-20261016-20261023.json` (49.739 bytes).
+- **Procedimiento reproducible:** `python3 scripts/seal_holdout_p03.py --out <ruta>` (ejecutado dentro del contenedor con pool de DB inicializado, requisito para que el offset pueda persistirse y publicarse). El script falla si el offset no queda validado y persistido, si un símbolo no está en el registro o si la ventana queda vacía — nunca sella datos en reloj de bróker.
+- **Verificación:** `sha256sum ops/holdout-p03-20261016-20261023.json` debe devolver el hash de la tabla de §9. Una re-extracción que difiera en un byte no es el holdout sellado y no puede usarse como confirmatorio.
 - Una sola consulta confirmatoria al holdout; un rechazo **no autoriza** cambiar umbral y volver a consultar.
 - El holdout histórico (2026-10-23) ya fue inspeccionado SOLO a nivel de precios (velas H1) por el autor, sin acceso a salidas PPO/LLM de esa fecha. Queda excluido como holdout confirmatorio. (Declaración del autor; no auditada por el revisor independiente).
 - **Custodio del holdout:** persona distinta del autor y del ajustador de modelos (ver §13).
@@ -248,7 +252,7 @@ El criterio T-31 de >55% con n≥100 se reporta como diagnóstico, **no** como p
 
 Antes de la medición del holdout, se calcula el `n_eff` esperado:
 
-- `n_esperado` = número de oportunidades evaluables en 2026-10-16 → 2026-10-23 (aprox. 6 sesiones × 24 velas H1 × 3 símbolos ≈ 432 oportunidades brutas, reducidas por abstención por plano y terminal no cerrado).
+- `n_esperado` = número de oportunidades evaluables en la ventana sellada de §9: **426 oportunidades brutas** (142 velas H1 × 3 símbolos EURUSD/GBPUSD/USDCHF), reducidas por abstención por plano y terminal no cerrado.
 - `ρ_k` estimado en split de desarrollo (autocorrelación de señales direccionales, lags 1–5).
 - `n_eff_esperado = n_esperado / (1 + 2·Σ ρ_k)`.
 - **Regla de go/no-go por potencia:** si `n_eff_esperado < 100` en el agregado global, el protocolo nace NO-GO por §12.2 y se debe ampliar la ventana del holdout o reducir `n_eff` requerido (requiere nuevo pre-registro).
@@ -265,19 +269,23 @@ Antes de la medición del holdout, se calcula el `n_eff` esperado:
 | **PPO** | Espacio de acción | `Box(4,)` = `[direction, volume, sl_pips, tp_pips]` |
 | **PPO** | Versión de `trading_env_v2.py` | `177d1ee99c81261339e529bf73f30eb39f6ea8d44db6408ee8f27c81c05b9dcf` (hash SHA-256 del archivo `ml/trading_env_v2.py`, calculado y verificado) |
 | **PPO** | Versión de `train_ppo_v3.py` | `0bc954c9a091ac45ce634c115e959d815327713dfef9ba7292432d0552dd0e35` (hash SHA-256 del archivo `ml/train_ppo_v3.py`, calculado y verificado) |
-| **PPO** | Bundle sha256 | `4cd9abb6bc94e33952afb627cf134d4535ee61677929902cfe8db9e406ea44a7` (hash SHA-256 del archivo `ml/ppo_trading_bot_v3.zip`, calculado y verificado) |
-| **PPO** | VecNormalize sha256 | `d429c3d440d365502c54e9b47f6c3a1db356d662af18e5974c7c3207c065c8a5` (hash SHA-256 del archivo `ml/ppo_trading_bot_v3_vec_norm.pkl`, calculado y verificado) |
-| **PPO** | Contrato de observación | `(20, 25)` (Fase 3) |
-| **PPO** | Espacio de acción | `Box(4,)` = `[direction, volume, sl_pips, tp_pips]` |
-| **PPO** | Versión de `trading_env_v2.py` | `177d1ee99c81261339e529bf73f30eb39f6ea8d44db6408ee8f27c81c05b9dcf` (hash SHA-256 del archivo `ml/trading_env_v2.py`, calculado y verificado) |
-| **PPO** | Versión de `train_ppo_v3.py` | `0bc954c9a091ac45ce634c115e959d815327713dfef9ba7292432d0552dd0e35` (hash SHA-256 del archivo `ml/train_ppo_v3.py`, calculado y verificado) |
-| **LLM** | Modelo | `Qwen-4B-Instruct` (archivo `Qwen--Qwen3-4B-Instruct-2507-q4_k_m.gguf`, ejecutado vía `llama_cpp.server` en Jetson) |
-| **LLM** | Proveedor | `localhost` (ejecutado localmente en la Jetson vía `llama_cpp.server`, no proveedor remoto) |
-| **LLM** | Propietario del modelo | `Qwen (Alibaba Cloud)` (modelo de código abierto de Alibaba Cloud, ejecutado localmente) |
-| **LLM** | Versión del prompt | `0.1` — **REQUERIDO:** SHA-256 del template de prompt utilizado, a calcular antes de la firma |
-| **LLM** | Temperatura / parámetros de inferencia | `temperatura=0.4, max_tokens=160, response_format={"type":"json_object"}` |
+| **LLM** | Modelo servido (verificado en runtime) | `DarkIdol-Llama-3.1-8B-Instruct-1.2-Uncensored.Q2_K.gguf` — fine-tune de terceros («DarkIdol», variante sin censura) sobre `Llama-3.1-8B-Instruct` (Meta), cuantización GGUF **Q2_K** |
+| **LLM** | SHA-256 de los pesos | `63cdbadc9fcd4dc30e320b4322afcdb02f2cf58341fefad86dbe4feb6be563bb` (calculado en la Jetson sobre el GGUF servido) |
+| **LLM** | Servicio y runtime | `llm-8b.service` (activo): `llama_cpp.server` en `0.0.0.0:8080` con `--n_ctx 2048 --n_batch 128 --n_ubatch 128 --n_gpu_layers 15 --n_threads 4 --chat_format llama-3 --interrupt_requests true`. `llm-proxy.service` publica `8090 → 8080` |
+| **LLM** | Proveedor | Autohospedado en Jetson (`100.90.16.33`). Endpoint por defecto en código: `http://100.90.16.33:8080/v1/chat/completions` (`QWEN_URL`) |
+| **LLM** | Propietario del modelo | Pesos base: Meta (Llama 3.1 Community License). Fine-tune: «DarkIdol» (tercero). Inferencia: infraestructura propia |
+| **LLM** | Versión del prompt | `0.1` (prompt incrustado en código; no existe fichero de prompt separado) |
+| **LLM** | SHA-256 del mensaje de sistema | `ed773c8d9206244ec7b53b9dcd57cbcae681015806dec8f3b961544a3e6c2645` |
+| **LLM** | SHA-256 del template de usuario | `5260a37ba84d66e03dc3f81bf8e6af4dd6e124c7d887f6894f98a95391e28c8d` (bloque `context_lines` de `query_qwen_unified`, 132 líneas) |
+| **LLM** | SHA-256 del código fuente del prompt | `636e2be82d9369048b61919c940daede15bcbb2a612d681409074959f648300b` (`services/qwen_client.py`) |
+| **LLM** | Parámetros de inferencia | `temperature=0.4`, `max_tokens=160`, `response_format={"type":"json_object"}`, `timeout=45.0 s` |
+| **LLM** | Ventana de contexto / presupuesto | `n_ctx = 2048` tokens. Máximo medido en producción: `prompt_tokens = 1557`; `completion_tokens` observado ≤ 76. Regla de validez: si en el holdout `prompt_tokens + 160 > 2048`, la llamada se marca inválida y esa oportunidad se excluye — no se acepta truncamiento silencioso |
 
-**Regla:** ninguno de estos campos puede quedar como `PENDIENTE_DE_FIJAR` en el momento de la firma. Todos deben rellenarse con valores reales (hashes SHA-256 calculados sobre los archivos reales, versiones de código verificables, nombre/versión del modelo LLM, proveedor, propietario, SHA-256 del prompt, parámetros de inferencia) antes de que el revisor independiente firme el pre-registro. Cualquier campo que quede como `PENDIENTE_DE_FIJAR` en el momento de la firma invalida el protocolo.
+**Identidad verificada, no declarada.** El 2026-10-26 se consultó el endpoint vivo (`GET /v1/models`) y el servicio activo en la Jetson (`systemctl cat llm-8b.service`). El modelo servido es el GGUF anterior, con el hash de pesos indicado. **Discrepancia declarada:** la unidad `llm-4b.service` (Qwen3-4B-Instruct-2507, puerto 8080) **no** es la que atiende a la aplicación; está en `Conflicts=` con la activa. Cualquier referencia a Qwen3-4B como modelo servido está desactualizada y no describe este protocolo.
+
+**Reproducibilidad de la identidad del prompt.** `python3 scripts/prompt_identity_p03.py` extrae los tres hashes y los parámetros de inferencia directamente de `services/qwen_client.py`, y falla si la extracción es ambigua. Cualquier cambio en ese fichero que altere el prompt, el mensaje de sistema, la temperatura, `max_tokens` o `response_format` invalida este pre-registro y exige un nuevo identificador de protocolo.
+
+**Regla:** ninguno de estos campos puede quedar como `PENDIENTE_DE_FIJAR` en el momento de la firma. Todos están rellenados con valores reales verificables antes del sellado: hashes SHA-256 calculados sobre los ficheros reales, identidad del LLM leída del servicio activo y parámetros extraídos del código. Cualquier campo que quede como `PENDIENTE_DE_FIJAR` en el momento de la firma invalida el protocolo.
 
 ---
 
@@ -295,7 +303,7 @@ Antes de la medición del holdout, se calcula el `n_eff` esperado:
 
 ## 12. Criterios de aceptación del protocolo (GO / NO-GO)
 
-### GO si se cumplen TODOS:
+### 12.1 GO si se cumplen TODOS:
 
 1. Pre-registro versionado y firmado por revisor independiente.
 2. C1–C8 definidos y medibles antes de tocar el holdout.
@@ -304,7 +312,7 @@ Antes de la medición del holdout, se calcula el `n_eff` esperado:
 5. Código, configuración y bundles identificados (versiones exactas).
 6. Ningún umbral ajustado tras observar predicciones del holdout.
 
-### NO-GO si ocurre cualquiera:
+### 12.2 NO-GO si ocurre cualquiera:
 
 1. El revisor independiente rechaza el pre-registro.
 2. `n_eff < 100` en el holdout (muestra insuficiente).
@@ -314,7 +322,7 @@ Antes de la medición del holdout, se calcula el `n_eff` esperado:
 
 ### 12.3 Cláusula anti-reset del holdout
 
-Un NO-GO por §12.2–12.5 **no autoriza** re-pre-registrar el mismo holdout con umbrales distintos, bundles distintos, o prompts distintos. Cualquier re-intento requiere:
+Un NO-GO por las condiciones 2–5 de §12.2 **no autoriza** re-pre-registrar el mismo holdout con umbrales distintos, bundles distintos, o prompts distintos. Cualquier re-intento requiere:
 
 1. Un holdout **nuevo** (ventana temporal posterior a 2026-10-23).
 2. Un nuevo SHA-256 del holdout.
@@ -336,9 +344,11 @@ El holdout sellado en §9 no puede reabrirse, recalcularse ni sustituirse bajo e
 | Responsable de riesgo | `PENDIENTE_DE_ASIGNAR` (identificador: nombre + afiliación o pseudónimo + clave pública) | Aprobación de límites C8, exposición, drawdown | — | — | — |
 | Custodio del holdout | `PENDIENTE_DE_ASIGNAR` (identificador: nombre + afiliación o pseudónimo + clave pública) | Cálculo y custodia del SHA-256 del holdout; sellado antes de medición | — | — | — |
 
+**Sello del holdout (2026-10-26T14:40Z).** SHA-256 `84719806df45577f83835c6c6e384317785678f7f3ffc70fe4ddccc4f18eeb47`, fichero `ops/holdout-p03-20261016-20261023.json`, 426 filas (142 por símbolo: EURUSD, GBPUSD, USDCHF), ventana `[2026-10-16T00:00Z, 2026-10-24T00:00Z)`, offset del bróker validado y persistido en runtime (+2 h). El sello lo ejecutó el autor **como operador** con el script reproducible `scripts/seal_holdout_p03.py`; el rol formal de **custodio** sigue sin asignar y debe quedar designado (persona distinta del autor y del ajustador de modelos) antes de la primera medición. El hash ya está fijado: cualquier recálculo debe coincidir byte a byte o no es el holdout sellado.
+
 **Declaración de conflicto de interés:** El autor del protocolo (Félix) **no** participa en el ajuste de umbrales, hiperparámetros ni selección de modelos una vez sellado este pre-registro. El rol de modelista/tuner es independiente del autor y **se identificará por nombre en la tabla anterior antes de la primera medición (condición de GO, §12.3)**. El custodio del holdout es una persona distinta del autor y del ajustador de modelos. No existe conflicto de interés entre la redacción del protocolo y la ejecución del modelo. Si el autor resultara ser también el ajustador de modelos en algún momento futuro, el protocolo no podría certificarse sin un custodio externo del holdout y un revisor externo independiente.
 
-**SHA-256 del documento:** pendiente de cálculo tras firma de todas las partes, sobre el archivo `2026-10-25-pre-registro-p03-protocolo-h20.md` ya incorporados todos los cambios de este plan.
+**SHA-256 del documento:** se publica en el sidecar `ops/2026-10-25-pre-registro-p03-protocolo-h20.sha256`, calculado sobre este `.md` tras la última edición y antes de la firma. Cualquier cambio posterior exige recalcular el sidecar y una nueva firma; un hash que no coincida invalida la certificación.
 
 ---
 
@@ -348,6 +358,7 @@ El holdout sellado en §9 no puede reabrirse, recalcularse ni sustituirse bajo e
 - El PnL histórico disponible es descriptivo; no se presenta como prueba de edge.
 - Sin muestra madura (`n_eff ≥ 100`), no hay afirmación de edge.
 - El objetivo es eliminar ruido evitable de datos, relojes, etiquetas y evaluación; no existe garantía honesta de "cero ruido" de mercado.
+- **Horizonte interno del prompt LLM (limitación declarada):** el prompt de `query_qwen_unified` define `bias_prob` como «probabilidad de que el precio esté MÁS ALTO en 24 h», mientras este protocolo evalúa a H=20. La señal direccional evaluada en C1–C8 es `bias` (BULLISH/BEARISH/NEUTRAL); `bias_prob` no se usa como predictor. No se modifica el prompt en este ciclo porque alterarlo invalidaría la identidad de §10 y exigiría un nuevo pre-registro.
 
 ---
 
