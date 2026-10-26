@@ -3,7 +3,7 @@
 > **Estado:** pre-registro (borrador para certificación por revisor independiente).
 > **Fecha:** 2026-10-26
 > **Autor:** Félix (ingeniería)
-> **Revisor independiente:** DeepSeek (revisión externa, iteraciones 1–4) — firma pendiente de la iteración final
+> **Revisor independiente:** DeepSeek (revisión externa, iteraciones 1–5) — **firmado en it.5, 2026-10-26**
 > **SHA-256 del documento:** ver sidecar `ops/2026-10-25-pre-registro-p03-protocolo-h20.sha256`
 
 ---
@@ -131,7 +131,7 @@ pnl_real = profit + swap + commission + fee − slippage_cost_eur
 
 Los siguientes campos se calculan **una vez** sobre el snapshot y se comparten idénticamente con ambos adaptadores:
 
-| Campo | Origen | PPO | Qwen |
+| Campo | Origen | PPO | LLM (DarkIdol-Llama-3.1-8B) |
 |-------|--------|-----|------|
 | `symbol` | Par | ✅ | ✅ |
 | `t0` / `t0_broker` | Cierre vela H1 | ✅ | ✅ |
@@ -157,7 +157,7 @@ Los siguientes campos se calculan **una vez** sobre el snapshot y se comparten i
 
 ### 7.1 Campos exclusivos (no rompen paridad)
 
-| Campo | PPO | Qwen | Origen |
+| Campo | PPO | LLM (DarkIdol-Llama-3.1-8B) | Origen |
 |-------|-----|------|--------|
 | `features_p20` (vector 17+8 canales) | ✅ | ❌ | Features de mercado |
 | `position`, `bars_since_close`, `entry_price`, `sl_pips`, `tp_pips` | ✅ | ❌ | Estado de posición |
@@ -331,6 +331,23 @@ Un NO-GO por las condiciones 2–5 de §12.2 **no autoriza** re-pre-registrar el
 
 El holdout sellado en §9 no puede reabrirse, recalcularse ni sustituirse bajo este identificador de protocolo.
 
+### 12.4 Checklist pre-medición (condiciones de GO verificables)
+
+Antes de la primera medición del holdout, el custodio (Pilar Soarez) y el responsable de riesgo (Juan Gomez) deben ejecutar y registrar las 4 verificaciones siguientes. Cualquier fallo revoca el GO y el protocolo queda en NO-GO por §12.2:
+
+| # | Verificación | Comando / procedimiento | Valor esperado | Condición de GO |
+|---|-------------|------------------------|----------------|-----------------|
+| 1 | Sello del holdout (§9.1, §13) | `sha256sum ops/holdout-p03-20261016-20261023.json` | `84719806df45577f83835c6c6e384317785678f7f3ffc70fe4ddccc4f18eeb47` | §12.2.3 — si no coincide, NO-GO (datos alterados) |
+| 2 | Identidad del LLM — pesos | `sha256sum <GGUF en la Jetson>` | `63cdbadc9fcd4dc30e320b4322afcdb02f2cf58341fefad86dbe4feb6be563bb` | §12.2.4 — si no coincide, NO-GO (identidad alterada) |
+| 3 | Identidad del LLM — servicio y endpoint | `curl -s http://100.90.16.33:8080/v1/models` → `id` del modelo; `systemctl is-active llm-8b.service` | `DarkIdol-Llama-3.1-8B-Instruct-1.2-Uncensored.Q2_K.gguf`; `active` | §12.2.4 — si no coincide, NO-GO |
+| 4 | Identidad del LLM — prompt y parámetros | `python3 scripts/prompt_identity_p03.py` | 3 hashes de §10 (`ed773c8d…`, `5260a37b…`, `636e2be8…`) y `temperature=0.4`, `max_tokens=160`, `response_format={"type":"json_object"}` | §12.2.4 — si no coincide, NO-GO |
+| 5 | Identidad del PPO | `sha256sum ml/ppo_trading_bot_v3.zip` | `4cd9abb6bc94e33952afb627cf134d4535ee61677929902cfe8db9e406ea44a7` | §12.2.4 — si no coincide, NO-GO |
+| 6 | Identidad del PPO — VecNormalize | `sha256sum ml/ppo_trading_bot_v3_vec_norm.pkl` | `d429c3d440d365502c54e9b47f6c3a1db356d662af18e5974c7c3207c065c8a5` | §12.2.4 — si no coincide, NO-GO |
+| 7 | Identidad del PPO — código | `sha256sum ml/trading_env_v2.py` | `177d1ee99c81261339e529bf73f30eb39f6ea8d44db6408ee8f27c81c05b9dcf` | §12.2.4 — si no coincide, NO-GO |
+| 8 | Identidad del PPO — código | `sha256sum ml/train_ppo_v3.py` | `0bc954c9a091ac45ce634c115e959d815327713dfef9ba7292432d0552dd0e35` | §12.2.4 — si no coincide, NO-GO |
+
+Estas 8 verificaciones materializan las condiciones implícitas de §12.1.3–§12.1.5 y §12.2.3–§12.2.4. No cambian ningún umbral; sólo hacen el GO verificable paso a paso por un tercero.
+
 ---
 
 ## 13. Firma y sello
@@ -378,7 +395,7 @@ El holdout sellado en §9 no puede reabrirse, recalcularse ni sustituirse bajo e
 
 <footer>
 
-**Sistema de Trading Automatizado con IA — FastAPI + PPO + Qwen + MetaTrader 5**
+**Sistema de Trading Automatizado con IA — FastAPI + PPO + LLM (DarkIdol-Llama-3.1-8B) + MetaTrader 5**
 
 > **Aviso:** este sistema opera dinero real. Las cifras de rendimiento que se publiquen tras este pre-registro llevarán su `n`, su intervalo de confianza y su fecha. Sin muestra madura (`n_eff ≥ 100`), no hay afirmación de edge.
 
