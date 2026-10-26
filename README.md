@@ -176,6 +176,75 @@ cerrado, y no usa información posterior a `t0 + 20 h`.
 Archivos funcionales: `fastapi/routers/ai.py`, `fastapi/services/auto_retrain.py`, `fastapi/db/schema.sql`.
 Regresión: `fastapi/tests/test_trade_filled_webhook.py`, `fastapi/tests/architecture_baseline.py`.
 
+### Evidencia — P0.3: Pre-registro Protocolo H=20 certificado externamente (2026-10-26)
+
+Protocolo PPO-vs-LLM para H=20 certificado por revisor independiente DeepSeek (5ª iteración, veredicto CERTIFICADO con 4 condiciones de GO y 3 correcciones de edición aplicadas).
+
+**Documento:** `fastapi/ops/2026-10-25-pre-registro-p03-protocolo-h20.md`
+**Sidecar SHA-256:** `a3f8a7c628a5a111f83d65d8c23627ddbaca9069001615a451f71b322bb26a0d` (verificado con `sha256sum -c`)
+**Revisión externa:** `fastapi/ops/revisiones-pre-registro/2026-10-25-pre-registro-p03-protocolo-h20-deepseek.md`
+
+**Roles asignados (§13):**
+- Autor: Félix (ingeniería)
+- Ajustador PPO: Agente de ingeniería (OpenCode)
+- Ajustador LLM: Agente de ingeniería (OpenCode)
+- Revisor independiente: DeepSeek (iteraciones 1–5, firmado it.5)
+- Responsable de riesgo: Juan Gomez
+- Custodio del holdout: Pilar Soarez
+
+**Holdout sellado (§9):** SHA-256 `84719806df45577f83835c6c6e384317785678f7f3ffc70fe4ddccc4f18eeb47`, `holdout-p03-20261016-20261023.json` (426 filas, ventana [2026-10-16T00:00Z, 2026-10-24T00:00Z), offset +2h validado en runtime)
+
+**Identidad de modelos (§10, verificada con sha256sum):**
+- PPO bundle: `4cd9abb6bc94e33952afb627cf134d4535ee61677929902cfe8db9e406ea44a7` (`ml/ppo_trading_bot_v3.zip`)
+- VecNormalize: `d429c3d440d365502c54e9b47f6c3a1db356d662af18e5974c7c3207c065c8a5` (`ml/ppo_trading_bot_v3_vec_norm.pkl`)
+- trading_env_v2.py: `177d1ee99c81261339e529bf73f30eb39f6ea8d44db6408ee8f27c81c05b9dcf`
+- train_ppo_v3.py: `0bc954c9a091ac45ce634c115e959d815327713dfef9ba7292432d0552dd0e35`
+- LLM pesos GGUF: `63cdbadc9fcd4dc30e320b4322afcdb02f2cf58341fefad86dbe4feb6be563bb` (Jetson, verificar por custodio)
+- LLM endpoint: `100.90.16.33:8080/v1/models` → `DarkIdol-Llama-3.1-8B-Instruct-1.2-Uncensored.Q2_K.gguf` (verificado por curl)
+- Prompt v0.1: sistema `ed773c8d9206244ec7b53b9dcd57cbcae681015806dec8f3b961544a3e6c2645`, template `5260a37ba84d66e03dc3f81bf8e6af4dd6e124c7d887f6894f98a95391e28c8d`, fuente `636e2be82d9369048b61919c940daede15bcbb2a612d681409074959f648300b` (verificado con `scripts/prompt_identity_p03.py`)
+- Parámetros LLM: temperature=0.4, max_tokens=160, response_format=json_object, timeout=45s
+
+**§12.4 Checklist pre-medición:** 8 verificaciones de hash añadidas como condiciones de GO verificables antes de la primera medición del holdout. Verificaciones locales completadas (holdout, PPO bundle, VecNormalize, trading_env_v2.py, train_ppo_v3.py, prompt v0.1 sistema/template/fuente, parámetros). Las 2 remotas (LLM pesos GGUF en Jetson, servicio llm-8b.service) requieren ejecución por Pilar Soarez (custodio) y Juan Gomez (riesgo).
+
+**EA v15.0:** Desplegado live en MT5 (confirmado por usuario). Código en `mql5/AI_Quant_Terminal.mq5` (versión 15.0, envía bid/ask/quote_time en /predict y entry_price/commission/fee/cycle_id en /trade/filled).
+
+**Validación:** `pytest fastapi/tests/test_orders_prepare.py -q` → 26 passed; `pytest fastapi/tests/test_backfill_p02c_order_links.py tests/test_lineage_p13_sample.py tests/test_reconcile_replay_sources.py tests/test_orders_prepare.py -q` → 71 passed.
+
+Archivos creados: `fastapi/scripts/backfill_p02c_order_links.py`, `fastapi/tests/test_backfill_p02c_order_links.py`, `fastapi/scripts/lineage_p13_sample.py`, `fastapi/tests/test_lineage_p13_sample.py`.
+
+### Evidencia — P0.2c: Backfill de enlaces order_db_id en trade_outcomes (2026-10-26)
+
+Backfill de 210 outcomes sin FK `order_db_id` que bloqueaban la reconciliación de capital/PnL.
+
+**Reglas de aceptación:**
+- 0 joins temporales: solo enlaces exactos por posición+símbolo+dirección
+- Si hay exactamente una coincidencia (mt5_position_id + symbol + type): se actualiza order_db_id
+- Si hay cero o múltiples: no se toca, razón documentada (`missing_or_invalid_position_id`, `no_order_for_position_symbol_direction`, `multiple_orders_for_position_symbol_direction`)
+- No silent failures: errores se propagan, nunca se imputan valores por defecto
+
+**Script:** `fastapi/scripts/backfill_p02c_order_links.py`
+**Tests:** `fastapi/tests/test_backfill_p02c_order_links.py` (18 passed)
+
+Archivos creados: `fastapi/scripts/backfill_p02c_order_links.py`, `fastapi/tests/test_backfill_p02c_order_links.py`.
+
+### Evidencia — P1.3: Lineage de muestra de oportunidades (2026-10-26)
+
+Lineage construido desde fuentes ya aceptadas (audit_log, orders, trade_outcomes), sin reparar ni reutilizar el CSV P3.1 fallido (`valid=false`, todas las decisiones HOLD, benchmarks vacíos, holdout superpuesto).
+
+**Reglas de aceptación:**
+- IDs únicos (SHA-256 sobre ciclo+símbolo+decisión+timestamp+order_id+outcome_id)
+- Timestamps ordenados ascendente (mt5_time)
+- Símbolo/ciclo exactos (no aproximación por tiempo)
+- Estado de ejecución clasificado: pending/placed/filled/rejected/cancelled/unconfirmed/unresolved
+- Lineage/hash 100% (cada fila tiene lineage_hash verificable)
+- 0 joins temporales (solo claves exactas: cycle_id, order_db_id)
+- Cada fila tiene estado y motivo determinista (link_reason)
+
+**Script:** `fastapi/scripts/lineage_p13_sample.py`
+**Tests:** `fastapi/tests/test_lineage_p13_sample.py` (21 passed)
+
+Archivos creados: `fastapi/scripts/lineage_p13_sample.py`, `fastapi/tests/test_lineage_p13_sample.py`.
+
 ## Arquitectura
 
 ```

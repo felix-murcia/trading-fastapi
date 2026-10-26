@@ -277,10 +277,10 @@ class TestEAGateContract:
         assert "gate_unreachable" in src
         assert 'return false;' in src
 
-    def test_ea_version_bumped_to_14(self):
+    def test_ea_version_bumped_to_15(self):
         src = _ea_source()
-        assert re.search(r'#property\s+version\s+"14\.', src), "Falta bump de #property version"
-        assert re.search(r'#define\s+EA_VERSION\s+"14\.', src), "Falta bump de EA_VERSION"
+        assert re.search(r'#property\s+version\s+"15\.', src), "Falta bump de #property version"
+        assert re.search(r'#define\s+EA_VERSION\s+"15\.', src), "Falta bump de EA_VERSION"
         assert "long &orderDbId" in src
 
 
