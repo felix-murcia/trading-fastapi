@@ -85,30 +85,51 @@ async def mark_order_filled(
 
     Devuelve el id transicionado, o None si no había orden viva que casar.
     """
-    if order_db_id is None:
+    # Triage: sin ambas claves exactas no se modifica ninguna orden.
+    if order_db_id is None and mt5_order_id is None:
         logger.warning(
-            "[ORDER-MANAGER] no se cambia el estado: falta order_db_id exacto "
-            "(%s %s)",
+            "[ORDER-MANAGER] no se cambia el estado: faltan claves exactas "
+            "(%s %s) — sin order_db_id ni mt5_order_id no se puede casar.",
             symbol,
             order_type,
         )
         return None
 
     pool = get_pool()
-    row = await pool.fetchrow(
-        """
-        UPDATE orders
-        SET status='filled',
-            mt5_order_id=COALESCE(mt5_order_id, NULLIF($4::text, '')),
-            mt5_position_id=COALESCE(mt5_position_id, $5)
-        WHERE id=$3 AND symbol=$1 AND type=$2
-          AND status IN ('pending','placed')
-        RETURNING id, cycle_id
-        """,
-        symbol, order_type, order_db_id,
-        str(mt5_order_id) if mt5_order_id is not None else None,
-        position_id,
-    )
+    # Si tenemos order_db_id exacto: buscar por id. Si solo tenemos
+    # mt5_order_id (webhook v15.0): buscar por symbol+type+mt5_order_id.
+    # Ramas de búsqueda según clave disponible.
+    if order_db_id is not None:
+        row = await pool.fetchrow(
+            """
+            UPDATE orders
+            SET status='filled',
+                mt5_order_id=COALESCE(mt5_order_id, NULLIF($4::text, '')),
+                mt5_position_id=COALESCE(mt5_position_id, $5)
+            WHERE id=$3 AND symbol=$1 AND type=$2
+              AND status IN ('pending','placed')
+            RETURNING id, cycle_id
+            """,
+            symbol, order_type, order_db_id,
+            str(mt5_order_id) if mt5_order_id is not None else None,
+            position_id,
+        )
+    else:
+        row = await pool.fetchrow(
+            """
+            UPDATE orders
+            SET status='filled',
+                mt5_order_id=COALESCE(mt5_order_id, NULLIF($3::text, '')),
+                mt5_position_id=COALESCE(mt5_position_id, $4)
+            WHERE symbol=$1 AND type=$2
+              AND mt5_order_id = $3::text
+              AND status IN ('pending','placed')
+            RETURNING id, cycle_id
+            """,
+            symbol, order_type,
+            str(mt5_order_id) if mt5_order_id is not None else None,
+            position_id,
+        )
     if row is None:
         logger.info(
             "[ORDER-MANAGER] mark_order_filled: sin orden viva que casar (%s %s) — idempotente",

@@ -247,16 +247,16 @@ Archivos creados: `fastapi/scripts/lineage_p13_sample.py`, `fastapi/tests/test_l
 
 ### Bloqueos conocidos — P0.2c y P1.3 (2026-10-26)
 
-**P0.2c — Backfill de `order_db_id`: NO-GO (datos fuente insuficientes).**
+**P0.2c — Backfill de `order_db_id`: NO-GO (bloqueo de datos fuente).**
 
-El backfill se ejecutó contra la DB en Docker pero enlazó **0 de 211** outcomes sin FK:
+Ejecutado en Docker — 211 outcomes sin FK (de 218 totales, 7 ya enlazados por EA v15.0):
 
 | Razón | Count |
 |-------|-------|
 | `missing_or_invalid_position_id` | 121 |
 | `no_order_for_position_symbol_direction` | 90 |
 
-Causa raíz: solo **7 de 99** órdenes en la tabla `orders` tienen `mt5_position_id` poblado. Sin `mt5_position_id` en las órdenes no es posible hacer el enlace exacto (posición + símbolo + dirección) requerido por P0.2c. Las 210 filas permanecen sin `order_db_id` y la reconciliación de capital/PnL sigue bloqueada.
+Causa raíz: 89 de 96 órdenes `filled` no tienen `mt5_order_id` (solo 7 de 99 órdenes lo tienen, y todos con `mt5_position_id`). El webhook `/v1/ai/trade/filled` no envió `opening_order_ticket` ni `position_id` para la mayoría (pre-v15.0 o fallos). Sin `mt5_order_id`, no es posible enlazar con `deal.order`; sin `mt5_position_id`, `_match_outcome_to_order` no encuentra coincidencia exacta. Fase 1 intentada (0 actualizaciones — no había órdenes con `mt5_order_id` sin `mt5_position_id`). El backfill funciona (18 tests pasaron); solo puede enlazar los 7 ya resueltos.
 
 **P1.3 — Lineage de muestra: EJECUTADO (7255 filas de lineage).**
 
