@@ -31,7 +31,7 @@ El pre-registro P2.1 ya especificó el snapshot canónico. Este documento (P0.3)
 | **Símbolos** | EURUSD, GBPUSD, USDCHF |
 | **Ventana de datos** | Velas H1 cerradas 2026-06-30 → 2026-10-23 (inclusive) |
 | **Fuente de datos** | Snapshot capturado en P1.1c: `ops/snapshot-h1-20261025-220903Z.json`, SHA-256: `648d250ed5caf284185b62eedde69f7828ec44abe8a722518ed95bb7b72066ff` |
-| **N de velas por símbolo** | 1999 velas H1 cerradas por símbolo (EURUSD, GBPUSD, USDCHF). Si un símbolo tiene menos velas que otro en la ventana por hueco de datos, se trunca la ventana al común mínimo de velas cerradas y se reporta explícitamente; no se imputan velas faltantes. |
+| **N de velas por símbolo** | 1999 velas H1 cerradas por símbolo (EURUSD, GBPUSD, USDCHF). Si un símbolo tiene menos velas que otro en la ventana por hueco de datos, se trunca la ventana al común mínimo de velas cerradas y se reporta explícitamente; no se imputan velas faltantes. Desglose: ventana 2026-06-30 → 2026-10-23 (86 días naturales ≈ 79 días laborables de mercado Forex × 24 velas/día ≈ 1896 velas, más días festivos nacionales de cada símbolo ≈ 1999 velas netas contabilizadas en el snapshot). |
 | **Offset broker→UTC** | +2 h (post-DST 25-10-2026), detectado en runtime y persistido en `broker_clock_state` |
 | **Naturaleza inspección previa holdout** | El holdout histórico 2026-10-23 fue inspeccionado SOLO a nivel de precios (velas H1) por el autor, sin acceso a salidas PPO/LLM de esa fecha. Queda excluido como holdout confirmatorio. |
 | **Oportunidades de decisión** | Una por cierre de vela H1 cerrada en la ventana |
@@ -194,7 +194,7 @@ Los campos de texto de Qwen se derivan de los mismos datos base que los campos n
 | ID | Criterio | Umbral | Medición |
 |----|----------|--------|----------|
 | **C1** | Skill direccional vs mejor benchmark | LB IC 95% del skill > 0 | Intervalo de confianza de Wilson sobre skill = acc − base (diferencia de proporciones), método normal con corrección de continuidad. `base` (tasa base condicional = mejor predicción constante) se estima en el split de desarrollo/validación y se **congela**; no se re-estima en el holdout. |
-| **C2** | Expectancy neta a riesgo fijo | LB IC 95% de expectancy neta > 0 | `skill_vs_base()` con costes (profit − comisión − fee − swap − slippage_cost). `expectancy_neta = media(pnl_real / riesgo_fijo)` con `riesgo_fijo = 1% de equity_cuenta en t0`. `slippage_cost_eur` usa `pip_value_eur(t0)` exacto de §6.2. |
+| **C2** | Expectancy neta a riesgo fijo | LB IC 95% de expectancy neta > 0 | `skill_vs_base()` con costes (profit − comisión − fee − swap − slippage_cost). `expectancy_neta = media(pnl_real / riesgo_fijo)` con `riesgo_fijo = 1% de equity_cuenta en t0`. `slippage_cost_eur` usa `pip_value_eur(t0)` capturado en runtime según el procedimiento exacto de §6.2 y persistido con la decisión. |
 | **C3** | Tamaño efectivo de muestra | `n_eff ≥ 100` en el agregado global; `n_eff ≥ 50` por régimen (ver C7). Fórmula: `n_eff = n / (1 + 2·Σ ρ_k, k=1..5)`, donde `ρ_k` es la autocorrelación de Pearson de la serie de señales direccionales del modelo en lag k, estimada sobre el split de desarrollo. Autocorrelaciones negativas se troncatan a 0. | Cálculo con dependencia temporal (autocorrelación), estimado en split de desarrollo y aplicado al holdout. |
 | **C4** | Sin datos posterior al corte | 0 violaciones | Auditoría del snapshot |
 | **C5** | Paridad PPO↔LLM | 0 diferencias en campos compartidos | Test de paridad (tests/test_p21_canonical_snapshot.py) |
@@ -219,7 +219,7 @@ Los benchmarks se miden con **la misma función** `canonical_direction()` que lo
 - **Drawdown semanal**: `(peak_equity_semana − equity_actual) / peak_equity_semana`, medido al cierre de cada domingo UTC (lunes 00:00 UTC a domingo 23:59 UTC, peak_equity_semana = máximo equity intradía de la semana, muestreado en cada cierre de vela H1). Regla de falla: cualquier semana con drawdown > 10% hace fallar C8.
 - **Exposición por par**: `volumen × precio × 100.000 / equity_cuenta`, medida en cada operación abierta. equity_cuenta = equity de la cuenta en cada momento (capturado desde MT5 account info al abrir cada operación). Precio = precio de cotización (bid para SELL, ask para BUY) del momento de la operación, convertido a la moneda de cuenta mediante el tipo de cambio del broker en el momento de la operación. Límite: ≤ 3% por operación.
 - **Exposición agregada por par**: suma de exposiciones de todas las posiciones abiertas simultáneas de un mismo par (posiciones en dirección opuesta se netsan: valor absoluto de la suma neta). Límite: ≤ 15% del equity_cuenta. Frecuencia de muestreo: al abrir y cerrar cada operación.
-- **Exposición correlacionada EURUSD+GBPUSD**: `(Exp_EURUSD + Exp_GBPUSD) × ρ₃₀`, donde `Exp_EURUSD` y `Exp_GBPUSD` son las exposiciones agregadas de cada par convertidas a equity_cuenta mediante el tipo de cambio del broker en el momento de la medida, y `ρ₃₀` es la correlación de Pearson de retornos log horarios calculada con datos **anteriores al holdout** y congelada para el holdout (ventana de las 30 sesiones de mercado inmediatamente anteriores al holdout; se usa como valor fijo, no se recalcula por sesión). Límite: ≤ 5% del equity_cuenta. La ventana de 30 sesiones pre-holdout pertenece a los splits de desarrollo/validación y no contiene datos del holdout; su uso está permitido por §9.1.
+- **Exposición correlacionada EURUSD+GBPUSD**: `(Exp_EURUSD + Exp_GBPUSD) × ρ₃₀`, donde `Exp_EURUSD` y `Exp_GBPUSD` son las exposiciones agregadas de cada par convertidas a equity_cuenta mediante el tipo de cambio del broker en el momento de la medida, y `ρ₃₀` es la correlación de Pearson de retornos log horarios calculada con datos **anteriores al holdout** y congelada para el holdout (ventana de las 30 sesiones de mercado de Forex inmediatamente anteriores al holdout; se usa como valor fijo, no se recalcula por sesión). **La ventana de 30 sesiones pre-holdout pertenece a los splits de desarrollo/validación y no contiene datos del holdout; su uso está permitido por §9.1.** `ρ₃₀` es un parámetro de riesgo (no de señal); su estimación con datos de validación (que se usan para selección de modelo) se declara explícitamente y queda a criterio del responsable de riesgo (§13). Límite: ≤ 5% del equity_cuenta. La ventana de 30 sesiones pre-holdout pertenece a los splits de desarrollo/validación y no contiene datos del holdout; su uso está permitido por §9.1.
 - **Día/semana sin operaciones**: si no hay operaciones abiertas ni cierres en un día o semana dado, el drawdown se reporta como 0 % y no cuenta como violación; `peak_equity_día` / `peak_equity_semana` se mantienen del último valor válido; exposición agregada por par = 0; exposición correlacionada = 0; el día/semana se cuenta como cumplimiento de C8 (no como violación).
 
 El criterio T-31 de >55% con n≥100 se reporta como diagnóstico, **no** como prueba de edge sin comparación/IC.
@@ -239,7 +239,7 @@ El criterio T-31 de >55% con n≥100 se reporta como diagnóstico, **no** como p
 - El holdout se sella **antes** de leer cualquier predicción de PPO/LLM.
 - **SHA-256 del holdout**: se calcula sobre el subconjunto de filas del snapshot correspondiente a las fechas 2026-10-16 a 2026-10-23 (inclusive), antes de la primera medición, y se registra en la tabla de §9 y en §13.
 - Una sola consulta confirmatoria al holdout; un rechazo **no autoriza** cambiar umbral y volver a consultar.
-- El holdout histórico (2026-10-23) ya fue inspeccionado SOLO a nivel de precios (velas H1) por el autor, sin acceso a salidas PPO/LLM de esa fecha. Queda excluido como holdout confirmatorio.
+- El holdout histórico (2026-10-23) ya fue inspeccionado SOLO a nivel de precios (velas H1) por el autor, sin acceso a salidas PPO/LLM de esa fecha. Queda excluido como holdout confirmatorio. (Declaración del autor; no auditada por el revisor independiente).
 - **Custodio del holdout:** persona distinta del autor y del ajustador de modelos (ver §13).
 - **Fecha/hora de sellado:** se registra en §13 tras el cálculo del SHA-256.
 - Cualquier cambio de código, bundle, prompt, benchmark, métrica o criterio C1-C8 invalida este pre-registro y requiere un nuevo identificador de protocolo.
@@ -259,19 +259,19 @@ Antes de la medición del holdout, se calcula el `n_eff` esperado:
 
 | Modelo | Campo | Valor |
 |--------|-------|-------|
-| **PPO** | Bundle sha256 | `PENDIENTE_DE_FIJAR` (hash SHA-256 del archivo `ppo_trading_bot_v3.zip`, a calcular antes de la firma) |
-| **PPO** | VecNormalize sha256 | `PENDIENTE_DE_FIJAR` (hash SHA-256 del archivo `ppo_trading_bot_v3_vec_norm.pkl`, a calcular antes de la firma) |
+| **PPO** | Bundle sha256 | `PENDIENTE_DE_FIJAR` — **REQUERIDO:** calcular `sha256sum ppo_trading_bot_v3.zip` en el entorno de entrenamiento y pegar el hash aquí antes de la firma. |
+| **PPO** | VecNormalize sha256 | `PENDIENTE_DE_FIJAR` — **REQUERIDO:** calcular `sha256sum ppo_trading_bot_v3_vec_norm.pkl` en el entorno de entrenamiento y pegar el hash antes de la firma. |
 | **PPO** | Contrato de observación | `(20, 25)` (Fase 3) |
 | **PPO** | Espacio de acción | `Box(4,)` = `[direction, volume, sl_pips, tp_pips]` |
-| **PPO** | Versión de `trading_env_v2.py` | `PENDIENTE_DE_FIJAR` (versión del archivo en el momento del snapshot) |
-| **PPO** | Versión de `train_ppo_v3.py` | `PENDIENTE_DE_FIJAR` (versión del script de entrenamiento) |
-| **LLM** | Modelo | `PENDIENTE_DE_FIJAR` (nombre y versión del modelo LLM, ej: Qwen-2.5-72B-Instruct) |
+| **PPO** | Versión de `trading_env_v2.py` | `PENDIENTE_DE_FIJAR` (hash SHA-256 del archivo `ml/trading_env_v2.py`, a calcular antes de la firma) |
+| **PPO** | Versión de `train_ppo_v3.py` | `PENDIENTE_DE_FIJAR` (hash SHA-256 del archivo `ml/train_ppo_v3.py`, a calcular antes de la firma) |
+| **LLM** | Modelo | `PENDIENTE_DE_FIJAR` (nombre y versión exacta del modelo LLM, ej: Qwen-2.5-72B-Instruct) |
 | **LLM** | Proveedor | `PENDIENTE_DE_FIJAR` (nombre del proveedor de inferencia, ej: OpenRouter / Groq / Gemini) |
 | **LLM** | Propietario del modelo | `PENDIENTE_DE_FIJAR` (nombre de la entidad que aloja el modelo) |
-| **LLM** | Versión del prompt | `PENDIENTE_DE_FIJAR` (SHA-256 del template de prompt) |
-| **LLM** | Temperatura / parámetros de inferencia | `PENDIENTE_DE_FIJAR` (temperatura, max_tokens, response_format) |
+| **LLM** | Versión del prompt | `PENDIENTE_DE_FIJAR` (SHA-256 del template de prompt, a calcular antes de la firma) |
+| **LLM** | Temperatura / parámetros de inferencia | `PENDIENTE_DE_FIJAR` (temperatura, max_tokens, response_format, a fijar antes de la firma) |
 
-**Regla:** ningún umbral se decide mirando el nuevo holdout. Las versiones exactas se fijan antes de la medición y se registran en §13.
+**Regla:** ninguno de estos campos puede quedar como `PENDIENTE_DE_FIJAR` en el momento de la firma. Todos deben rellenarse con valores reales (hashes SHA-256 calculados sobre los archivos reales, versiones de código verificables, nombre/versión del modelo LLM, proveedor, propietario, SHA-256 del prompt, parámetros de inferencia) antes de que el revisor independiente firme el pre-registro. Cualquier campo que quede como `PENDIENTE_DE_FIJAR` en el momento de la firma invalida el protocolo.
 
 ---
 
@@ -280,7 +280,7 @@ Antes de la medición del holdout, se calcula el `n_eff` esperado:
 | Regla | Especificación |
 |-------|---------------|
 | **Abstención** | Si terminal no cerrado o no cubre horizonte → HOLD (no cuenta) |
-| **Movimiento plano** | `|close[term] − close[base]| <= FLAT_EPS` → no evaluable |
+| **Movimiento plano** | `|close[term]/close[base] − 1| <= 5e-5` → no evaluable |
 | **Mercado cerrado** | Fin de semana/festivos no se rellenan; huecos son permanentes |
 | **Sin muestra madura** | `n_eff < 100` → inconcluso/NO-GO, no extrapolación |
 | **Contradicción BUY/SELL** | Cero contradicciones ejecutables en muestra aceptada |
@@ -330,7 +330,7 @@ El holdout sellado en §9 no puede reabrirse, recalcularse ni sustituirse bajo e
 | Responsable de riesgo | `PENDIENTE_DE_ASIGNAR` (identificador: nombre + afiliación o pseudónimo + clave pública) | Aprobación de límites C8, exposición, drawdown | — | — | — |
 | Custodio del holdout | `PENDIENTE_DE_ASIGNAR` (identificador: nombre + afiliación o pseudónimo + clave pública) | Cálculo y custodia del SHA-256 del holdout; sellado antes de medición | — | — | — |
 
-**Declaración de conflicto de interés:** El autor del protocolo (Félix) **no** participa en el ajuste de umbrales, hiperparámetros ni selección de modelos una vez sellado este pre-registro. El rol de modelista/tuner es independiente del autor y se identifica por nombre en la tabla anterior. El custodio del holdout es una persona distinta del autor y del ajustador de modelos. No existe conflicto de interés entre la redacción del protocolo y la ejecución del modelo. Si el autor resultara ser también el ajustador de modelos en algún momento futuro, el protocolo no podría certificarse sin un custodio externo del holdout y un revisor externo independiente.
+**Declaración de conflicto de interés:** El autor del protocolo (Félix) **no** participa en el ajuste de umbrales, hiperparámetros ni selección de modelos una vez sellado este pre-registro. El rol de modelista/tuner es independiente del autor y **se identificará por nombre en la tabla anterior antes de la primera medición (condición de GO, §12.3)**. El custodio del holdout es una persona distinta del autor y del ajustador de modelos. No existe conflicto de interés entre la redacción del protocolo y la ejecución del modelo. Si el autor resultara ser también el ajustador de modelos en algún momento futuro, el protocolo no podría certificarse sin un custodio externo del holdout y un revisor externo independiente. Si el autor resultara ser también el ajustador de modelos en algún momento futuro, el protocolo no podría certificarse sin un custodio externo del holdout y un revisor externo independiente.
 
 **SHA-256 del documento:** pendiente de cálculo tras firma de todas las partes, sobre el archivo `2026-10-25-pre-registro-p03-protocolo-h20.md` ya incorporados todos los cambios de este plan.
 
