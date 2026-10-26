@@ -265,10 +265,16 @@ Antes de la medición del holdout, se calcula el `n_eff` esperado:
 | **PPO** | Espacio de acción | `Box(4,)` = `[direction, volume, sl_pips, tp_pips]` |
 | **PPO** | Versión de `trading_env_v2.py` | `177d1ee99c81261339e529bf73f30eb39f6ea8d44db6408ee8f27c81c05b9dcf` (hash SHA-256 del archivo `ml/trading_env_v2.py`, calculado y verificado) |
 | **PPO** | Versión de `train_ppo_v3.py` | `0bc954c9a091ac45ce634c115e959d815327713dfef9ba7292432d0552dd0e35` (hash SHA-256 del archivo `ml/train_ppo_v3.py`, calculado y verificado) |
-| **LLM** | Modelo | `PENDIENTE_DE_FIJAR` — **REQUERIDO:** nombre y versión exacta del modelo LLM (ej: Qwen-2.5-72B-Instruct), a proporcionar antes de la firma |
-| **LLM** | Proveedor | `PENDIENTE_DE_FIJAR` — **REQUERIDO:** nombre del proveedor de inferencia (ej: OpenRouter / Groq / Gemini) |
-| **LLM** | Propietario del modelo | `PENDIENTE_DE_FIJAR` — **REQUERIDO:** nombre de la entidad que aloja el modelo |
-| **LLM** | Versión del prompt | `PENDIENTE_DE_FIJAR` — **REQUERIDO:** SHA-256 del template de prompt, a calcular antes de la firma |
+| **PPO** | Bundle sha256 | `4cd9abb6bc94e33952afb627cf134d4535ee61677929902cfe8db9e406ea44a7` (hash SHA-256 del archivo `ml/ppo_trading_bot_v3.zip`, calculado y verificado) |
+| **PPO** | VecNormalize sha256 | `d429c3d440d365502c54e9b47f6c3a1db356d662af18e5974c7c3207c065c8a5` (hash SHA-256 del archivo `ml/ppo_trading_bot_v3_vec_norm.pkl`, calculado y verificado) |
+| **PPO** | Contrato de observación | `(20, 25)` (Fase 3) |
+| **PPO** | Espacio de acción | `Box(4,)` = `[direction, volume, sl_pips, tp_pips]` |
+| **PPO** | Versión de `trading_env_v2.py` | `177d1ee99c81261339e529bf73f30eb39f6ea8d44db6408ee8f27c81c05b9dcf` (hash SHA-256 del archivo `ml/trading_env_v2.py`, calculado y verificado) |
+| **PPO** | Versión de `train_ppo_v3.py` | `0bc954c9a091ac45ce634c115e959d815327713dfef9ba7292432d0552dd0e35` (hash SHA-256 del archivo `ml/train_ppo_v3.py`, calculado y verificado) |
+| **LLM** | Modelo | `Qwen-4B-Instruct` (archivo `Qwen--Qwen3-4B-Instruct-2507-q4_k_m.gguf`, ejecutado vía `llama_cpp.server` en Jetson) |
+| **LLM** | Proveedor | `localhost` (ejecutado localmente en la Jetson vía `llama_cpp.server`, no proveedor remoto) |
+| **LLM** | Propietario del modelo | `Qwen (Alibaba Cloud)` (modelo de código abierto de Alibaba Cloud, ejecutado localmente) |
+| **LLM** | Versión del prompt | `PENDIENTE_DE_FIJAR` — **REQUERIDO:** SHA-256 del template de prompt utilizado, a calcular antes de la firma |
 | **LLM** | Temperatura / parámetros de inferencia | `PENDIENTE_DE_FIJAR` — **REQUERIDO:** temperatura, max_tokens, response_format, a fijar antes de la firma |
 
 **Regla:** ninguno de estos campos puede quedar como `PENDIENTE_DE_FIJAR` en el momento de la firma. Todos deben rellenarse con valores reales (hashes SHA-256 calculados sobre los archivos reales, versiones de código verificables, nombre/versión del modelo LLM, proveedor, propietario, SHA-256 del prompt, parámetros de inferencia) antes de que el revisor independiente firme el pre-registro. Cualquier campo que quede como `PENDIENTE_DE_FIJAR` en el momento de la firma invalida el protocolo.
