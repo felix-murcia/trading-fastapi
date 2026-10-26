@@ -26,6 +26,7 @@ from scripts.lineage_p13_sample import (
     _link_order_to_cycle,
     _link_outcome_to_order,
     build_lineage_rows,
+    _extract_cycle_rows,
 )
 
 
@@ -137,6 +138,77 @@ class TestHashLineageRow:
         row_a = {"id": 1, "cycle_id": "EURUSD_1", "symbol": "EURUSD", "decision": "BUY"}
         row_b = {"id": 1, "cycle_id": "EURUSD_1", "symbol": "EURUSD", "decision": "SELL"}
         assert _hash_lineage_row(row_a) != _hash_lineage_row(row_b)
+
+
+class TestExtractCycleRows:
+    def test_extracts_cycles_with_cycle_id_symbol_decision_mt5_time(self):
+        rows = [
+            {
+                "cycle_id": "EURUSD_1789566260000",
+                "symbol": "EURUSD",
+                "decision": "BUY",
+                "mt5_time": "1789566260.0",
+                "audit_id": 1,
+            },
+            {
+                "cycle_id": "EURUSD_1789566477000",
+                "symbol": "GBPUSD",
+                "decision": "SELL",
+                "mt5_time": "1789566477.0",
+                "audit_id": 2,
+            },
+            {
+                "cycle_id": None,
+                "symbol": "EURUSD",
+                "decision": "HOLD",
+                "mt5_time": None,
+                "audit_id": 3,
+            },
+        ]
+
+        cycles = _extract_cycle_rows(rows)
+        assert len(cycles) == 2  # solo los que tienen cycle_id y mt5_time
+
+        c1 = cycles[0]
+        assert c1["cycle_id"] == "EURUSD_1789566260000"
+        assert c1["symbol"] == "EURUSD"
+        assert c1["decision"] == "BUY"
+        assert c1["mt5_time"] == "1789566260.0"
+        assert c1["audit_id"] == 1
+
+        c2 = cycles[1]
+        assert c2["cycle_id"] == "EURUSD_1789566477000"
+        assert c2["symbol"] == "GBPUSD"
+        assert c2["decision"] == "SELL"
+        assert c2["mt5_time"] == "1789566477.0"
+        assert c2["audit_id"] == 2
+
+    def test_skips_rows_without_cycle_id(self):
+        rows = [
+            {"cycle_id": None, "symbol": "EURUSD", "decision": "HOLD", "mt5_time": "1000"},
+            {"cycle_id": "EURUSD_1", "symbol": "EURUSD", "decision": "BUY", "mt5_time": "1000"},
+        ]
+        cycles = _extract_cycle_rows(rows)
+        assert len(cycles) == 1
+        assert cycles[0]["cycle_id"] == "EURUSD_1"
+
+    def test_skips_rows_without_mt5_time(self):
+        rows = [
+            {"cycle_id": "EURUSD_1", "symbol": "EURUSD", "decision": "BUY", "mt5_time": None},
+            {"cycle_id": "EURUSD_2", "symbol": "EURUSD", "decision": "SELL", "mt5_time": "2000"},
+        ]
+        cycles = _extract_cycle_rows(rows)
+        assert len(cycles) == 1
+        assert cycles[0]["cycle_id"] == "EURUSD_2"
+
+    def test_skips_rows_outside_universe(self):
+        rows = [
+            {"cycle_id": "XAUUSD_1", "symbol": "XAUUSD", "decision": "BUY", "mt5_time": "1000"},
+            {"cycle_id": "EURUSD_1", "symbol": "EURUSD", "decision": "BUY", "mt5_time": "1000"},
+        ]
+        cycles = _extract_cycle_rows(rows)
+        assert len(cycles) == 1
+        assert cycles[0]["symbol"] == "EURUSD"
 
 
 class TestBuildLineageRows:

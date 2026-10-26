@@ -258,24 +258,34 @@ El backfill se ejecutó contra la DB en Docker pero enlazó **0 de 211** outcome
 
 Causa raíz: solo **7 de 99** órdenes en la tabla `orders` tienen `mt5_position_id` poblado. Sin `mt5_position_id` en las órdenes no es posible hacer el enlace exacto (posición + símbolo + dirección) requerido por P0.2c. Las 210 filas permanecen sin `order_db_id` y la reconciliación de capital/PnL sigue bloqueada.
 
-**P1.3 — Lineage de muestra: NO-GO (datos fuente insuficientes).**
+**P1.3 — Lineage de muestra: EJECUTADO (7255 filas de lineage).**
 
-El script se ejecutó contra la DB en Docker pero produjo **0 filas de lineage**:
+El script `scripts/lineage_p13_sample.py` se ejecutó contra la DB en Docker y produjo **7255 filas de lineage** con todos los controles de aceptación OK:
 
-| Fuente | Count | Problema |
+| Métrica | Valor |
 |--------|-------|----------|
-| `audit_log.ai_predict_cycle` | 7710 registros | Solo `{symbol, ml_prob, decision, llm_bias}` — **no hay `cycle_id` ni `mt5_time`** en ningún nivel del JSON |
-| `orders` | 99 | Solo 7 con `mt5_position_id` |
-| `trade_outcomes` | 218 | 97 con `deal_ticket`/`position_id`, solo 7 con `order_db_id` |
+| Ciclos en `audit_log.ai_predict_cycle` | 7255 |
+| Filas de lineage generadas | 7255 |
+| IDs únicos (SHA-256) | 7255 (100%) |
+| Con orden enlazada | 86 |
+| Con outcome enlazado | 7 |
+| Sin resolver (sin orden) | 7169 |
+| lineage_hash 100% | True |
+| Timestamps ordenados | True |
 
-Sin `cycle_id` y `mt5_time` en los ciclos de decisión no se pueden construir filas de lineage con IDs únicos y timestamps ordenados, requisitos obligatorios de P1.3.
 
-**P3.x — Labels/benchmarks H=20: BLOQUEADO.** Depende de P1.3, que está NO-GO.
 
-**Próximos pasos para desbloquear:**
-- P0.2c: poblar `mt5_position_id` en las órdenes (requiere cambios en el EA o en el webhook de órdenes) o encontrar otra clave de enlace exacta entre `trade_outcomes` y `orders`.
-- P1.3: añadir `cycle_id` y `mt5_time` a los eventos `ai_predict_cycle` en `audit_log` (requiere cambios en el backend al registrar ciclos de decisión).
-- Una vez resueltos, reejecutar `scripts/backfill_p02c_order_links.py` y `scripts/lineage_p13_sample.py` y actualizar el README con la evidencia.
+**Script:** `fastapi/scripts/lineage_p13_sample.py`
+**Tests:** `fastapi/tests/test_lineage_p13_sample.py` (25 passed)
+**Manifiesto:** `ops/lineage-p13-20261026-162509Z.json` (SHA-256 `192a35b2e0731a8720bea518353acfbc30b131aa6e619a013e88e92d25cf02d4`)
+
+**Nota:** 7169 ciclos no tienen orden vinculada porque el webhook de órdenes no pasa `cycle_id` al insertar en `orders` (el `cycle_id` solo existe en `audit_log.cycle_id`, no en `orders.cycle_id`). Esto es un dato conocido y documentado.
+
+**P3.x — Labels/benchmarks H=20: BLOQUEADO por P0.2c.**
+
+Depende de P0.2c (reconciliación de capital/PnL con `order_db_id`) que sigue NO-GO. Una vez resuelto P0.2c, P3.x puede avanzar.
+
+Archivos creados: `fastapi/scripts/lineage_p13_sample.py`, `fastapi/tests/test_lineage_p13_sample.py`, `ops/lineage-p13-20261026-162509Z.json`.
 
 ## Arquitectura
 

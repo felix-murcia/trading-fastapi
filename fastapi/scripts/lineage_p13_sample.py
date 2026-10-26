@@ -126,6 +126,7 @@ def _hash_lineage_row(row: dict[str, Any]) -> str:
             "mt5_time": row.get("mt5_time"),
             "order_id": row.get("order_id"),
             "outcome_id": row.get("outcome_id"),
+            "audit_id": row.get("audit_id"),
         },
         sort_keys=True,
     )
@@ -182,11 +183,13 @@ def build_lineage_rows(
                 "mt5_time": mt5_time,
                 "order_id": order_id,
                 "outcome_id": outcome_id,
+                "audit_id": cycle.get("audit_id"),
             }),
             "cycle_id": cycle_id,
             "symbol": symbol,
             "decision": decision,
             "mt5_time": mt5_time,
+            "audit_id": cycle.get("audit_id"),
             "order_id": order_id,
             "order_status": order_status,
             "outcome_id": outcome_id,
@@ -239,11 +242,54 @@ def _summarize_lineage(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _extract_cycle_rows(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Filtra y normaliza filas de audit_log.event = 'ai_predict_cycle'.
+
+    Solo conserva filas que tengan:
+      - cycle_id (columna audit_log.cycle_id, poblada por log_to_audit)
+      - mt5_time (dentro de data.data.mt5_time)
+      - símbolo dentro del universo (EURUSD, GBPUSD, USDCHF)
+
+    Descarta filas sin cycle_id, sin mt5_time o fuera del universo.
+    """
+    cycles: list[dict[str, Any]] = []
+    for r in rows:
+        cycle_id = r.get("cycle_id")
+        symbol = r.get("symbol")
+        decision = r.get("decision")
+        mt5_time = r.get("mt5_time")
+
+        if cycle_id is None:
+            continue
+        if mt5_time is None:
+            continue
+        if symbol not in SYMBOLS:
+            continue
+        if decision not in {"BUY", "SELL", "HOLD"}:
+            continue
+
+        cycles.append(
+            {
+                "cycle_id": cycle_id,
+                "symbol": symbol,
+                "decision": decision,
+                "mt5_time": mt5_time,
+                "audit_id": r.get("audit_id"),
+            }
+        )
+    return cycles
+
+
 async def build_lineage_from_db(pool) -> dict[str, Any]:
     """
     Ejecuta el lineage P1.3 desde la base de datos.
 
     1. Lee ciclos de audit_log (evento 'ai_predict_cycle').
+       - cycle_id: columna audit_log.cycle_id (poblada por log_to_audit)
+       - symbol/decision/mt5_time: dentro de data->'data'->>'...'
     2. Lee órdenes de la tabla orders.
     3. Lee outcomes de la tabla trade_outcomes.
     4. Construye filas de lineage con enlaces exactos.
@@ -253,20 +299,18 @@ async def build_lineage_from_db(pool) -> dict[str, Any]:
     cycle_rows = await pool.fetch(
         """
         SELECT
-            (data->>'cycle_id') AS cycle_id,
-            (data->>'symbol') AS symbol,
-            (data->>'decision') AS decision,
-            (data->>'mt5_time') AS mt5_time,
-            data->>'id' AS audit_id
+            cycle_id,
+            audit_log.id AS audit_id,
+            (data->'data'->>'symbol') AS symbol,
+            (data->'data'->>'decision') AS decision,
+            (data->'data'->>'mt5_time') AS mt5_time
         FROM audit_log
         WHERE event = 'ai_predict_cycle'
-          AND data->>'cycle_id' IS NOT NULL
-          AND data->>'symbol' IS NOT NULL
-          AND data->>'decision' IS NOT NULL
-        ORDER BY (data->>'mt5_time')::bigint
+        ORDER BY cycle_id
         """
     )
-    cycles = [dict(r) for r in cycle_rows]
+    raw_cycles = [dict(r) for r in cycle_rows]
+    cycles = _extract_cycle_rows(raw_cycles)
 
     # Órdenes
     order_rows = await pool.fetch(
