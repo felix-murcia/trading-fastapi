@@ -29,8 +29,9 @@ El pre-registro P2.1 ya especificó el snapshot canónico. Este documento (P0.3)
 | **Símbolos** | EURUSD, GBPUSD, USDCHF |
 | **Ventana de datos** | Velas H1 cerradas 2026-06-30 → 2026-10-23 (inclusive) |
 | **Fuente de datos** | Snapshot capturado en P1.1c: `ops/snapshot-h1-20261025-220903Z.json`, SHA-256: `648d250ed5caf284185b62eedde69f7828ec44abe8a722518ed95bb7b72066ff` |
-| **N de velas por símbolo** | 1999 (EURUSD, GBPUSD, USDCHF) |
+| **N de velas por símbolo** | 1999 velas H1 cerradas por símbolo (EURUSD, GBPUSD, USDCHF). Si un símbolo tiene menos velas que otro en la ventana por hueco de datos, se trunca la ventana al común mínimo de velas cerradas y se reporta explícitamente; no se imputan velas faltantes. |
 | **Offset broker→UTC** | +2 h (post-DST 25-10-2026), detectado en runtime y persistido en `broker_clock_state` |
+| **Naturaleza inspección previa holdout** | El holdout histórico 2026-10-23 fue inspeccionado SOLO a nivel de precios (velas H1) por el autor, sin acceso a salidas PPO/LLM de esa fecha. Queda excluido como holdout confirmatorio. |
 | **Oportunidades de decisión** | Una por cierre de vela H1 cerrada en la ventana |
 | **Oportunidades evaluables** | Aquellas cuya barra terminal (última vela con `time <= t0 + 20 h`) existe y está cerrada |
 
@@ -42,21 +43,22 @@ El pre-registro P2.1 ya especificó el snapshot canónico. Este documento (P0.3)
 
 `t0` es el cierre de la vela H1 más reciente con `time <= ahora_utc`. Sólo velas **cerradas** (la vela en formación no es elegible).
 
+### 4.1 Definición de t0
+
+`t0` es el cierre de la vela H1 más reciente con `time <= ahora_utc`. Sólo velas **cerradas** (la vela en formación no es elegible).
+
 ### 4.2 Base y terminal
 
 | Campo | Definición |
 |-------|-----------|
 | **base_bar** | Vela H1 en t0. `close[base]` es el precio de referencia. |
-| **term_bar** | ÚLTIMA vela H1 con `time <= t0 + 20 h`. Regla "última ≤", no "primera ≥". |
+| **term_bar** | ÚLTIMA vela H1 con `time <= t0 + 20 h`. Regla "última ≤", no "primera ≥". Si varias velas cumplen la condición, se selecciona la de `time` máximo. Si no existe ninguna vela con `time <= t0 + 20 h`, la oportunidad es **no evaluable** (abstención). |
 | **Horizonte medido** | 20 horas transcurridas reales (huecos de mercado no se rellenan). |
 | **evaluable** | `true` sólo si existe `term_bar` y `term_bar.time + 3600 <= ahora_utc` (vela cerrada). |
 
-### 4.3 Regla de abstención (cero datos posterior al corte)
+**Convención de `time`:** `time` es el timestamp de **apertura** de la vela H1 (reloj broker). La vela "en t0" es la vela cuya apertura es `<= ahora_utc` y cuyo cierre es la última vela cerrada.
 
-- Si la serie no cubre `t0 + 20 h` → la oportunidad **no es evaluable** (abstención).
-- Si el terminal es la vela en formación (no cerrada) → **no es evaluable**.
-- Ningún campo del snapshot contiene información con `time > t0 + 20 h`.
-- Una abstención **no cuenta como acierto ni como fallo**.
+**Contexto superior H4/D1:** se trunca a `t0` (no a `t0+20h`). La vela H4/D1 en formación que contiene `t0` se excluye de esos contextos. Esta excepción se declara y no viola C4 ("0 datos posterior al corte"), ya que el corte para campos de contexto superior es `t0`, no `t0+20h`.
 
 ---
 
@@ -70,9 +72,7 @@ dirección = sign(close[term_bar] − close[base_bar])
 
 - `+1` si `close[term] > close[base]` (subió)
 - `-1` si `close[term] < close[base]` (bajó)
-- `0` si `|close[term] − close[base]| <= FLAT_EPS` (movimiento plano, no evaluable)
-
-`FLAT_EPS = 0.00005` (tolerancia de "sin cambio" en precio).
+- `0` si `|close[term] / close[base] − 1| <= 5e-5` (movimiento plano, no evaluable). Expresado como retorno relativo, unificado para todos los símbolos. Queda congelado tras sellado del holdout; no podrá modificarse sin nuevo pre-registro.
 
 ### 5.2 Label terminal
 
@@ -83,6 +83,8 @@ dirección = sign(close[term_bar] − close[base_bar])
 | `HOLD` / abstención | no evaluable (terminal ausente, sin cerrar, o plano) |
 
 El label se genera **sin leer salidas de PPO/LLM** (outcome-blind).
+
+**Abstenciones:** las filas con `HOLD`/abstención se excluyen del denominador de `acc` y de `n`. Se reportan aparte como tasa de abstención.
 
 ---
 
@@ -105,17 +107,25 @@ Todos los costes se recuperan de `trade_outcomes` (P1.2a) y del webhook `/trade/
 pnl_real = profit + swap + commission + fee − slippage_cost_eur
 ```
 
-Donde `slippage_cost_eur = slippage_pips × pip_value_eur × volumen`.
+`slippage_cost_eur = slippage_pips × pip_value_eur(t0) × volumen`, donde `pip_value_eur(t0)` se captura en el momento de la decisión (`/predict`) y se persiste.
 
 **Regla de no-duplicación:** el spread ya está incorporado en el precio de fill del bróker; el slippage mide únicamente la desviación entre el precio de fill y el quote de decisión. No se duplica.
 
+**`quote_relevante`**: el quote (ask si BUY, bid si SELL) del `/predict` asociado a la decisión de entrada. Si existen múltiples `/predict` entre decisión y fill, se usa el de la decisión (último previo al fill).
+
+**`riesgo_fijo`**: `1% de equity_cuenta en t0`, declarado y versionado.
+
+`expectancy_neta = media(pnl_real / riesgo_fijo)`, con `riesgo_fijo = 1% de equity_cuenta en t0`.
+
 ### 6.2 Costes por símbolo
 
-| Símbolo | Tamaño lote estándar | Valor pip (EUR) | Spread típico |
-|---------|---------------------|-----------------|---------------|
-| EURUSD | 1.00 | ~10.00 | ~3 pips |
-| GBPUSD | 1.00 | ~10.00 | ~3 pips |
-| USDCHF | 1.00 | ~10.00 (CHF→EUR) | ~3 pips |
+| Símbolo | Tamaño lote estándar | Valor pip (EUR) exacto | Spread típico | Fuente de `pip_value_eur` |
+|---------|---------------------|------------------------|---------------|---------------------------|
+| EURUSD | 1.00 | 10.00 EUR por pip por lote | ~3 pips | `contract_size × tick_value × FX(USD→EUR) en t0`, capturado de MT5 account info |
+| GBPUSD | 1.00 | 10.00 EUR por pip por lote | ~3 pips | `contract_size × tick_value × FX(GBP→EUR) en t0`, capturado de MT5 account info |
+| USDCHF | 1.00 | 10.00 EUR por pip por lote | ~3 pips | `contract_size × tick_value × FX(CHF→EUR) en t0`, capturado de MT5 account info |
+
+`slippage_cost_eur = slippage_pips × pip_value_eur(t0) × volumen`, donde `pip_value_eur(t0)` se captura en el momento de la decisión (`/predict`) y se persiste.
 
 ---
 
@@ -141,10 +151,11 @@ Los siguientes campos se calculan **una vez** sobre el snapshot y se comparten i
 | `adx` | Indicador H1 | ✅ | ✅ |
 | `sma200_dist`, `sma200_slope` | SMA200 H1 | ✅ | ✅ |
 | `support_level`, `resistance_level` | Niveles estructurales | ✅ | ✅ |
-| `news` | Filtro noticias (−120…+240 min, top 3) | ✅ | ✅ |
 | `calendar_events` | Calendario top 3 | ✅ | ✅ |
 | `candle_context` | Últimas 10 velas (formato compacto) | ✅ | ✅ |
 | `higher_tf_context` | Bloque H4/D1 (o "Unavailable") | ✅ | ✅ |
+
+**Disponibilidad idéntica:** `higher_tf_context` está disponible para PPO y Qwen en cada oportunidad. Si es "Unavailable" para uno, lo es para ambos. Se propaga igual a ambos adaptadores.
 
 ### 7.1 Campos exclusivos (no rompen paridad)
 
@@ -182,14 +193,14 @@ Los campos de texto de Qwen se derivan de los mismos datos base que los campos n
 
 | ID | Criterio | Umbral | Medición |
 |----|----------|--------|----------|
-| **C1** | Skill direccional vs mejor benchmark | LB IC 95% del skill > 0 | Intervalo de confianza de Wilson sobre skill = acc − base (diferencia de proporciones), método normal con corrección de continuidad |
-| **C2** | Expectancy neta a riesgo fijo | LB IC 95% de expectancy neta > 0 | `skill_vs_base()` con costes (profit − comisión − fee − swap − slippage_cost) |
-| **C3** | Tamaño efectivo de muestra | `n_eff ≥ 100` por clase/régimen | Cálculo con dependencia temporal (autocorrelación) |
+| **C1** | Skill direccional vs mejor benchmark | LB IC 95% del skill > 0 | Intervalo de confianza de Wilson sobre skill = acc − base (diferencia de proporciones), método normal con corrección de continuidad. `base` (tasa base condicional = mejor predicción constante) se estima en el split de desarrollo/validación y se **congela**; no se re-estima en el holdout. |
+| **C2** | Expectancy neta a riesgo fijo | LB IC 95% de expectancy neta > 0 | `skill_vs_base()` con costes (profit − comisión − fee − swap − slippage_cost). `expectancy_neta = media(pnl_real / riesgo_fijo)` con `riesgo_fijo = 1% de equity_cuenta en t0`. `slippage_cost_eur` usa `pip_value_eur(t0)` exacto de §6.2. |
+| **C3** | Tamaño efectivo de muestra | `n_eff ≥ 100` en el agregado global; `n_eff ≥ 50` por régimen (ver C7). Fórmula: `n_eff = n / (1 + 2·Σ ρ_k, k=1..5)`, donde `ρ_k` es la autocorrelación de Pearson de la serie de señales direccionales del modelo en lag k, estimada sobre el split de desarrollo. Autocorrelaciones negativas se troncatan a 0. | Cálculo con dependencia temporal (autocorrelación), estimado en split de desarrollo y aplicado al holdout. |
 | **C4** | Sin datos posterior al corte | 0 violaciones | Auditoría del snapshot |
 | **C5** | Paridad PPO↔LLM | 0 diferencias en campos compartidos | Test de paridad (tests/test_p21_canonical_snapshot.py) |
-| **C6** | Cero contradicciones ejecutables | 0 BUY/SELL opuestos en muestra | Replay emparejado |
-| **C7** | Robustez por régimen | Cada régimen (trending: ADX₁₄ > 25; ranging: ADX₁₄ < 20; 20 ≤ ADX₁₄ ≤ 25 se excluye) supera: n_eff ≥ 50, LB IC 95% de skill > 0 (intervalo de Wilson sobre diferencia de proporciones acc − base, calculado por método de Newcombe), y |skill_trending − skill_ranging| ≤ 5 pp. Se evalúa para PPO y Qwen por separado. Regla de insuficiencia: si n < 50 en algún régimen, ese régimen se excluye del análisis de robustez y se reporta como "datos insuficientes". | Split por trending/ranging (ADX₁₄ calculado con método Wilder sobre precios de cierre de velas H1), n_eff = n / (1 + 2·Σ ρ_k, k=1..5, ρ_k = autocorrelación de retornos direccionales en lag k sobre serie de señales del modelo), cálculo de IC y skill por estrato, ambos modelos (PPO y Qwen) por separado. Asignación de oportunidad a régimen según ADX₁₄ de la vela en t0. |
-| **C8** | Exposición correlacionada | Drawdown diario ≤ 5% del equity (equity_actual = equity al cierre de cada día UTC, cualquier día > 5% hace fallar C8); drawdown semanal ≤ 10% del equity (lunes 00:00 UTC a domingo 23:59 UTC, peak_equity_semana = máximo equity intradía de la semana); exposición por operación ≤ 3% del equity_cuenta (equity_cuenta = equity de la cuenta al momento de la operación, medido en MT5 account info); exposición agregada por par ≤ 15% del equity_cuenta (suma de posiciones abiertas simultáneas del mismo par, posiciones en dirección opuesta se netsan); exposición correlacionada EURUSD+GBPUSD = (Exp_EURUSD + Exp_GBPUSD) × ρ₃₀ ≤ 5% del equity_cuenta (ρ₃₀ = correlación de retornos log horarios, ventana móvil de 30 sesiones de mercado de Forex, calculada sobre precios de cierre de vela H1) | Análisis por par/sesión, cálculo de exposición agregada, ρ₃₀ medido en ventana de 30 sesiones, equity_cuenta = equity de la cuenta en cada momento (capturado desde MT5 account info al abrir/cerrar cada operación y al cierre de cada día) |
+| **C6** | Cero contradicciones ejecutables | Contradicción = misma oportunidad, mismo timestamp, mismo símbolo, una señal BUY y otra SELL simultánea (ambos modelos emiten señal ejecutable con volumen > 0). HOLD no cuenta como contradicción. | Replay emparejado. Bloqueante de GO (no solo de muestra individual). |
+| **C7** | Robustez por régimen | Cada régimen (trending: ADX₁₄ > 25; ranging: ADX₁₄ < 20; 20 ≤ ADX₁₄ ≤ 25 se excluye del análisis de régimen) supera: n_eff ≥ 50, LB IC 95% de skill > 0 (intervalo de confianza sobre diferencia de proporciones acc − base, calculado por método de Newcombe), y |skill_trending − skill_ranging| ≤ 5 pp. Se evalúa para PPO y Qwen por separado. Regla de insuficiencia: si n < 50 en algún régimen, ese régimen se excluye del análisis de robustez y se reporta como "datos insuficientes". | Split por trending/ranging (ADX₁₄ calculado con método Wilder sobre precios de cierre de velas H1), n_eff = n / (1 + 2·Σ ρ_k, k=1..5, ρ_k = autocorrelación de Pearson de señales direccionales en lag k sobre serie de señales del modelo), cálculo de IC y skill por estrato, ambos modelos (PPO y Qwen) por separado. Asignación de oportunidad a régimen según ADX₁₄ de la vela en t0. El contraste |skill_trending − skill_ranging| ≤ 5 pp es **descriptivo, no inferencial** (muestras no independientes: mismas velas). |
+| **C8** | Exposición correlacionada | Drawdown diario ≤ 5% del equity (equity_actual = equity al cierre de cada día UTC, cualquier día > 5% hace fallar C8); drawdown semanal ≤ 10% del equity (lunes 00:00 UTC a domingo 23:59 UTC, peak_equity_semana = máximo equity intradía de la semana); exposición por operación ≤ 3% del equity_cuenta (equity_cuenta = equity de la cuenta al momento de la operación, medido en MT5 account info al abrir/cerrar cada operación); exposición agregada por par ≤ 15% del equity_cuenta (suma de posiciones abiertas simultáneas del mismo par, posiciones en dirección opuesta se netsan: valor absoluto de la suma neta); exposición correlacionada EURUSD+GBPUSD = (Exp_EURUSD + Exp_GBPUSD) × ρ₃₀ ≤ 5% del equity_cuenta (ρ₃₀ = correlación de retornos log horarios, ventana móvil de 30 sesiones de mercado de Forex, calculada sobre precios de cierre de vela H1 del snapshot **anteriores al holdout** y congelada para el holdout). | Análisis por par/sesión, cálculo de exposición agregada, ρ₃₀ medido en ventana de 30 sesiones, equity_cuenta = equity de la cuenta en cada momento (capturado desde MT5 account info al abrir/cerrar cada operación y al cierre de cada día). equity = balance + floating PnL (posiciones abiertas valoradas a precio de mercado al cierre UTC). |
 
 ### 8.3 Benchmarks (comparadores)
 
@@ -206,9 +217,9 @@ Los benchmarks se miden con **la misma función** `canonical_direction()` que lo
 **Definiciones de límites de riesgo (C8):**
 - **Drawdown diario**: `(peak_equity_día − equity_actual) / peak_equity_día`, medido a cierre de cada día UTC. Regla de falla: cualquier día con drawdown > 5% hace fallar C8. equity_actual = equity al cierre UTC.
 - **Drawdown semanal**: `(peak_equity_semana − equity_actual) / peak_equity_semana`, medido al cierre de cada domingo UTC (lunes 00:00 UTC a domingo 23:59 UTC, peak_equity_semana = máximo equity intradía de la semana). Regla de falla: cualquier semana con drawdown > 10% hace fallar C8.
-- **Exposición por par**: `volumen × precio × 100.000 / equity_cuenta`, medida en cada operación abierta. Límite: ≤ 3% por operación.
+- **Exposición por par**: `volumen × precio × 100.000 / equity_cuenta`, medida en cada operación abierta. equity_cuenta = equity de la cuenta en cada momento (capturado desde MT5 account info al abrir cada operación y al cierre de cada día). Límite: ≤ 3% por operación.
 - **Exposición agregada por par**: suma de exposiciones de todas las posiciones abiertas simultáneas de un mismo par (posiciones en dirección opuesta se netsan: valor absoluto de la suma neta). Límite: ≤ 15% del equity_cuenta.
-- **Exposición correlacionada EURUSD+GBPUSD**: `(Exp_EURUSD + Exp_GBPUSD) × ρ₃₀`, donde `Exp` es la exposición agregada del par y `ρ₃₀` es la correlación de retornos log horarios medidos en ventana móvil de 30 sesiones de mercado de Forex (lunes a viernes, excluyendo fines de semana y festivos). Límite: ≤ 5% del equity_cuenta. ρ₃₀ se recalcula al inicio de cada sesión de trading.
+- **Exposición correlacionada EURUSD+GBPUSD**: `(Exp_EURUSD + Exp_GBPUSD) × ρ₃₀`, donde `Exp` es la exposición agregada del par y `ρ₃₀` es la correlación de retornos log horarios medidos en ventana móvil de 30 sesiones de mercado de Forex (lunes a viernes, excluyendo fines de semana y festivos). ρ₃₀ se calcula con datos **anteriores al holdout** y se congela para el holdout (ventana de 6 sesiones insuficiente para ρ₃₀ móvil). Límite: ≤ 5% del equity_cuenta. ρ₃₀ se recalcula al inicio de cada sesión de trading.
 - **Día/semana sin operaciones**: si no hay operaciones abiertas ni cierres en un día o semana dado, el drawdown se reporta como 0 % y no cuenta como violación; `peak_equity_día` / `peak_equity_semana` se mantienen del último valor válido; exposición agregada por par = 0; exposición correlacionada = 0; el día/semana se cuenta como cumplimiento de C8 (no como violación).
 
 El criterio T-31 de >55% con n≥100 se reporta como diagnóstico, **no** como prueba de edge sin comparación/IC.
@@ -219,16 +230,28 @@ El criterio T-31 de >55% con n≥100 se reporta como diagnóstico, **no** como p
 
 | Split | Ventana | Uso |
 |-------|---------|-----|
-| **Desarrollo** | 2026-06-30 → 2026-09-30 | Tuning y selección de umbrales |
-| **Validación** | 2026-10-01 → 2026-10-15 | Ajuste fino y selección de modelo |
-| **Holdout (OOS)** | 2026-10-16 → 2026-10-23 | **Una sola consulta confirmatoria** |
+| **Desarrollo** | 2026-06-30 → 2026-09-30 | Tuning y selección de umbrales | `pendiente` | Abierto | N/A |
+| **Validación** | 2026-10-01 → 2026-10-15 | Ajuste fino y selección de modelo | `pendiente` | Abierto | N/A |
+| **Holdout (OOS)** | 2026-10-16 → 2026-10-23 | **Una sola consulta confirmatoria** | **PENDIENTE DE CÁLCULO** | **SELLADO** | **PENDIENTE** |
 
 ### 9.1 Reglas del holdout
 
 - El holdout se sella **antes** de leer cualquier predicción de PPO/LLM.
+- **SHA-256 del holdout**: se calcula sobre el subconjunto de filas del snapshot correspondiente a las fechas 2026-10-16 a 2026-10-23 (inclusive), antes de la primera medición, y se registra en la tabla de §9 y en §13.
 - Una sola consulta confirmatoria al holdout; un rechazo **no autoriza** cambiar umbral y volver a consultar.
-- El holdout histórico (2026-10-23) ya fue inspeccionado y **queda excluido** como holdout confirmatorio.
-- SHA-256 del holdout: se calcula y registra antes de la primera medición.
+- El holdout histórico (2026-10-23) ya fue inspeccionado SOLO a nivel de precios (velas H1) por el autor, sin acceso a salidas PPO/LLM de esa fecha. Queda excluido como holdout confirmatorio.
+- **Custodio del holdout:** persona distinta del autor y del ajustador de modelos (ver §13).
+- **Fecha/hora de sellado:** se registra en §13 tras el cálculo del SHA-256.
+- Cualquier cambio de código, bundle, prompt, benchmark, métrica o criterio C1-C8 invalida este pre-registro y requiere un nuevo identificador de protocolo.
+
+### 9.2 Potencia a priori del holdout
+
+Antes de la medición del holdout, se calcula el `n_eff` esperado:
+
+- `n_esperado` = número de oportunidades evaluables en 2026-10-16 → 2026-10-23 (aprox. 6 sesiones × 24 velas H1 × 3 símbolos ≈ 432 oportunidades brutas, reducidas por abstención por plano y terminal no cerrado).
+- `ρ_k` estimado en split de desarrollo (autocorrelación de señales direccionales, lags 1–5).
+- `n_eff_esperado = n_esperado / (1 + 2·Σ ρ_k)`.
+- **Regla de go/no-go por potencia:** si `n_eff_esperado < 100` en el agregado global, el protocolo nace NO-GO por §12.2 y se debe ampliar la ventana del holdout o reducir `n_eff` requerido (requiere nuevo pre-registro).
 
 ---
 
@@ -236,16 +259,19 @@ El criterio T-31 de >55% con n≥100 se reporta como diagnóstico, **no** como p
 
 | Modelo | Campo | Valor |
 |--------|-------|-------|
-| **PPO** | Bundle sha256 | `pendiente de fijar` |
-| **PPO** | VecNormalize sha256 | `pendiente de fijar` |
+| **PPO** | Bundle sha256 | `pendiente de fijar` (ej: `a1b2c3d4...`) |
+| **PPO** | VecNormalize sha256 | `pendiente de fijar` (ej: `e5f6a7b8...`) |
 | **PPO** | Contrato de observación | `(20, 25)` (Fase 3) |
 | **PPO** | Espacio de acción | `Box(4,)` = `[direction, volume, sl_pips, tp_pips]` |
-| **LLM** | Modelo | `pendiente de fijar` |
-| **LLM** | Proveedor | `pendiente de fijar` |
-| **LLM** | Propietario | `pendiente de fijar` |
-| **LLM** | Versión del prompt | `pendiente de fijar` |
+| **PPO** | Versión de `trading_env_v2.py` | `PENDIENTE_DE_FIJAR` |
+| **PPO** | Versión de `train_ppo_v3.py` | `PENDIENTE_DE_FIJAR` |
+| **LLM** | Modelo | `PENDIENTE_DE_FIJAR` (ej: Qwen-2.5-72B-Instruct) |
+| **LLM** | Proveedor | `PENDIENTE_DE_FIJAR` (ej: OpenRouter / Groq / Gemini) |
+| **LLM** | Propietario del modelo | `PENDIENTE_DE_FIJAR` (nombre de la entidad que lo aloja) |
+| **LLM** | Versión del prompt | `PENDIENTE_DE_FIJAR` (SHA-256 del prompt template) |
+| **LLM** | Temperatura / parámetros de inferencia | `PENDIENTE_DE_FIJAR` |
 
-**Regla:** ningún umbral se decide mirando el nuevo holdout. Las versiones exactas se fijan antes de la medición.
+**Regla:** ningún umbral se decide mirando el nuevo holdout. Las versiones exactas se fijan antes de la medición y se registran en §13.
 
 ---
 
@@ -280,17 +306,33 @@ El criterio T-31 de >55% con n≥100 se reporta como diagnóstico, **no** como p
 4. Se ajusta cualquier umbral tras observar resultados del holdout.
 5. Existe contradicción BUY/SELL ejecutable en la muestra aceptada.
 
+### 12.3 Cláusula anti-reset del holdout
+
+Un NO-GO por §12.2–12.5 **no autoriza** re-pre-registrar el mismo holdout con umbrales distintos, bundles distintos, o prompts distintos. Cualquier re-intento requiere:
+
+1. Un holdout **nuevo** (ventana temporal posterior a 2026-10-23).
+2. Un nuevo SHA-256 del holdout.
+3. Un nuevo identificador de protocolo (P0.4 o superior).
+4. Nueva firma del revisor independiente.
+
+El holdout sellado en §9 no puede reabrirse, recalcularse ni sustituirse bajo este identificador de protocolo.
+
 ---
 
 ## 13. Firma y sello
 
-| Rol | Nombre | Firma | Fecha | Hash SHA-256 |
-|-----|--------|-------|-------|-------------|
-| Autor del protocolo | Félix | — | — | — |
-| Revisor independiente | Pendiente | — | — | — |
-| Responsable de riesgo | Pendiente | — | — | — |
+| Rol | Nombre / Identidad | Función | Firma | Fecha | SHA-256 |
+|-----|-------------------|---------|-------|-------|---------|
+| Autor del protocolo | Félix (ingeniería) | Redacción del protocolo, definición de métricas C1–C8 | — | — | — |
+| Ajustador de modelos PPO | `PENDIENTE_DE_ASIGNAR` | Entrenamiento, tuning de hiperparámetros, selección de bundle PPO | — | — | — |
+| Ajustador de modelos LLM | `PENDIENTE_DE_ASIGNAR` | Selección de modelo LLM, versión de prompt, parámetros de inferencia | — | — | — |
+| Revisor independiente | `PENDIENTE_DE_ASIGNAR` | Validación externa, firma de certificación | — | — | — |
+| Responsable de riesgo | `PENDIENTE_DE_ASIGNAR` | Aprobación de límites C8, exposición, drawdown | — | — | — |
+| Custodio del holdout | `PENDIENTE_DE_ASIGNAR` | Cálculo y custodia del SHA-256 del holdout; sellado antes de medición | — | — | — |
 
-**SHA-256 del documento:** pendiente de cálculo tras firma del revisor independiente.
+**Declaración de conflicto de interés:** El autor del protocolo (Félix) **no** participa en el ajuste de umbrales, hiperparámetros ni selección de modelos una vez sellado este pre-registro. El rol de modelista/tuner es independiente del autor y se identifica por nombre en la tabla anterior. El custodio del holdout es una persona distinta del autor y del ajustador de modelos. No existe conflicto de interés entre la redacción del protocolo y la ejecución del modelo.
+
+**SHA-256 del documento:** pendiente de cálculo tras firma de todas las partes, sobre el archivo `2026-10-25-pre-registro-p03-protocolo-h20.md` ya incorporados todos los cambios de este plan.
 
 ---
 
