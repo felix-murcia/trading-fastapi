@@ -1,0 +1,35 @@
+{
+  "version": "1.0",
+  "generado_utc": "2026-10-26T16:00:41.870557+00:00",
+  "fuentes": [
+    "audit_log(ai_predict_cycle)",
+    "orders",
+    "trade_outcomes"
+  ],
+  "reglas": [
+    "IDs \u00fanicos (SHA-256)",
+    "timestamps ordenados ascendente",
+    "s\u00edmbolo/ciclo exactos",
+    "0 joins temporales",
+    "lineage_hash 100%",
+    "no reutiliza CSV P3.1 fallido"
+  ],
+  "conteos": {
+    "ciclos": 0,
+    "ordenes": 99,
+    "outcomes": 218,
+    "filas_lineage": 0
+  },
+  "resumen": {
+    "total_rows": 0,
+    "unique_ids": 0,
+    "with_order": 0,
+    "with_outcome": 0,
+    "unresolved": 0,
+    "by_execution_status": {},
+    "by_link_reason": {},
+    "lineage_hash_100pct": true,
+    "timestamps_sorted": true
+  },
+  "filas": []
+}

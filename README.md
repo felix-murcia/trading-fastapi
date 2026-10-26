@@ -245,6 +245,38 @@ Lineage construido desde fuentes ya aceptadas (audit_log, orders, trade_outcomes
 
 Archivos creados: `fastapi/scripts/lineage_p13_sample.py`, `fastapi/tests/test_lineage_p13_sample.py`.
 
+### Bloqueos conocidos — P0.2c y P1.3 (2026-10-26)
+
+**P0.2c — Backfill de `order_db_id`: NO-GO (datos fuente insuficientes).**
+
+El backfill se ejecutó contra la DB en Docker pero enlazó **0 de 211** outcomes sin FK:
+
+| Razón | Count |
+|-------|-------|
+| `missing_or_invalid_position_id` | 121 |
+| `no_order_for_position_symbol_direction` | 90 |
+
+Causa raíz: solo **7 de 99** órdenes en la tabla `orders` tienen `mt5_position_id` poblado. Sin `mt5_position_id` en las órdenes no es posible hacer el enlace exacto (posición + símbolo + dirección) requerido por P0.2c. Las 210 filas permanecen sin `order_db_id` y la reconciliación de capital/PnL sigue bloqueada.
+
+**P1.3 — Lineage de muestra: NO-GO (datos fuente insuficientes).**
+
+El script se ejecutó contra la DB en Docker pero produjo **0 filas de lineage**:
+
+| Fuente | Count | Problema |
+|--------|-------|----------|
+| `audit_log.ai_predict_cycle` | 7710 registros | Solo `{symbol, ml_prob, decision, llm_bias}` — **no hay `cycle_id` ni `mt5_time`** en ningún nivel del JSON |
+| `orders` | 99 | Solo 7 con `mt5_position_id` |
+| `trade_outcomes` | 218 | 97 con `deal_ticket`/`position_id`, solo 7 con `order_db_id` |
+
+Sin `cycle_id` y `mt5_time` en los ciclos de decisión no se pueden construir filas de lineage con IDs únicos y timestamps ordenados, requisitos obligatorios de P1.3.
+
+**P3.x — Labels/benchmarks H=20: BLOQUEADO.** Depende de P1.3, que está NO-GO.
+
+**Próximos pasos para desbloquear:**
+- P0.2c: poblar `mt5_position_id` en las órdenes (requiere cambios en el EA o en el webhook de órdenes) o encontrar otra clave de enlace exacta entre `trade_outcomes` y `orders`.
+- P1.3: añadir `cycle_id` y `mt5_time` a los eventos `ai_predict_cycle` en `audit_log` (requiere cambios en el backend al registrar ciclos de decisión).
+- Una vez resueltos, reejecutar `scripts/backfill_p02c_order_links.py` y `scripts/lineage_p13_sample.py` y actualizar el README con la evidencia.
+
 ## Arquitectura
 
 ```
