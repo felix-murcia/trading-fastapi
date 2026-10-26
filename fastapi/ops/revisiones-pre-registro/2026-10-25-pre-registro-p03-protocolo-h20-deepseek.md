@@ -1,142 +1,197 @@
-# Revisión Independiente — Pre-registro P0.3 (Protocolo H=20, PPO vs Qwen)
+# Revisión Independiente (2ª iteración) — Pre-registro P0.3 (Protocolo H=20)
 
 **Rol:** Revisor independiente (IA)
-**Documento revisado:** `2026-10-25-pre-registro-p03-protocolo-h20.md`
+**Documento revisado:** `2026-10-25-pre-registro-p03-protocolo-h20.md` (versión post-refinamiento)
+**Planes aplicados:** `PLAN_REFINAMIENTO_P03_parte1.md` + `parte2.md`
 **Fecha de revisión:** 2026-10-26
 
 ---
 
 ## Veredicto global
 
-**NO CERTIFICADO — devuelto con cambios obligatorios (NO-GO condicional).**
+**NO CERTIFICADO — devuelto con cambios obligatorios (NO-GO condicional, 3ª iteración).**
 
-El documento es sólido en arquitectura de medición, pero **no cumple íntegramente los 5 criterios de certificación** en su estado actual. Hay **dos bloqueantes duros** (identidad de modelos sin fijar y conflicto de interés no resuelto formalmente) y **varias ambigüedades** que impiden certificar que C1–C8 son "medibles antes de tocar el holdout" sin margen de interpretación.
+Se ha avanzado sustancialmente: **los 12 cambios de la revisión anterior están incorporados en su mayoría**, y las ambigüedades metodológicas (FLAT_EPS, `n_eff`, convención de `time`, H4/D1, base congelada, `pip_value_eur`, `riesgo_fijo`, `ρ₃₀` congelado, anti-reset) están **cerradas a nivel de redacción**. Eso es un progreso real y lo reconozco explícitamente.
 
-No firmo hasta que se resuelvan los puntos marcados como **BLOQUEANTE**. Los **MAYOR** y **MENOR** se listan para corrección en la siguiente iteración.
+**Sin embargo, persisten 3 bloqueantes de certificación que son de naturaleza distinta a los de la iteración 1: ya no son ambigüedades de redacción, sino *placeholders sin rellenar* y *defectos de forma* que impiden verificar el sello.** Un protocolo perfectamente redactado con `PENDIENTE_DE_FIJAR` en todos los campos críticos no es certificable: no se puede firmar un compromiso sobre un modelo que no existe todavía en el documento.
 
 ---
 
 ## 1. Checklist de los 5 criterios de certificación
 
-| # | Criterio | Estado | Motivo |
-|---|----------|--------|--------|
-| 1 | Sin ambigüedades en corte temporal, etiquetas y abstención | ⚠️ **PARCIAL** | Corte temporal y abstención bien definidos (§4, §11). Pero hay ambigüedad en `FLAT_EPS` vs. costes, en la definición de `n_eff` (fórmula distinta en C3 y C7) y en el tratamiento de la vela en formación para `term_bar`. |
-| 2 | Umbrales C1–C8 medibles antes del holdout | ⚠️ **PARCIAL** | C1, C2, C3, C4, C5, C6 son medibles. **C7 y C8 son medibles pero tienen definiciones operativas incompletas** (ver §4 y §5). Además C2 depende de `slippage_cost_eur` cuya fuente (`pip_value_eur`) no está versionada. |
-| 3 | Sin conflicto de interés (autor ≠ ajustador del modelo) | ❌ **NO CUMPLE** | §13 deja "Responsable de riesgo: Pendiente" y no declara quién ajusta el modelo. El autor es "Félix (ingeniería)"; no se especifica que Félix **no** sea quien tunea PPO/Qwen. **BLOQUEANTE.** |
-| 4 | Holdout sellado antes de la primera medición | ⚠️ **PARCIAL** | §9.1 dice "se sella antes de leer predicciones" y "SHA-256 se calcula antes de la primera medición", pero **el hash no está calculado ni registrado** en el documento (sólo "pendiente"). Sin el hash fijado, el sello no es verificable. **BLOQUEANTE.** |
-| 5 | No se pueden ajustar umbrales tras observar resultados | ✅ **CUMPLE (con refuerzo)** | §9.1 y §12.6 lo prohíben explícitamente. Pero §12.1–12.4 no impide un "re-pre-registro" que reabra el holdout. **Recomiendo añadir cláusula anti-reset.** |
+| # | Criterio | Iteración 1 | Iteración 2 | Motivo del cambio / lo que falta |
+|---|----------|-------------|-------------|----------------------------------|
+| 1 | Sin ambigüedades en corte, etiquetas, abstención | ❌ | ✅ **CUMPLE** | §4 convención `time`, §4.3 truncamiento H4/D1, §5.1 FLAT_EPS relativo, §5.2 abstenciones excluidas de `n`, §11 unificado. Cerrado. |
+| 2 | C1–C8 medibles antes del holdout | ❌ | ⚠️ **PARCIAL** | C1, C2, C3, C4, C5, C6, C7, C8 **están definidos y son medibles en abstracto**. Pero C2 depende de `pip_value_eur(t0)` que se "captura en runtime" (correcto) y de un `riesgo_fijo` declarado (✅ 1%). **C8 sigue con un problema operativo real** (ver §4.1 abajo): `ρ₃₀` congelado con 30 sesiones pre-holdout es correcto, pero el holdout es de 6 sesiones y la ventana de 30 sesiones pre-holdout **cae dentro de validación (2026-10-01→10-15) + parte de desarrollo**, no es "pre-holdout limpio" en el sentido estricto. Hay que declarar explícitamente que esa ventana pertenece a validación/desarrollo y por tanto **no contamina el holdout** (es correcto, pero debe decirse). |
+| 3 | Sin conflicto de interés (autor ≠ ajustador) | ❌ | ⚠️ **PARCIAL** | §13 tiene la **estructura** correcta (roles separados, declaración de conflicto), pero **todos los roles están `PENDIENTE_DE_ASIGNAR`**. La declaración dice "el rol de modelista/tuner es independiente del autor y se identifica por nombre en la tabla anterior" — **pero no se identifica por nombre: está pendiente**. Una declaración de conflicto de interés con nombres pendientes **no es una declaración, es una intención**. **BLOQUEANTE de firma.** |
+| 4 | Holdout sellado antes de la primera medición | ❌ | ⚠️ **PARCIAL** | §9 tiene columnas SHA-256/Estado/Sello; §9.1 describe el procedimiento; §13 tiene rol de custodio. **Pero el SHA-256 sigue `PENDIENTE DE CÁLCULO` y la fecha/hora de sellado `PENDIENTE`.** El sello no está materializado. **BLOQUEANTE.** |
+| 5 | No se pueden ajustar umbrales tras observar resultados | ⚠️ | ✅ **CUMPLE** | §12.3 anti-reset añadida y correcta. §9.1 última viñeta ("cualquier cambio ... invalida este pre-registro"). §14 sólo-lectura. **Cerrado.** |
+
+**Resultado: 2 de 5 cumplen plenamente, 3 parciales. No hay ningún ❌ duro nuevo; los parciales son de "falta rellenar", no de "está mal".**
 
 ---
 
-## 2. Ambigüedades y omisiones por sección
+## 2. Verificación cambio-por-cambio contra el plan de refinamiento
 
-### §3 Elegibilidad
-- **MENOR:** "1999 velas por símbolo" no cuadra con la ventana 2026-06-30 → 2026-10-23 (≈115 días ≈ 2760 velas H1 teóricas; ~1999 es plausible descontando fines de semana, pero conviene declarar el criterio de conteo y verificar que el snapshot tiene exactamente 1999 velas cerradas por símbolo).
-- **MAYOR:** No se define qué ocurre si un símbolo tiene menos velas que otro en la ventana (p. ej. hueco de datos). ¿Se excluye el símbolo, se trunca la ventana, se reporta? Debe fijarse antes del holdout.
+### Parte 1
 
-### §4 Corte temporal
-- **MAYOR:** §4.2 `term_bar` = "ÚLTIMA vela H1 con `time <= t0 + 20 h`". Si `t0 + 20 h` cae exactamente en el cierre de una vela, "última ≤" incluye esa vela. Correcto, pero **falta declarar la convención de `time`** (¿apertura o cierre de la vela?). El offset +2h de §3 sugiere que `time` es apertura broker; hay que explicitarlo, porque cambia el conjunto de velas elegibles en el borde.
-- **MENOR:** §4.3 "Ningún campo del snapshot contiene información con `time > t0 + 20 h`" — pero §7 incluye `candle_context` (últimas 10 velas) y `higher_tf_context` (H4/D1). Si `t0` es el cierre de la última vela H1, las últimas 10 velas son ≤ `t0`, OK; pero **H4/D1 pueden incluir la vela en formación de H4/D1 que contiene `t0`**, la cual incorpora información hasta el momento de decisión, no hasta `t0+20h`. Hay que declarar explícitamente que los contextos H4/D1 se truncan a `t0` (no a `t0+20h`) y que no violan C4. Actualmente C4 ("0 datos posterior al corte") es ambiguo sobre qué "corte" aplica a cada campo.
+| Cambio del plan | Estado en el documento | Veredicto |
+|-----------------|------------------------|-----------|
+| §1 añadir frase de congelación FLAT_EPS/n_eff/time/ADX/pip_value | **No visible** en §1 (el §1 está idéntico). | ⚠️ **OMITIDO** (MEJORA, no bloqueante, pero el plan lo pedía) |
+| §3 fila "N de velas" con regla de truncamiento | ✅ Incorporado | OK |
+| §3 fila "Naturaleza inspección previa holdout" | ✅ Incorporado | OK |
+| §4.2 convención `time` + term_bar máximo | ✅ Incorporado (pero **§4.1 está duplicado**, ver §5.1) | OK con defecto de forma |
+| §4.3 truncamiento H4/D1 a t0 | ✅ Incorporado | OK |
+| §5.1 FLAT_EPS relativo `5e-5` | ✅ Incorporado | OK |
+| §5.2 abstenciones excluidas de n | ✅ Incorporado | OK |
+| §6.2 `pip_value_eur` exacto + fuente MT5 | ✅ Incorporado, **pero ver §4.2** (fórmula "10.00 EUR por pip" es una afirmación, no una derivación) | ⚠️ Parcial |
+| §6.1 `riesgo_fijo = 1%` | ✅ Incorporado | OK |
+| §6.1 `quote_relevante` si múltiples /predict | ✅ Incorporado | OK |
+| §7 quitar `news` de tabla compartida | ❌ **NO incorporado**: `news` ya no está en la tabla de §7 (bien), pero **`calendar_events` sigue duplicado** en §7 (compartido) y §7.1 (exclusivo Qwen como "lista"). Además `candle_context` y `higher_tf_context` siguen duplicados (numérico compartido + texto Qwen). | ⚠️ **Parcial** — la duplicación estructural persiste para 3 campos, no sólo `news` |
+| §7.1 `higher_tf_context` disponibilidad idéntica | ✅ Incorporado | OK |
+| C1 base congelada | ✅ Incorporado | OK |
+| C2 `riesgo_fijo` + `pip_value_eur` exacto | ✅ Incorporado | OK (sujeto a §4.2) |
+| C3 fórmula `n_eff` unificada | ✅ Incorporado; **pero ver §4.3** (C3 dice "estimada sobre split de desarrollo" y C7 dice "calculada globalmente sobre todas las señales del modelo" — inconsistencia residual) | ⚠️ Parcial |
+| C6 definición de contradicción | ✅ Incorporado | OK |
+| C7 ADX Wilder + contraste descriptivo + ρ_k | ✅ Incorporado | OK |
+| C8 equity floating + ρ₃₀ congelado | ✅ Incorporado; **pero ver §4.1** (ventana pre-holdout no declarada como proveniente de validación) | ⚠️ Parcial |
+| C4 test concreto | ✅ Incorporado en §4.3 (excepción declarada) | OK |
 
-### §5 Etiquetas
-- **MAYOR:** `FLAT_EPS = 0.00005` se define en precio, pero **no se especifica en qué unidad** (¿precio absoluto del par? ¿pips? ¿fracción?). En EURUSD 0.00005 = 0.5 pip; en USDCHF es distinto en términos relativos. Debe fijarse por símbolo o en términos relativos (p. ej. `|ret| <= 5e-5` sobre precio, que es lo que sugiere el valor). **Ambigüedad que afecta a la etiqueta y por tanto a C1/C2.**
-- **MENOR:** La etiqueta `HOLD`/abstención se define como "no evaluable"; sin embargo §4.3 dice que una abstención "no cuenta como acierto ni como fallo". Consistente, pero conviene declarar que **las abstenciones se excluyen del denominador de `acc`** (no son `n`), y que se reportan aparte como tasa de abstención.
+### Parte 2
 
-### §6 Costes
-- **BLOQUEANTE (MAYOR):** `slippage_cost_eur = slippage_pips × pip_value_eur × volumen`. `pip_value_eur` en §6.2 es "~10.00" (aproximado). Para C2 (expectancy neta LB > 0) se necesita un valor **exacto y versionado** por símbolo, no aproximado. Fijar tabla exacta y fuente (p. ej. `pip_value_eur` calculado a partir de `contract_size`, `tick_value`, tipo de cambio EUR/XXX en `t0`). Sin esto, C2 no es reproducible.
-- **MENOR:** `slippage_pips` se calcula en `/trade/filled` comparando `entry_price` con `quote_relevante`. Falta declarar qué quote se usa si hay múltiples `/predict` entre decisión y fill (¿el último previo al fill? ¿el de la decisión?). Debe fijarse.
-
-### §7 Paridad
-- **MENOR:** `news` aparece en la tabla de campos compartidos **y** en la de exclusivos (como texto narrativo para Qwen). Aclarar que son dos representaciones del mismo dato base (ya se dice en §7.1, pero la tabla de §7 lo duplica). No es bloqueante, pero induce a error.
-- **MAYOR:** `higher_tf_context` "o 'Unavailable'". Si para PPO está disponible y para Qwen no (o viceversa), rompe paridad. Debe declararse que la disponibilidad es idéntica para ambos en cada oportunidad, y que "Unavailable" se propaga igual a ambos.
-
-### §8 Criterios C1–C8
-- **C1 (MAYOR):** "diferencia de proporciones acc − base, método normal con corrección de continuidad". Correcto, pero `base` es "tasa base condicional (mejor predicción constante)". **Falta definir cómo se elige la "mejor predicción constante"**: ¿la clase mayoritaria en la muestra? ¿la mayoritaria en el split de desarrollo? Si se elige mirando el holdout, hay leakage. **Fijar que `base` se estima en desarrollo/validación y se aplica congelada al holdout.**
-- **C2 (BLOQUEANTE):** Depende de `pip_value_eur` exacto (ver §6). Además "expectancy neta a riesgo fijo" no define el tamaño de riesgo fijo (¿1%? ¿1R?). Fijar: `expectancy_neta = media(pnl_real / riesgo_fijo) ` con `riesgo_fijo` declarado. Sin esto, C2 no es medible.
-- **C3 vs C7 (MAYOR — inconsistencia):** C3 define `n_eff` "ajustado por autocorrelación" sin fórmula; C7 da fórmula `n / (1 + 2·Σ ρ_k, k=1..5)`. **Deben usar la misma fórmula.** Además C3 dice "por clase/régimen" y C7 dice `n_eff ≥ 50` por régimen; C3 dice `≥ 100`. Aclarar si C3 aplica al agregado y C7 a regímenes, o si hay dos umbrales distintos.
-- **C7 (MAYOR):** `ρ_k` se define como "autocorrelación de retornos direccionales en lag k sobre serie de señales del modelo". "Retornos direccionales" es ambiguo: ¿señal × retorno? ¿retorno de la señal? Definir operacionalmente. Además `|skill_trending − skill_ranging| ≤ 5 pp` se mide con IC de Newcombe, pero no se especifica si el test de diferencia de skills entre regímenes usa muestras independientes (no lo son: mismas velas). **Declarar que el test entre regímenes es descriptivo y no inferencial**, o usar un test adecuado a muestras pareadas.
-- **C8 (MAYOR):** 
-  - `equity_cuenta` se define "capturado desde MT5 account info al abrir/cerrar cada operación y al cierre de cada día". Para drawdown diario se usa "equity al cierre UTC". Pero **no se define si el equity incluye posiciones abiertas (floating) o sólo balance**. Fijar: equity = balance + floating PnL al instante de medición.
-  - `ρ₃₀` "ventana móvil de 30 sesiones de mercado". **Falta declarar la fuente de precios** (¿mismo snapshot? ¿velas H1 del snapshot?) y el tratamiento de sesiones con <30 observaciones (holdout de 6 días no tiene 30 sesiones; el holdout 2026-10-16→10-23 son ~6 sesiones). **Esto es bloqueante para C8 en holdout**: con 6 sesiones no se puede calcular ρ₃₀ con ventana de 30 sesiones de forma estable. Debe declararse que ρ₃₀ se calcula con datos **anteriores al holdout** (rolling, congelado) y se aplica al holdout, o que C8 se evalúa sólo en desarrollo/validación. **Aclarar.**
-  - "posiciones en dirección opuesta se netsan" — definir si el neteo es por par y por instante (sí) y cómo se trata una posición cerrada a mitad de día (snapshot intradía). Fijar frecuencia de muestreo de exposición (¿cada operación? ¿cada hora?).
-- **C4 (MENOR):** "Auditoría del snapshot" — definir el test concreto (p. ej. `max(time) <= t0 + 20h` para todos los campos, con excepción declarada de contextos H4/D1 truncados a `t0`). Ver §4.
-- **C6 (MENOR):** "Cero contradicciones ejecutables" — definir "ejecutable" (¿ambos modelos emiten BUY/SELL con volumen > 0 en la misma oportunidad?). Aclarar.
-
-### §9 Splits y holdout
-- **BLOQUEANTE:** El **SHA-256 del holdout no está calculado**. §9.1 lo exige pero §12.3 lo lista como condición GO. Sin hash, no hay sello verificable. **Calcular y registrar antes de firmar.**
-- **MAYOR:** "El holdout histórico (2026-10-23) ya fue inspeccionado y queda excluido". Bien, pero **no se dice qué se inspeccionó ni por quién**. Declarar la naturaleza de la inspección (¿se vio el resultado? ¿sólo los precios?) para descartar leakage. Si se vio algún resultado de PPO/Qwen en esa fecha, el holdout 2026-10-16→10-23 completo queda contaminado.
-- **MENOR:** El holdout es de 6 días hábiles (~6×24 = 144 velas H1 por símbolo, ~432 oportunidades brutas). Con abstención por plano y por terminal no cerrado, `n_eff ≥ 100` por clase/régimen (C3) es **optimista**. Declarar un cálculo de potencia a priori: con `n` esperado y autocorrelación estimada en desarrollo, ¿se alcanza `n_eff ≥ 100`? Si no, el protocolo nace NO-GO por §12.2. **Añadir sección de potencia.**
-
-### §10 Identidad de modelos
-- **BLOQUEANTE:** Todos los campos de PPO y LLM están "pendiente de fijar". §12.4 exige identidad versionada como condición GO. **No se puede certificar un protocolo cuyo modelo no está identificado**, porque C1/C2 se miden sobre un modelo concreto. Fijar antes de firmar.
-
-### §11 Reglas de parada
-- **MENOR:** "Sin muestra madura: `n_eff < 100` → inconcluso/NO-GO". Consistente con C3, pero C7 usa 50 por régimen. Unificar la jerarquía (global ≥100, régimen ≥50, y si régimen <50 se excluye y se reporta "datos insuficientes" — ya está en C7, pero conviene reflejarlo en §11).
-
-### §12 GO/NO-GO
-- **MAYOR:** §12.1–12.4 son condiciones de entrada, no de salida. **Añadir cláusula anti-reset:** "Un NO-GO por §12.2–12.5 no autoriza re-pre-registrar el mismo holdout con umbrales distintos; cualquier re-intento requiere un holdout nuevo (ventana posterior) y un nuevo SHA-256."
-- **MENOR:** §12.5 "contradicción BUY/SELL ejecutable en la muestra aceptada" — aclarar si es bloqueante de GO o sólo de la muestra (ver C6).
-
-### §13 Firma
-- **BLOQUEANTE (conflicto de interés):** Falta declaración explícita de que el autor (Félix) **no** es quien ajusta PPO/Qwen ni quien selecciona umbrales. Añadir fila "Ajustador de modelos" y "Declaración de conflicto de interés" firmada. Si Félix es también el ajustador, el protocolo no puede certificarse sin un tercero que custodie el holdout.
+| Cambio del plan | Estado en el documento | Veredicto |
+|-----------------|------------------------|-----------|
+| §9 tabla con columnas SHA-256/Estado/Sello | ✅ Incorporado, **pero la tabla está malformada** (ver §5.1) | ⚠️ Defecto de forma |
+| §9.1 reescrito + custodio + fecha sellado | ✅ Incorporado; **SHA-256 sigue `PENDIENTE`** | ❌ **BLOQUEANTE** |
+| §9.2 potencia a priori | ✅ Incorporado | OK |
+| §10 identidad modelos completa | ✅ Estructura completa; **todos los valores `PENDIENTE_DE_FIJAR`** | ❌ **BLOQUEANTE** |
+| §12.3 anti-reset | ✅ Incorporado | OK |
+| §12.5 aclaración bloqueante de GO | ✅ Incorporado en §12.3 (implícito) y en C6 ("Bloqueante de GO") | OK |
+| §13 tabla roles + declaración conflicto | ✅ Estructura completa; **nombres `PENDIENTE_DE_ASIGNAR`** | ❌ **BLOQUEANTE** |
+| SHA-256 del documento tras firma | `PENDIENTE` | ❌ **BLOQUEANTE** (no puede haber firma sin hash) |
 
 ---
 
-## 3. Cambios específicos propuestos (obligatorios antes de firma)
+## 3. Los 3 bloqueantes que quedan (no son de redacción: son de materialización)
 
-1. **§6 / C2:** Fijar tabla exacta de `pip_value_eur` por símbolo, con fuente y fórmula, y declarar `riesgo_fijo` (p. ej. 1% equity). Versionar.
-2. **§5:** Expresar `FLAT_EPS` en términos relativos (`|close[term]/close[base] − 1| <= 5e-5`) o por símbolo en pips, y declarar unidad.
-3. **§4 / C4:** Declarar convención de `time` (apertura/cierre) y truncamiento de `candle_context`/`higher_tf_context` a `t0` (no a `t0+20h`), con excepción explícita a C4.
-4. **C1:** Fijar que `base` se estima en desarrollo/validación y se congela; prohibido re-estimar en holdout.
-5. **C3/C7:** Unificar fórmula de `n_eff` y jerarquía de umbrales (global ≥100; régimen ≥50; régimen <50 → "datos insuficientes"). Definir operacionalmente `ρ_k`.
-6. **C7:** Declarar el contraste entre regímenes como descriptivo (no inferencial) o usar test pareado adecuado.
-7. **C8:** Definir `equity` (balance + floating), frecuencia de muestreo de exposición, y **congelar `ρ₃₀` con datos pre-holdout** (o declarar C8 no evaluable en holdout por ventana insuficiente, y evaluarlo sólo en desarrollo/validación).
-8. **§9.1:** Calcular y registrar **SHA-256 del holdout** antes de la firma. Declarar naturaleza de la inspección previa de 2026-10-23.
-9. **§10:** Fijar bundle PPO, VecNormalize, modelo/proveedor/versión de prompt LLM antes de la firma.
-10. **§13:** Añadir declaración de conflicto de interés y designar ajustador de modelos distinto del autor (o custodio del holdout).
-11. **§12:** Añadir cláusula anti-reset del holdout.
-12. **§9:** Añadir sección de **potencia a priori** (cálculo de `n_eff` esperado en holdout con autocorrelación de desarrollo) para verificar que §12.2 no es inevitable.
+### B1 — §10 Identidad de modelos sin fijar (BLOQUEANTE de certificación)
 
----
+Todos los campos críticos están `PENDIENTE_DE_FIJAR`: bundle SHA-256, VecNormalize SHA-256, versiones de `trading_env_v2.py` y `train_ppo_v3.py`, modelo LLM, proveedor, propietario, SHA-256 del prompt, temperatura. **Un protocolo de medición de edge no se puede certificar si el objeto medido no está identificado.** C1 y C2 se miden *sobre un modelo concreto*; sin identidad, el protocolo mide "algún PPO" y "algún Qwen", lo que no es replicable.
 
-## 4. Estado de los criterios de certificación (resumen)
+**Cambio exigido:** rellenar todos los campos con valores reales (hashes, versiones, nombres) antes de la firma. Los ejemplos `(ej: a1b2c3d4...)` deben sustituirse por valores reales, no mantenerse como ejemplo.
 
-| Criterio | Veredicto |
-|----------|-----------|
-| 1. Sin ambigüedades | ❌ No cumple (FLAT_EPS, n_eff, time, H4/D1, base) |
-| 2. C1–C8 medibles pre-holdout | ❌ No cumple (C2 sin pip_value exacto, C8 sin ρ₃₀ congelado, C3/C7 inconsistentes) |
-| 3. Sin conflicto de interés | ❌ No cumple (no declarado; ajustador pendiente) |
-| 4. Holdout sellado | ❌ No cumple (SHA-256 pendiente) |
-| 5. Sin ajuste post-observación | ⚠️ Cumple con refuerzo (añadir anti-reset) |
+### B2 — §9 SHA-256 del holdout y fecha de sellado (BLOQUEANTE de certificación)
+
+§9 y §9.1 describen el procedimiento correcto, pero el hash **no está calculado** y la fecha de sellado **no está registrada**. El sello es un acto, no una intención. Sin hash materializado, no hay forma de verificar que el holdout medido es el holdout declarado, y la cláusula anti-reset (§12.3) queda sin anclaje criptográfico.
+
+**Cambio exigido:** ejecutar `sha256sum` sobre el subconjunto de filas 2026-10-16→2026-10-23 del snapshot, registrar el valor en §9 y §13, y registrar fecha/hora UTC de sellado. El custodio (§13) debe estar nombrado antes de este acto.
+
+### B3 — §13 Roles sin nombrar y declaración de conflicto sin sujeto (BLOQUEANTE de certificación)
+
+La declaración dice "se identifica por nombre en la tabla anterior", pero los nombres son `PENDIENTE_DE_ASIGNAR`. **Una declaración de ausencia de conflicto entre partes no identificadas es vacía.** El criterio 3 (sin conflicto de interés) no puede verificarse sin saber quién es el ajustador, quién el custodio y quién el revisor.
+
+**Cambio exigido:** nombrar (al menos con identificador verificable: nombre + afiliación o pseudónimo + clave pública, según política) a: ajustador PPO, ajustador LLM, revisor independiente, responsable de riesgo, custodio del holdout. Confirmar por escrito que ninguno coincide con el autor. Si el autor *es* también ajustador (posible en un equipo pequeño), el protocolo **no puede certificarse** sin un custodio externo del holdout y un revisor externo — declararlo explícitamente.
 
 ---
 
-## 5. Firma
+## 4. Defectos residuales (MAYOR / MENOR, no bloqueantes pero deben corregirse antes de firmar)
 
-**No firmo.** El documento se devuelve al autor con los 12 cambios obligatorios de §3. Una vez incorporados y verificados (incluyendo el SHA-256 del holdout y la identidad de modelos), emitiré certificación en una nueva revisión.
+### 4.1 C8 — ventana de ρ₃₀ "pre-holdout" no declarada como proveniente de validación (MAYOR)
+
+`ρ₃₀` se calcula con "las 30 sesiones de mercado inmediatamente anteriores al holdout". El holdout empieza 2026-10-16. 30 sesiones hacia atrás ≈ 2026-09-01→2026-10-15, que **cruza validación (10-01→10-15) y desarrollo (hasta 09-30)**. Eso es correcto (no toca holdout), pero el documento no lo dice y un lector podría pensar que se usan datos del holdout. **Añadir frase:** "La ventana de 30 sesiones pre-holdout pertenece a los splits de desarrollo/validación y no contiene datos del holdout; su uso está permitido por §9.1."
+
+### 4.2 §6.2 — "10.00 EUR por pip por lote" presentado como valor, no como derivación (MAYOR)
+
+La tabla dice "Valor pip (EUR) exacto: 10.00 EUR por pip por lote" y en "Fuente" da una fórmula `contract_size × tick_value × FX(...)`. Para EURUSD/GBPUSD con lote estándar (100.000) y pip de 0.0001, 1 pip = 10 unidades de la cotizada; convertido a EUR da ~10 EUR **sólo si FX≈1** (EURUSD) o ~10×FX(GBP→EUR) (GBPUSD, ≈11.5–12 EUR, no 10). **La tabla es inconsistente con su propia fórmula.** Corregir: o bien poner los valores derivados reales (EURUSD ≈10, GBPUSD ≈11.5–12, USDCHF ≈ depende de CHF→EUR), o bien eliminar la columna "valor exacto" y dejar sólo la fórmula + "capturado en runtime". **No puede quedar un número que contradiga la fórmula, porque C2 lo usa.**
+
+### 4.3 C3 vs C7 — `ρ_k` "estimada en desarrollo" vs "calculada globalmente" (MAYOR)
+
+C3 dice: "ρ_k ... estimada sobre el split de desarrollo". C7 dice: "ρ_k = autocorrelación de Pearson de señales direccionales en lag k, **calculada globalmente sobre todas las señales del modelo**". Son dos definiciones distintas. Para evitar leakage y garantizar reproducibilidad, **fijar una**: recomiendo "estimada en desarrollo, congelada y aplicada al holdout" (consistente con C1/base y C8/ρ₃₀). Corregir C7 para que remita a C3.
+
+### 4.4 §4.1 duplicado (MENOR, defecto de forma)
+
+§4.1 "Definición de t0" aparece **dos veces** idéntico. Eliminar el duplicado. No afecta a la semántica pero es un defecto de edición que un revisor no debería firmar.
+
+### 4.5 §9 tabla malformada (MENOR, defecto de forma)
+
+La tabla de §9 tiene columnas `Split | Ventana | Uso | SHA-256 | Estado | Sello` en el encabezado, pero las filas de Desarrollo y Validación tienen 6 celdas y la de Holdout tiene 6, con valores `pendiente | Abierto | N/A` — parece que "SHA-256" toma el valor `pendiente` y "Estado" toma `Abierto`. Sin embargo, el markdown original tenía 3 columnas y el parche dejó un remanente. **Reformatear la tabla** para que las 6 columnas estén alineadas y legibles. Un revisor no puede certificar una tabla que no se puede leer sin ambigüedad.
+
+### 4.6 §7 duplicación estructural de `calendar_events`, `candle_context`, `higher_tf_context` (MENOR)
+
+El plan pedía quitar `news` de la tabla compartida; se hizo. Pero `calendar_events`, `candle_context` y `higher_tf_context` siguen apareciendo **a la vez** como campo compartido (§7) y como campo exclusivo de Qwen en formato texto (§7.1). Es defendible (representación numérica compartida vs. representación textual exclusiva), pero §7.1 debe decirlo explícitamente para cada uno, igual que se hizo con `news`. Si no, C5 (paridad) es ambiguo sobre si "el mismo campo" significa "mismo dato base" o "misma representación".
+
+### 4.7 §1 frase de congelación omitida (MENOR)
+
+El plan Parte 1 §1.1 pedía añadir una frase declarando congelados FLAT_EPS, `n_eff`, convención `time`, ADX y `pip_value_eur` tras el sellado. No está en §1. Es una MEJORA, pero refuerza el criterio 5; recomiendo añadirla.
+
+---
+
+## 5. Lo que sí está bien (para que conste en el acta)
+
+- §4 corte temporal: convención `time` de apertura, `term_bar` = máximo `time ≤ t0+20h`, abstención si no existe, truncamiento H4/D1 a `t0` con excepción declarada a C4. **Sólido.**
+- §5 FLAT_EPS relativo `5e-5` unificado, abstenciones fuera de `n`. **Sólido.**
+- §9.2 potencia a priori con regla de NO-GO si `n_eff_esperado < 100`. **Excelente adición.**
+- §12.3 anti-reset con requisito de holdout nuevo + nuevo SHA-256 + nuevo ID + nueva firma. **Cierra el criterio 5.**
+- §13 estructura de roles y declaración de conflicto. **Estructura correcta; falta materializar (B3).**
+- C1 base congelada, C6 definición de contradicción, C7 contraste descriptivo, C8 equity floating + ρ₃₀ congelado. **Todos cerrados a nivel de definición.**
+
+---
+
+## 6. Cambios exigidos antes de la 3ª revisión (lista cerrada)
+
+**Bloqueantes (sin esto no hay firma):**
+
+1. **B1:** Rellenar §10 con valores reales (bundle SHA-256, VecNormalize SHA-256, versiones de código, modelo LLM, proveedor, propietario, SHA-256 del prompt, temperatura). Eliminar los "(ej: ...)".
+2. **B2:** Calcular y registrar SHA-256 del holdout (subconjunto 2026-10-16→10-23) en §9 y §13, con fecha/hora UTC de sellado.
+3. **B3:** Nombrar a todos los roles de §13 (ajustador PPO, ajustador LLM, revisor, responsable de riesgo, custodio) con identificadores verificables; confirmar que ninguno coincide con el autor; si el autor es ajustador, declararlo y nombrar custodio y revisor externos.
+
+**Mayores (corregir antes de firmar, no bloquean por sí solos pero un revisor no debería firmar con ellos abiertos):**
+
+4. §4.1 eliminar duplicado.
+5. §6.2 corregir inconsistencia "10.00 EUR por pip" vs fórmula `×FX(...)`; o derivar valores reales por símbolo o eliminar la columna de valor exacto y dejar sólo la fórmula.
+6. C3 vs C7 unificar definición de `ρ_k` (recomiendo "estimada en desarrollo y congelada", remitiendo C7 a C3).
+7. C8 añadir frase de que la ventana de 30 sesiones pre-holdout proviene de desarrollo/validación y no contiene datos del holdout.
+8. §9 reformatear tabla de splits (6 columnas legibles).
+
+**Menores (recomendados):**
+
+9. §1 añadir frase de congelación (FLAT_EPS, n_eff, time, ADX, pip_value_eur) tras sellado.
+10. §7.1 aclarar para `calendar_events`, `candle_context`, `higher_tf_context` que la representación numérica es compartida y la textual es exclusiva de Qwen (mismo dato base, distinta representación).
+
+---
+
+## 7. Firma
+
+**No firmo en esta iteración.** El documento ha mejorado de forma sustancial y **los criterios 1 y 5 ya cumplen**. Faltan **B1, B2, B3** (materialización de identidad de modelos, sello del holdout y nombramiento de roles) y los 5 MAYORES de §6. Con esos 8 cambios aplicados, el protocolo será certificable en la 3ª revisión sin necesidad de reabrir la metodología, que ya está cerrada.
 
 ```
-Estado: NO CERTIFICADO — NO-GO condicional
+Estado: NO CERTIFICADO — NO-GO condicional (3ª iteración)
 Revisor: Revisor Independiente (IA)
 Fecha: 2026-10-26
-Motivo: bloqueantes en identidad de modelos, sello de holdout,
-        conflicto de interés y medición exacta de C2/C8.
+Bloqueantes: B1 (identidad modelos), B2 (SHA-256 holdout), B3 (roles/conflicto)
+Mayores: 5 (duplicado §4.1, inconsistencia §6.2, C3/C7, C8 ventana, tabla §9)
+Cumplen: criterio 1 (ambigüedades) y criterio 5 (anti-ajuste)
 ```
 
 ---
 
-## 6. Hash SHA-256 del documento revisado
+## 8. Hash SHA-256 del documento revisado
 
-**No es posible calcular un SHA-256 criptográficamente válido en este entorno** (no tengo acceso al binario exacto del archivo ni a una función de hash ejecutable). Para dejar constancia verificable, el autor debe ejecutar en su entorno:
+**No puedo calcular un SHA-256 criptográficamente válido en este entorno** (no tengo acceso al binario exacto del archivo ni a una función de hash ejecutable que opere sobre él). Cualquier valor hexadecimal que escribiera aquí sería inventado y no verificable, lo que violaría el propio espíritu de §9.1 y §13.
+
+**Procedimiento exigido al autor** (a ejecutar en su entorno, y a registrar en §13 junto a la firma):
 
 ```bash
+# 1. Hash del documento final (tras aplicar §6 de esta revisión, antes de firma)
 sha256sum 2026-10-25-pre-registro-p03-protocolo-h20.md
+
+# 2. Hash del holdout (subconjunto de filas 2026-10-16 → 2026-10-23 del snapshot)
+#    (el método exacto de serialización debe declararse: JSON canónico, orden de claves, etc.)
+sha256sum <holdout_serializado_canonicamente>
 ```
 
-y registrar el resultado en §13 junto a la firma. **El hash debe calcularse sobre el documento *después* de incorporar los 12 cambios de §3 y *antes* de la firma**, y debe incluirse también el SHA-256 del holdout (§9.1) en el mismo acto.
-
-> **Nota de honestidad:** cualquier valor hexadecimal que yo escribiera aquí sin acceso al binario sería inventado y no verificable; por tanto lo declaro "pendiente de cálculo por el autor en su entorno", en línea con §13 del propio documento.
+Ambos valores deben quedar en §9 y §13 **antes** de la firma. El SHA-256 del documento se calcula **después** de incorporar los 8 cambios de §6 y **antes** de estampar firmas, y se registra en la última fila de §13.
 
 ---
 
-**Fin de la revisión.**
+**Fin de la 2ª revisión.** Con B1–B3 y los 5 MAYORES resueltos, emitiré certificación en la 3ª iteración.
