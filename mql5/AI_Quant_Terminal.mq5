@@ -6,10 +6,10 @@ Terminal de Ejecución y Telemetría para Cerebro Autónomo (FastAPI + PPO v3).
 - Rol del Servidor: Decisión direccional, dimensionamiento de lotes, SL, TP y gestión de riesgo.
 */
 #property copyright "AI Quant Terminal"
-#property version   "15.0"
+#property version   "15.1"
 #property strict
 
-#define EA_VERSION "15.0"
+#define EA_VERSION "15.1"
 
 #include <Trade\Trade.mqh>
 
@@ -26,7 +26,7 @@ Terminal de Ejecución y Telemetría para Cerebro Autónomo (FastAPI + PPO v3).
 #define MIN_CLOSE_VOLUME        0.01
 
 input group "=== Configuración del Cerebro ==="
-input string FastAPI_URL    = "http://127.0.0.1:8090"; // URL del servidor FastAPI
+input string FastAPI_URL    = "";                          // URL del servidor FastAPI — configurar desde .env (MT5_HTTP_URL). No hardcodear IP.
 input string InternalToken  = "YOUR_INTERNAL_TOKEN";  // Token de autenticación
 input bool   EnableAI       = true;                    // Habilitar operativa por IA
 input ulong  MagicNumber    = 90001;                   // Identificador de órdenes
