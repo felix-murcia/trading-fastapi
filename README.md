@@ -301,7 +301,20 @@ P3.1 generado con éxito (script `scripts/generate_p31_dataset.py`):
   - Splits: train=60, val=9, holdout=11
   - Símbolos: EURUSD, USDCHF (GBPUSD no tiene outcomes vinculados)
 
-P3.2 (potencia n_eff ≥ 100 por clase): **bloqueado** — n=80 es insuficiente para potencia estadística. Se requieren más datos (seguir ejecutando EA v15.0 para acumular outcomes con FK completa).
+P0.2c Fase 3 (script `scripts/p02c_phase3_close_deals.py`):
+  - 3 outcomes con position_id pero sin orden: NO vinculables (la orden de cierre
+    correspondiente no está en tabla `orders` — solo están las órdenes de apertura)
+  - 121 huérfanos (sin deal_ticket ni position_id): NO vinculables (sin clave externa)
+
+P3.2 (potencia n_eff ≥ 100 por clase, criterio C3): **NO-GO**
+  - Script: `scripts/calc_p32_power.py`
+  - Resultado: n=80, n_eff=60.1 (ρ₃=0.1294, ρ₅=0.0358, Σρ=0.1651)
+  - Requisito: n_eff ≥ 100 global, n_eff ≥ 50 por régimen
+  - Por régimen: Ranging n_eff=60.1 (✅ ≥50), Trending n=0 (insuficiente)
+  - Datos adicionales estimados necesarios: ~53 filas (≈133 total para n_eff≥100)
+  - Bloquea: P4.1 (evaluar PPO aislado), P6.1 (medir LLM por separado)
+
+P4.1/P6.1: **bloqueados** por P3.2 (requieren n_eff ≥ 100 primero)
 
 **P1.3 — Lineage de muestra: EJECUTADO (7255 filas de lineage).**
 
