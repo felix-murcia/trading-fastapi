@@ -212,6 +212,10 @@ def candle_time_series(values):
         if isinstance(value, (int, float)):
             if value != value:          # NaN
                 return pd.NaT
+            # Rango válido: 2000-01-01 a 2100-01-01 (epoch segundos).
+            # Valores fuera (ej. año 2491) rompen pandas datetime64[ns].
+            if value < 946684800.0 or value > 4102444800.0:
+                return pd.NaT
             return pd.Timestamp(float(value), unit="s", tz="UTC")
         try:
             return pd.Timestamp(value, tz="UTC")

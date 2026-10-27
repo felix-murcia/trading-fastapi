@@ -2372,6 +2372,14 @@ async def trade_filled_webhook(req: TradeFilledRequest, _: None = Depends(verify
     fee = float(req.fee) if req.fee not in (None, "") else None
     cycle_id = req.cycle_id
 
+    # Validación de sanidad: rechazar PnL imposible (datos corruptos del bróker/EA).
+    # Un cierre que supere ±50.000 € es una anomalía crítica — no se persiste.
+    if abs(pnl) > 50000.0:
+        raise HTTPException(
+            status_code=422,
+            detail=f"pnl={pnl:.2f} EUR excede umbral máximo ±50.000 EUR — posible dato corrupto",
+        )
+
     # Calcular slippage: |entry_price - quote_relevante| / pip_size.
     # Para BUY, el quote relevante es el ask (precio al que compras);
     # para SELL, es el bid (precio al que vendes).
