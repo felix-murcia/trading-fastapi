@@ -11,7 +11,7 @@ Suite de tests: **91 passed** (0 failed) | Suites clave: backfill_p02c, lineage_
 |-------|--------|-----------|---------|
 | P0.3 | ✅ Certificado externamente (DeepSeek it.5) | GO | — |
 | P1.3 | ✅ Ejecutado (7255 filas lineage, hash 100%) | GO | — |
-| P0.2c | ⚠️ PARCIAL (94/218 outcomes con FK) | PARCIAL | P3.2 |
+| P0.2c | ⚠️ PARCIAL (97/221 outcomes con FK) | PARCIAL (residual irreducible) | P3.2 |
 | P2.1 | ✅ Snapshot canónico H=20 (8 parity tests) | GO | P3.1 |
 | P3.1 | ✅ Labels/benchmarks H=20 (n=80, válido) | GO | P3.2 |
 | P3.2 | ❌ n_eff=60.1 < 100 | NO-GO | P4.1, P6.1 |
@@ -33,27 +33,29 @@ Suite de tests: **91 passed** (0 failed) | Suites clave: backfill_p02c, lineage_
 | Fase 1 | Fix preventivo: `mark_order_filled` acepta `mt5_order_id` sin `order_db_id` | `services/order_manager.py` | ✅ Commit f266b5a — previene futuro bloqueo |
 | Fase 2 | Poblar `orders.mt5_order_id` + `mt5_position_id` desde deals MT5 MCP | `scripts/p02c_populate_from_mt5_deals.py` | ✅ 88/89 órdenes pobladas (1 USDCHF sin deal de entrada) |
 | Fase 2 | Backfill `trade_outcomes.order_db_id` → `orders.id` | `scripts/backfill_p02c_order_links.py` | ✅ 87/211 outcomes vinculados |
-| Fase 3 | Vincular 3 outcomes con position_id + 121 huérfanos via deals de cierre | `scripts/p02c_phase3_close_deals.py` | ❌ 0 nuevos (3 sin orden de cierre en tabla; 121 sin deal_ticket) |
+| Fase 3 | Vincular outcomes con position_id via deals de cierre MT5 | `scripts/p02c_phase3_close_deals.py` | ❌ 0 (ordenes de cierre no en tabla `orders`) |
+| Fase 3b | Poblar position_id desde deals + backfill exacto order_db_id | `scripts/p02c_phase3b_close_deals_final.py` | ❌ 0 nuevos (4 outcomes con position_id sin orden en `orders`; 121 huérfanos sin deal_ticket) |
 
 **Estado final de la DB:**
 
 | Métrica | Valor | Antes | Después |
 |---------|-------|-------|---------|
-| trade_outcomes total | 218 | 218 | 218 |
-| con `order_db_id` | **94** | 7 | +87 |
+| trade_outcomes total | **221** | 218 | 221 |
+| con `order_db_id` | **97** | 7 | +90 |
 | sin `order_db_id` | **124** | 211 | −87 |
 | sin `position_id` en outcome | 121 | 121 | — |
-| con position_id pero sin orden | 3 | 3 | — |
-| orders total | 100 | 99 | +1 |
-| orders filled | 96 | 96 | — |
+| con position_id pero sin orden | 4 | 3 | +1 |
+| orders total | 102 | 99 | +3 |
+| orders filled | 99 | 96 | +3 |
 | orders con `mt5_order_id` | 95 | 8 | +87 |
 | orders con `mt5_position_id` | 95 | 7 | +88 |
 
-**Causa raíz del bloqueo residual:** 121 outcomes carecen de `position_id` en el outcome (huérfanos sin datos externos — imposible vincular sin `deal_ticket` o `position_id`). 3 outcomes tienen `position_id` pero la orden de cierre correspondiente no está en la tabla `orders` (solo están las órdenes de apertura).
+**Causa raíz del bloqueo residual:** 121 outcomes carecen de `position_id` en el outcome (huérfanos sin datos externos — imposible vincular sin `deal_ticket` o `position_id`). 4 outcomes tienen `position_id` pero la orden de cierre correspondiente no está en la tabla `orders` (solo están las órdenes de apertura; el MCP de MT5 sí tiene los deals de cierre con el `order` ticket, pero ese ticket no coincide con ninguna orden registrada en nuestra tabla `orders`).
 
 **Archivos creados:**
 - `fastapi/scripts/p02c_populate_from_mt5_deals.py` — Fase 2 P0.2c
 - `fastapi/scripts/p02c_phase3_close_deals.py` — Fase 3 P0.2c
+- `fastapi/scripts/p02c_phase3b_close_deals_final.py` — Fase 3b P0.2c (deals de MT5 + backfill exacto)
 
 ---
 
@@ -211,3 +213,5 @@ f266b5a fix: P0.2c — mark_order_filled acepta mt5_order_id sin order_db_id
 **P4.1 y P6.1 quedan bloqueados** hasta que P3.2 supere el gate de potencia estadística.
 
 El fix preventivo en `mark_order_filled` asegura que futuras operaciones v15.0+ se vinculen automáticamente, evitando que el bloqueo de P0.2c se repita.
+
+**P0.2c residual es irreducible** bajo el protocolo actual (match exacto posición+símbolo+dirección, sin joins temporales): 121 huérfanos sin `deal_ticket` ni `position_id`, y 4 con `position_id` pero sin orden de cierre en `orders`.

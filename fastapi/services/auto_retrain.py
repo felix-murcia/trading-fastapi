@@ -360,12 +360,13 @@ async def _persist_trade_outcome(
         """
         INSERT INTO trade_outcomes
             (symbol, direction, entry_time, exit_time, pnl, pnl_pct, exit_reason, sl_hit, tp_hit,
-             deal_ticket, position_id, order_db_id,
-             entry_price, commission, fee, slippage_pips, quote_bid, quote_ask, quote_time)
+             deal_ticket, position_id,
+             entry_price, commission, fee, slippage_pips, quote_bid, quote_ask, quote_time,
+             order_db_id)
         VALUES (
             $1,$2,to_timestamp($3::double precision),to_timestamp($4::double precision),
             $5,$6,$7,$8,$9,$10,$11,
-            $12,$13,$14,$15,$16,$17,$18,
+            $12,$13,$14,$15,$16,$17,to_timestamp(CASE WHEN $18::bigint IS NOT NULL THEN $18::double precision ELSE NULL END),
             CASE WHEN $19::bigint IS NOT NULL AND EXISTS (
                 SELECT 1 FROM orders
                 WHERE orders.id=$19 AND orders.symbol=$1
