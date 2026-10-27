@@ -161,7 +161,7 @@ Certificado por DeepSeek it.5, 2026-10-26. Todas las condiciones de GO aplicadas
 
 | # | Tarea | Estado | Esfuerzo | Requisito para |
 |---|-------|--------|----------|----------------|
-| 1 | Acumular más datos reales ejecutando EA v15.0 en vivo | Pendiente | Medio (operativo) | P3.2 (n_eff ≥ 100) |
+| 1 | Acumular más datos reales ejecutando EA v15.2 en vivo | Pendiente | Medio (operativo) | P3.2 (n_eff ≥ 100) |
 | 2 | Ejecutar `calc_p32_power.py` tras acumular datos | Pendiente | Bajo | P3.2 |
 | 3 | Una vez P3.2 GO: ejecutar P4.1 (PPO aislado) y P6.1 (LLM separado) | Pendiente | Alto | P3.2 |
 
@@ -182,20 +182,25 @@ Certificado por DeepSeek it.5, 2026-10-26. Todas las condiciones de GO aplicadas
 |---------|--------|-------------|
 | `fastapi/scripts/p02c_populate_from_mt5_deals.py` | Creado | Fase 2 P0.2c: poblar orders desde deals MT5 |
 | `fastapi/scripts/p02c_phase3_close_deals.py` | Creado | Fase 3 P0.2c: intentar vincular huérfanos via deals de cierre |
+| `fastapi/scripts/p02c_phase3b_close_deals_final.py` | Creado | Fase 3b P0.2c: deals de MT5 + backfill exacto order_db_id |
 | `fastapi/scripts/generate_p31_dataset.py` | Creado | P3.1: generar dataset y manifiesto H=20 |
 | `fastapi/scripts/calc_p32_power.py` | Creado | P3.2: calcular n_eff y verificar potencia |
 | `fastapi/ops/p31_dataset_h20.csv` | Creado | Dataset P3.1 (80 filas) |
 | `fastapi/ops/P3.1_manifest.json` | Modificado | Manifiesto P3.1 válido (SHA-256 `be0da0f8...`) |
 | `README.md` | Modificado | Estado completo de P0.2c, P3.1, P3.2 |
 | `fastapi/services/order_manager.py` | Modificado | Fix: `mark_order_filled` acepta `mt5_order_id` sin `order_db_id` |
+| `fastapi/services/auto_retrain.py` | Modificado | Fix: `quote_time` con `to_timestamp()` y columnas INSERT alineadas |
 | `fastapi/scripts/lineage_p13_sample.py` | Existente | P1.3: script de lineage (ya ejecutado) |
 | `fastapi/tests/test_lineage_p13_sample.py` | Existente | 25 tests pasando |
+| `mql5/AI_Quant_Terminal.mq5` | Modificado | EA v15.2: fail-closed en /trade/filled sin deal_ticket válido; FastAPI_URL sin IP hardcodeada |
 
 ---
 
 ## 5. COMMITS DE ESTA SESIÓN
 
 ```
+c54b90c fix: EA v15.2 — fail-closed en /trade/filled sin deal_ticket válido
+89abca3 fix: P0.2c Fase 3b — ejecutar vinculación vía deals de MT5 y backfill exacto
 f30c8c9 docs: README — estado P3.2 con n_eff=60.1 y scripts P0.2c Fase 3 + P3.2 power calc
 091ec86 feat: P3.2 n_eff calculator script + P0.2c phase3 close-deals script
 cab5db9 feat: P0.2c Opción 3 + P3.1 GO — 94 outcomes vinculados, manifiesto H=20 válido
@@ -208,10 +213,12 @@ f266b5a fix: P0.2c — mark_order_filled acepta mt5_order_id sin order_db_id
 
 **P3.1 está GO.** El manifiesto H=20 es válido con 80 ciclos, 54 labels direccionales, splits no vacíos y 0 blocking issues en el auditor.
 
-**P3.2 está NO-GO** con n_eff=60.1 < 100 requerido. Se necesitan ~53 outcomes más vinculados (ejecutando EA v15.0 en vivo) para alcanzar n_eff ≥ 100.
+**P3.2 está NO-GO** con n_eff=60.1 < 100 requerido. Se necesitan ~53 outcomes más vinculados (ejecutando EA v15.2 en vivo) para alcanzar n_eff ≥ 100.
 
 **P4.1 y P6.1 quedan bloqueados** hasta que P3.2 supere el gate de potencia estadística.
 
 El fix preventivo en `mark_order_filled` asegura que futuras operaciones v15.0+ se vinculen automáticamente, evitando que el bloqueo de P0.2c se repita.
+
+El EA v15.2 incluye `deal_ticket` y `position_id` en cada webhook `/api/v1/ai/trade/filled` y aplica fail-closed: si `dealTicket <= 0`, no se envía el webhook (no silent failures).
 
 **P0.2c residual es irreducible** bajo el protocolo actual (match exacto posición+símbolo+dirección, sin joins temporales): 121 huérfanos sin `deal_ticket` ni `position_id`, y 4 con `position_id` pero sin orden de cierre en `orders`.
