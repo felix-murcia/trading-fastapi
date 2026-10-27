@@ -677,10 +677,16 @@ Todas las requests incluyen `trace_id` para correlación:
 
 ## Observabilidad
 
-Dashboard disponible en `frontend/index.html`:
-- Balance/Equity en tiempo real (vía MT5 MCP)
-- Rentabilidad semanal y rachas (win/loss streak)
-- Gráficos de evolución de capital
+Dashboard disponible en `frontend/index.html` (E-07, 2026-10-27):
+- **Filtros de tiempo:** rango de fechas (desde/hasta), granularidad (Minuto/Hora/Día/Mes), símbolo, botón Reset filtros; persistencia en `localStorage`
+- **KPIs:** Win Rate, Profit Factor, Max Drawdown, Trades Totales
+- **Equity Curve con Drawdown:** línea de equity + área de drawdown anotada
+- **PnL Diario:** barras por día con colores según signo
+- **Win/Loss:** doughnut con proporción de ganadas/perdidas
+- **PnL por Par:** barra horizontal con colores según signo
+- **PnL por Hora:** barra de 24h (UTC) para detectar sesiones rentables
+- Endpoint `/v1/smc/analytics` acepta query params `from`, `to`, `granularity`, `symbol` con validación (error 400 sin silent fallbacks)
+- Todos los gráficos son responsive y usan paleta coherente con tema oscuro
 
 ## Testing
 
@@ -4485,3 +4491,29 @@ Archivos funcionales tocados: `fastapi/db/schema.sql`, la migración
 `fastapi/ops/reconcile_replay_sources.py`,
 `fastapi/ops/audit_broker_order_links.py`, `mql5/AI_Quant_Terminal.mq5` y sus
 pruebas de contrato/lifecycle/auditoría; además de este README y el roadmap.
+
+---
+
+### Evidencia — E-07 Mejora del Dashboard de Rendimiento (2026-10-27)
+
+**Objetivo:** transformar la pestaña "Grafana" del dashboard estático en un panel dinámico con filtros de tiempo y gráficos más sutiles y funcionales.
+
+**Fases ejecutadas:**
+- **E-07.1 (Diseño):** `docs/e-07-diseno-dashboard.md` — query params `from`/`to`/`granularity`/`symbol`, 10 paneles máximo, dos relojes (UTC real vs bróker), sin silent failures.
+- **E-07.2 (Backend):** `fastapi/routers/smc.py` — `/v1/smc/analytics` acepta query params con validación (400 si `from` > `to`, granularidad inválida, fecha mal formateada). `fastapi/tests/test_analytics_filters.py` — 8 tests TDD (RED→GREEN).
+- **E-07.3 (Frontend filtros):** `frontend/index.html`, `frontend/js/api.js`, `frontend/js/app.js`, `frontend/css/style.css` — controles de fecha, granularidad, símbolo, reset filtros, persistencia `localStorage`, manejo de errores visible, eliminación de try/catch silencioso.
+- **E-07.4 (Frontend gráficos):** `frontend/js/ui.js`, `frontend/css/style.css`, `frontend/index.html` — equity curve con drawdown, daily PnL simplificado, win/loss doughnut + 4 KPIs (win rate, profit factor, max drawdown, trades totales), PnL por símbolo, PnL por hora del día. 9 paneles totales (≤10).
+
+**Resultado de tests:** `pytest fastapi/tests/ -q` → **1444 passed, 5 failed (preexistentes: versión EA 14.3 vs 15.2, no relacionadas con E-07), 2 xfailed**.
+
+**Archivos funcionales tocados en E-07:**
+- `fastapi/routers/smc.py` — filtros de analytics
+- `fastapi/tests/test_analytics_filters.py` — tests TDD (nuevo)
+- `frontend/index.html` — controles de filtro, KPIs, canvas de gráficos
+- `frontend/js/api.js` — fetchStatsData con params, sin silent failures
+- `frontend/js/app.js` — estado de filtros, loadStats, localStorage, listeners
+- `frontend/js/ui.js` — rediseño de 5 gráficos + KPIs
+- `frontend/css/style.css` — estilos de filtros, KPIs, grid de gráficos, responsive
+
+**Cero IPs expuestas** en cualquier archivo modificado.
+
