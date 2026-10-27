@@ -254,7 +254,7 @@ Transformar la pestaña "Grafana (Rendimiento)" del dashboard estático (`fronte
 |------|----------|----------|--------|
 | E-07.1 | Diseño y definición de requisitos (criterios de aceptación, mockup UI) | 1 sesión | ✅ Completado (docs/e-07-diseno-dashboard.md) |
 | E-07.2 | Backend: endpoint `/v1/smc/analytics` con filtros `from`/`to`/`granularity` (TDD) | 1-2 sesiones | ✅ Completado (commit c213e07, 8 tests verdes) |
-| E-07.3 | Frontend: controles de granularidad (M/H/D/MN) + date picker rango de fechas | 1-2 sesiones | Pendiente |
+| E-07.3 | Frontend: controles de granularidad (M/H/D/MN) + date picker rango de fechas | 1-2 sesiones | ✅ Completado (commit 091458d) |
 | E-07.4 | Frontend: rediseño de gráficos Chart.js (más sutiles, atractivos, responsive) | 1-2 sesiones | Pendiente |
 | E-07.5 | Integración, pruebas, commit y README actualizado | 1 sesión | Pendiente |
 
