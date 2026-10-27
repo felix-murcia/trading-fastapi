@@ -6,10 +6,10 @@ Terminal de Ejecución y Telemetría para Cerebro Autónomo (FastAPI + PPO v3).
 - Rol del Servidor: Decisión direccional, dimensionamiento de lotes, SL, TP y gestión de riesgo.
 */
 #property copyright "AI Quant Terminal"
-#property version   "15.1"
+#property version   "15.2"
 #property strict
 
-#define EA_VERSION "15.1"
+#define EA_VERSION "15.2"
 
 #include <Trade\Trade.mqh>
 
@@ -1034,9 +1034,22 @@ void CloseAllPositions()
      double dealCommission = openingDeal > 0 ? HistoryDealGetDouble(openingDeal, DEAL_COMMISSION) : 0.0;
      double dealFee        = HistoryDealGetDouble(dealTicket, DEAL_FEE);
      string cycle_id       = IntegerToString((long)closeTime);
+
+     // P0.2c: fail-closed — si deal_ticket es invalido, no se envía el webhook
+     // y el cierre queda en outbox para reintento. No hay silent failures.
+     if(dealTicket <= 0)
+       {
+        PrintFormat("[AI Terminal] dealTicket invalido (<=0) para positionId=%I64d; cierre NO reportado (fail-closed)", positionId);
+        return;
+       }
+     if(positionId <= 0)
+       {
+        PrintFormat("[AI Terminal] ADVERTENCIA: positionId<=0 para dealTicket=%I64u; se envía con position_id=0 (no vinculable exacto)", dealTicket);
+       }
+
+     string body = "";
      string openingDealFoundStr = openingDeal > 0 ? "true" : "false";
      string magicMatchStr = (openingDeal > 0 && openingMagic == (long)MagicNumber) ? "true" : "false";
-     string body = "";
     StringConcatenate(body, "{",
        "\"symbol\":\"", Symbol(), "\",",
        "\"entry_time\":\"", IntegerToString(entryTime), "\",",
