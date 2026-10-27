@@ -2372,7 +2372,7 @@ async def trade_filled_webhook(req: TradeFilledRequest, _: None = Depends(verify
     fee = float(req.fee) if req.fee not in (None, "") else None
     cycle_id = req.cycle_id
 
-    # Validación de sanidad: el PnL de un cierre no puede exceder 1/3 del
+    # Validación de sanidad: el PnL de un cierre no puede exceder 1/5 del
     # equity disponible de la cuenta. Un cierre que pierda más es datos
     # corruptos del bróker/EA y debe rechazarse.
     try:
@@ -2382,10 +2382,10 @@ async def trade_filled_webhook(req: TradeFilledRequest, _: None = Depends(verify
             account = await market_port.get_account()
             account_info = account if isinstance(account, dict) else {}
             equity = float(account_info.get("equity", 0.0)) or float(account_info.get("balance", 0.0))
-            if equity > 0 and abs(pnl) > equity / 3.0:
+            if equity > 0 and abs(pnl) > equity / 5.0:
                 raise HTTPException(
                     status_code=422,
-                    detail=f"pnl={pnl:.2f} EUR excede equity/3 ({equity/3.0:.2f} EUR) — posible dato corrupto",
+                    detail=f"pnl={pnl:.2f} EUR excede equity/5 ({equity/5.0:.2f} EUR) — posible dato corrupto",
                 )
     except HTTPException:
         raise
