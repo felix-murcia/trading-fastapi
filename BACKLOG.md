@@ -222,3 +222,80 @@ El fix preventivo en `mark_order_filled` asegura que futuras operaciones v15.0+ 
 El EA v15.2 incluye `deal_ticket` y `position_id` en cada webhook `/api/v1/ai/trade/filled` y aplica fail-closed: si `dealTicket <= 0`, no se envía el webhook (no silent failures).
 
 **P0.2c residual es irreducible** bajo el protocolo actual (match exacto posición+símbolo+dirección, sin joins temporales): 121 huérfanos sin `deal_ticket` ni `position_id`, y 4 con `position_id` pero sin orden de cierre en `orders`.
+
+---
+
+## 7. ÉPICA E-07 — Mejora del Dashboard de Rendimiento (Pestaña "Grafana")
+
+**Estado:** Pendiente de iniciar | **Prioridad:** Media | **Bloquea:** Nada (independiente de P3.x)
+
+### Objetivo
+Transformar la pestaña "Grafana (Rendimiento)" del dashboard estático (`frontend/`) en un panel dinámico con gráficos más sutiles, atractivos y funcionales, incluyendo filtros de granularidad temporal (M/H/D/MN) y rangos de fechas personalizables.
+
+### Contexto actual
+- Frontend estático en `frontend/` (HTML/JS/CSS + Chart.js vía CDN)
+- 4 gráficos básicos: balance evolution, daily PnL, win/loss doughnut, PnL por símbolo
+- Sin filtros de tiempo ni rango de fechas
+- Gráficos "enormes" y poco flexibles
+- Datos desde `/v1/smc/analytics` (deals del MCP de MT5, reloj del bróker → UTC real vía `services/timebase`)
+
+### Reglas a respetar (AGENTS.md + CLAUDE.md + PROTOCOLO_ANTI_BUCLE.md)
+- TDD: tests antes de implementación
+- No silent failures, no fallbacks, no heuristic defaults; errores se muestran al usuario
+- `pytest fastapi/tests/ -q` → green antes y después
+- README actualizado con evidencia tras cada cambio funcional
+- Simplicity first: código mínimo, nada especulativo
+- Surgical changes: tocar solo lo necesario
+- Dos relojes: backend/Postgres en UTC real; MT5/EA en reloj del bróker (+2h medido). Usar `services/timebase` para conversión
+
+### Fases de ejecución
+
+| Fase | Objetivo | Esfuerzo | Estado |
+|------|----------|----------|--------|
+| E-07.1 | Diseño y definición de requisitos (criterios de aceptación, mockup UI) | 1 sesión | Pendiente |
+| E-07.2 | Backend: endpoint `/v1/smc/analytics` con filtros `from`/`to`/`granularity` (TDD) | 1-2 sesiones | Pendiente |
+| E-07.3 | Frontend: controles de granularidad (M/H/D/MN) + date picker rango de fechas | 1-2 sesiones | Pendiente |
+| E-07.4 | Frontend: rediseño de gráficos Chart.js (más sutiles, atractivos, responsive) | 1-2 sesiones | Pendiente |
+| E-07.5 | Integración, pruebas, commit y README actualizado | 1 sesión | Pendiente |
+
+### Criterios de aceptación globales
+- [ ] Los gráficos responden a cambios de granularidad (M/H/D/MN) y rango de fechas
+- [ ] No hay silent failures: errores de API se muestran al usuario
+- [ ] `pytest fastapi/tests/ -q` → green
+- [ ] `README.md` actualizado con evidencia (fecha, resultado test, archivos cambiados)
+- [ ] Diseño más sutil y atractivo que el actual (gráficos no "enormes")
+- [ ] Respeto de los dos dominios de reloj (UTC real vs broker clock)
+
+### Tareas detalladas (para seguir en sesión)
+
+**E-07.1 — Diseño**
+- [ ] Revisar endpoint `/v1/smc/analytics` actual: campos, manejo del tiempo, limitaciones
+- [ ] Definir query params necesarios (`from`, `to`, `granularity`)
+- [ ] Mockup de UI rediseñada (filtros + gráficos más sutiles)
+- [ ] Criterios de aceptación escritos
+
+**E-07.2 — Backend (TDD)**
+- [ ] Tests para endpoint con filtros de fecha (RED)
+- [ ] Modificar `/v1/smc/analytics` con `from`/`to`/`granularity`
+- [ ] Aplicar conversión broker→UTC vía `services/timebase` (sin silent fallback)
+- [ ] Suite completa verde
+
+**E-07.3 — Frontend: filtros**
+- [ ] Selector de granularidad (Minuto/Hora/Día/Mes)
+- [ ] Date picker para rango de fechas
+- [ ] Persistencia en `localStorage`
+- [ ] Re-render de gráficos al cambiar filtros
+- [ ] Manejo de errores de API visible al usuario
+
+**E-07.4 — Frontend: gráficos**
+- [ ] Rediseñar 4 gráficos Chart.js (tamaño contenido, mejor uso del espacio)
+- [ ] Paleta de colores atractiva (tema oscuro actual), tooltips informativos
+- [ ] Gráficos responsive, mejor tipografía
+
+**E-07.5 — Integración y cierre**
+- [ ] Conectar frontend con backend filtrado end-to-end
+- [ ] Pruebas manuales de filtros y gráficos
+- [ ] `pytest fastapi/tests/ -q` → green
+- [ ] Commit y `README.md` actualizado con evidencia
+
+---
