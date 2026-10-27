@@ -2372,12 +2372,27 @@ async def trade_filled_webhook(req: TradeFilledRequest, _: None = Depends(verify
     fee = float(req.fee) if req.fee not in (None, "") else None
     cycle_id = req.cycle_id
 
-    # Validación de sanidad: rechazar PnL imposible (datos corruptos del bróker/EA).
-    # Un cierre que supere ±50.000 € es una anomalía crítica — no se persiste.
-    if abs(pnl) > 50000.0:
-        raise HTTPException(
-            status_code=422,
-            detail=f"pnl={pnl:.2f} EUR excede umbral máximo ±50.000 EUR — posible dato corrupto",
+    # Validación de sanidad: el PnL de un cierre no puede exceder 1/3 del
+    # equity disponible de la cuenta. Un cierre que pierda más es datos
+    # corruptos del bróker/EA y debe rechazarse.
+    try:
+        registry = build_registry_from_settings()
+        market_port = registry.get(req.symbol).market
+        if market_port is not None:
+            account = await market_port.get_account()
+            account_info = account if isinstance(account, dict) else {}
+            equity = float(account_info.get("equity", 0.0)) or float(account_info.get("balance", 0.0))
+            if equity > 0 and abs(pnl) > equity / 3.0:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"pnl={pnl:.2f} EUR excede equity/3 ({equity/3.0:.2f} EUR) — posible dato corrupto",
+                )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # Si no se puede consultar el equity, no bloquear: registrar y continuar.
+        logger.warning(
+            "[TRADE-FILLED] no se pudo consultar equity para validar pnl: %s", exc
         )
 
     # Calcular slippage: |entry_price - quote_relevante| / pip_size.
