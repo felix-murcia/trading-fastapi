@@ -36,6 +36,27 @@
             </div>
         </header>
 
+        <div class="filters">
+            <label>Desde <input type="date" id="filterFrom"></label>
+            <label>Hasta <input type="date" id="filterTo"></label>
+            <label>Granularidad
+                <select id="filterGranularity">
+                    <option value="D">Día</option>
+                    <option value="H">Hora</option>
+                    <option value="M">Minuto</option>
+                    <option value="MN">Mes</option>
+                </select>
+            </label>
+            <label>Símbolo
+                <select id="filterSymbol">
+                    <option value="">Todos</option>
+                    <option value="EURUSD">EURUSD</option>
+                    <option value="USDCHF">USDCHF</option>
+                </select>
+            </label>
+            <button id="resetFilters" type="button">Reset filtros</button>
+        </div>
+
         <div class="tabs">
             <button class="tab-btn active" data-target="audit-tab">Audit Log</button>
             <button class="tab-btn" data-target="news-tab">Noticias Semanales (Blackouts)</button>
@@ -43,6 +64,7 @@
         </div>
 
         <div id="stats-tab" class="tab-content">
+            <div id="statsError" style="display:none; color: var(--error); padding: 1rem; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 8px; margin-bottom: 1rem;"></div>
             <div class="kpi-grid">
                 <div class="kpi-card"><h3>Saldo Mín. Global</h3><p id="kpiBalance">0.00 €</p></div>
                 <div class="kpi-card"><h3>Rentabilidad 7D</h3><p id="kpiReturn">0.00%</p></div>

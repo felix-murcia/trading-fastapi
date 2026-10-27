@@ -23,18 +23,24 @@ export async function fetchNewsData(apiUrl, token) {
     return response.json();
 }
 
-export async function fetchStatsData(apiUrl, token) {
+export async function fetchStatsData(apiUrl, token, { from, to, granularity, symbol } = {}) {
     const headers = {
         "X-Internal-Token": token,
         "Accept": "application/json"
     };
-    try {
-        const response = await fetch(`${apiUrl}/v1/smc/analytics`, { headers });
-        if (!response.ok) return null;
-        return response.json();
-    } catch (e) {
-        return null;
-    }
+
+    const params = new URLSearchParams();
+    if (from) params.append("from", from);
+    if (to) params.append("to", to);
+    if (granularity) params.append("granularity", granularity);
+    if (symbol) params.append("symbol", symbol);
+
+    const qs = params.toString();
+    const url = qs ? `${apiUrl}/v1/smc/analytics?${qs}` : `${apiUrl}/v1/smc/analytics`;
+
+    const response = await fetch(url, { headers });
+    if (!response.ok) throw new Error(`Analytics HTTP: ${response.status}`);
+    return response.json();
 }
 
 export async function fetchAllData(apiUrl, token) {
