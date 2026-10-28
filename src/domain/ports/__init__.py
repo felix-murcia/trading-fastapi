@@ -24,3 +24,7 @@ class BrokerGateway(Protocol):
 
 class Clock(Protocol):
     def now(self) -> object: ...
+
+
+class ConfigProvider(Protocol):
+    def get(self, key: str, default=None): ...
