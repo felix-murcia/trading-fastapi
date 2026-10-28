@@ -42,8 +42,10 @@ async def ea_decision_webhook(req: EADecisionRequest, _: None = Depends(verify_t
         from src.application.use_cases.record_ea_decision import (
             RecordEADecision, RecordEADecisionInput,
         )
+        from src.infrastructure.adapters.real_audit_logger import RealAuditLogger
+        from src.infrastructure.adapters.real_clock import RealClock
         uc = RecordEADecision(
-            audit=None, clock=None,
+            audit=RealAuditLogger(), clock=RealClock(),
         )
         _result = uc.execute(RecordEADecisionInput(
             cycle_id=req.cycle_id,
