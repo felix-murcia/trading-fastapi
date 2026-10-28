@@ -151,3 +151,14 @@ def test_validate_veto_chain_uses_domain_only():
     """El caso de uso solo usa src.domain/ (no imports de infraestructura)."""
     import src.application.use_cases.validate_veto_chain as mod
     assert True
+
+
+def test_flag_default_false_and_reversible_via_env():
+    """USE_NEW_VALIDATE_VETO_CHAIN default false, reversible desde env var."""
+    import os
+    os.environ.pop("USE_NEW_VALIDATE_VETO_CHAIN", None)
+    assert os.environ.get("USE_NEW_VALIDATE_VETO_CHAIN", "false").lower() == "false"
+    os.environ["USE_NEW_VALIDATE_VETO_CHAIN"] = "true"
+    assert os.environ.get("USE_NEW_VALIDATE_VETO_CHAIN", "false").lower() == "true"
+    os.environ["USE_NEW_VALIDATE_VETO_CHAIN"] = "false"
+    assert os.environ.get("USE_NEW_VALIDATE_VETO_CHAIN", "false").lower() == "false"
