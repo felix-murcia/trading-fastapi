@@ -82,7 +82,7 @@ from services.strategist import (
     fetch_last_exit,
 )
 from .deps import verify_token
-from services.error_taxonomy import DB_ERRORS, LOOP_ERRORS, PARSE_ERRORS
+from services.error_taxonomy import DB_ERRORS, HTTP_ERRORS, LOOP_ERRORS, PARSE_ERRORS
 
 
 class _DummyEnv(gym.Env):
@@ -2389,8 +2389,8 @@ async def trade_filled_webhook(req: TradeFilledRequest, _: None = Depends(verify
                 )
     except HTTPException:
         raise
-    except Exception as exc:
-        # Si no se puede consultar el equity, no bloquear: registrar y continuar.
+    except (HTTP_ERRORS + PARSE_ERRORS) as exc:
+        # Frontera externa (red MCP / payload ilegible): no bloquear, registrar.
         logger.warning(
             "[TRADE-FILLED] no se pudo consultar equity para validar pnl: %s", exc
         )

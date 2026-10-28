@@ -11,6 +11,7 @@ contrato del EA MQL5 (sin runtime MQL5), en ficheros dedicados.
 """
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -416,3 +417,38 @@ class TestOpenDealReportIgnored:
         assert kwargs["entry_time"] == "1725450000"
         assert kwargs["exit_time"] == "1725450001"
         assert kwargs["pnl"] == 0.95
+
+
+class TestEquityProbeExceptionBoundary:
+    """Sesión 0: el probe de equity es una frontera EXTERNA declarada.
+
+    Una caída del MCP/red (httpx) se loguea y el cierre se registra igual
+    (degradación declarada). Un error de PROGRAMACIÓN no se silencia: sale
+    como 500 y el trade no se persiste con datos sin validar.
+    """
+
+    def _post(self, exc):
+        with patch("main.init_pool", AsyncMock()), \
+             patch("main.close_pool", AsyncMock()), \
+             patch("routers.ai.load_inference_artifacts"), \
+             patch("routers.ai.record_trade_filled", AsyncMock()) as record_mock, \
+             patch("routers.ai.mark_order_filled", AsyncMock()), \
+             patch("services.mt5_client.get_account", AsyncMock(side_effect=exc)):
+            with TestClient(app, raise_server_exceptions=False) as client:
+                response = client.post(
+                    "/api/v1/ai/trade/filled",
+                    json=BASE_PAYLOAD,
+                    headers={"x-internal-token": "test-token", "x-cycle-id": "eq-probe"},
+                )
+        return response, record_mock
+
+    def test_network_failure_on_equity_probe_is_logged_not_fatal(self, caplog):
+        response, record_mock = self._post(httpx.ConnectError("mt5 caído"))
+        assert response.status_code == 200, response.text
+        assert record_mock.call_count == 1
+        assert "no se pudo consultar equity" in caplog.text
+
+    def test_programming_error_on_equity_probe_is_not_silenced(self):
+        response, record_mock = self._post(RuntimeError("bug de programación"))
+        assert response.status_code == 500, response.text
+        record_mock.assert_not_called()
