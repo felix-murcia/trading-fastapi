@@ -57,3 +57,5 @@ backups/
 # Runtime artifacts (Sesión 0/1)
 backups/
 fastapi/ops/daily_ledger.jsonl
+
+.coverage

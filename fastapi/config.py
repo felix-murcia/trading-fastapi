@@ -59,6 +59,12 @@ class Settings(BaseSettings):
     # ("se protege o no se opera"). El valor espeja el input del EA: si
     # cambias el input en MT5, cámbialo aquí también.
     min_lock_eur: float = 4.0
+    # Sesión 2: flag del caso de uso ComputePositionSize migrado a src/domain.
+    # Default false = camino legacy byte-idéntico. Cambiar a true para usar
+    # el caso de uso aislado en src/application/ (paridad byte a byte).
+    # Lee de env var USE_NEW_COMPUTE_POSITION_SIZE; reversible en caliente
+    # sin tocar código.
+    USE_NEW_COMPUTE_POSITION_SIZE: bool = False
     news_filter_enabled: bool = True
     news_blackout_minutes: int = 15
 

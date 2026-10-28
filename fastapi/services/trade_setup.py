@@ -15,10 +15,12 @@ Invariantes (las verifica `evaluate_trade`, no se repiten aquí):
     I3  beneficio NETO en el TP ≥ max(MIN_WIN_EUR, min_lock_eur)
 """
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Optional
 
 import pandas as pd
 
+from config import settings
 from core.rules import size_ppo_position
 from ml.trading_env_v2 import (
     effective_sl_pips,
@@ -112,12 +114,43 @@ def prepare_trade(
         # dirá si paga el bloqueo neto de costes y, si no, no hay entrada.
         candidates = (2.0 * sl_pips,)
 
-    contract = evaluate_trade(
-        symbol=symbol, price=price, equity=equity, sl_pips=sl_pips,
-        head_lots=head_lots, tp_candidates_pips=candidates,
-        risk_pct=risk_pct, min_lot=min_lot, max_lot=max_lot,
-        min_lock_eur=min_lock_eur, eurusd_price=eurusd_price,
-    )
+    if settings.USE_NEW_COMPUTE_POSITION_SIZE:
+        # Camino nuevo: caso de uso aislado en src/application/ (paridad byte a byte con legacy)
+        from src.application.use_cases.compute_position_size import (
+            ComputePositionSize, ComputePositionSizeInput,
+        )
+        from src.domain.value_objects.thresholds import TradingThresholds
+        uc = ComputePositionSize(
+            repo=None, clock=None,
+            thresholds=TradingThresholds(
+                min_win_eur=Decimal("3.0"),          # MIN_WIN_EUR del legacy (core/rules.py)
+                safe_lock_eur=Decimal(str(min_lock_eur)),
+                cost_buffer_pips=2,                   # EXEC_COST_PIPS = SPREAD_BUFFER_PIPS = 2
+            ),
+        )
+        _result = uc.execute(ComputePositionSizeInput(
+            symbol=symbol, price=price, equity=equity, sl_pips=sl_pips,
+            head_lots=head_lots, tp_candidates_pips=candidates,
+            risk_pct=risk_pct, min_lot=min_lot, max_lot=max_lot,
+            eurusd_price=eurusd_price,
+        ))
+        contract = TradeContract(
+            ok=_result.ok, reason=_result.reason, lots=_result.lots,
+            sl_pips=_result.sl_pips, tp_pips=_result.tp_pips,
+            ppl_eur=_result.ppl_eur, risk_eur=_result.risk_eur,
+            reward_gross_eur=_result.reward_gross_eur,
+            cost_eur=_result.cost_eur,
+            reward_net_eur=_result.reward_net_eur,
+            lock_eur=_result.lock_eur, cap_eur=_result.cap_eur,
+        )
+    else:
+        # Camino legacy (byte-idéntico al comportamiento previo)
+        contract = evaluate_trade(
+            symbol=symbol, price=price, equity=equity, sl_pips=sl_pips,
+            head_lots=head_lots, tp_candidates_pips=candidates,
+            risk_pct=risk_pct, min_lot=min_lot, max_lot=max_lot,
+            min_lock_eur=min_lock_eur, eurusd_price=eurusd_price,
+        )
     tp_pips = contract.tp_pips if contract.tp_pips > 0 else candidates[0]
     return TradeSetup(
         sl_geom_pips=sl_geom,
