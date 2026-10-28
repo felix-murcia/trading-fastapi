@@ -45,12 +45,34 @@ def _build_uc(
     clock = FakeClock()
     trainer = FakeModelTrainer(should_fail=trainer_should_fail, promoted=promoted)
     model_repo = FakeModelRepository(should_fail_save=repo_should_fail_save)
+    # Outcomes con variedad para alignment gate (entropía >= 1.0 bit)
+    outcomes = []
+    for i in range(30):
+        outcomes.append(type("O", (), {
+            "symbol": "EURUSD", "entry_time": 1.0, "exit_time": 2.0,
+            "pnl": 5.0, "pnl_pct": 0.5, "direction": "LONG",
+            "sl_hit": False, "tp_hit": True, "exit_reason": "tp",
+        })())
+    for i in range(20):
+        outcomes.append(type("O", (), {
+            "symbol": "EURUSD", "entry_time": 1.0, "exit_time": 2.0,
+            "pnl": -2.0, "pnl_pct": -0.2, "direction": "SHORT",
+            "sl_hit": False, "tp_hit": True, "exit_reason": "tp",
+        })())
+    for i in range(5):
+        outcomes.append(type("O", (), {
+            "symbol": "EURUSD", "entry_time": 1.0, "exit_time": 2.0,
+            "pnl": -2.0, "pnl_pct": -0.2, "direction": "LONG",
+            "sl_hit": False, "tp_hit": True, "exit_reason": "tp",
+        })())
+    for i in range(5):
+        outcomes.append(type("O", (), {
+            "symbol": "EURUSD", "entry_time": 1.0, "exit_time": 2.0,
+            "pnl": 5.0, "pnl_pct": 0.5, "direction": "SHORT",
+            "sl_hit": False, "tp_hit": True, "exit_reason": "tp",
+        })())
     fetcher = FakeDataFetcher(
-        outcomes=[
-            # TradeOutcome(symbol="EURUSD", entry_time=..., exit_time=...,
-            #   pnl=..., pnl_pct=..., direction=..., sl_hit=..., tp_hit=...,
-            #   exit_reason=...)
-        ],
+        outcomes=outcomes,
         candles=[{"i": i} for i in range(200)],
     )
     notifier = FakeNotifier()

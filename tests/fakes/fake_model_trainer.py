@@ -35,12 +35,15 @@ class FakeModelTrainer:
 
     def evaluate(self, model: object, dataset: object) -> dict:
         self.evaluate_called = True
+        sharpe = 2.0 if self.promoted else -1.0
         return {
             "sum_reward": 5.0 if self.promoted else -1.0,
-            "mean_sharpe": 2.0 if self.promoted else -1.0,
+            "mean_sharpe": sharpe,
+            "sharpe": sharpe,
             "mean_sortino": 2.0 if self.promoted else -1.0,
             "worst_max_dd": 0.1,
-            "total_openings": 100,
+            "total_openings": 250 if self.promoted else 100,
             "total_expectancy": 1.0 if self.promoted else -1.0,
+            "expectancy": 1.0 if self.promoted else -1.0,
             "reward": 5.0 if self.promoted else -1.0,
         }

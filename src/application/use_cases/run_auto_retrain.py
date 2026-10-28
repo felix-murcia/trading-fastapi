@@ -20,15 +20,15 @@ Paridad con legacy/fastapi/services/auto_retrain.py:
   - _log_retrain_event: evento de auditoría con resultado
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional
 
-from src.domain.exceptions import UnknownSymbol  # type: ignore[attr-defined]
 from src.domain.ports import (
     AuditLogger, Clock, DataFetcher, ModelRepository, ModelTrainer,
     Notifier, TradeRepository,
 )
 from src.domain.rules.alignment_gate import alignment_gate
+from src.domain.rules.parsing import UnknownSymbol, validate_symbol
 from src.domain.rules.retrain_config import RetrainConfig
 from src.domain.rules.retrain_state import RetrainState
 from src.domain.rules.trade_outcome import TradeOutcome
@@ -115,6 +115,11 @@ class RunAutoRetrain:
             symbol = self._validate_symbol(symbol)
         except UnknownSymbol as exc:
             self._record_failure()
+            self._audit.log("retrain_failed", {
+                "symbol": symbol,
+                "trigger": trigger,
+                "error": f"unknown_symbol: {exc}",
+            })
             return RetrainResult(
                 status="failed",
                 reason=f"unknown_symbol: {exc}",
@@ -148,8 +153,8 @@ class RunAutoRetrain:
                 },
             )
 
-        # 4. Marcar retrain en progreso.
-        state.retrain_in_progress = True
+        # 4. Marcar retrain en progreso (RetrainState es frozen → replace).
+        state = replace(state, retrain_in_progress=True)
         self._trade_repo.save_state(symbol, state)
 
         try:
@@ -214,8 +219,12 @@ class RunAutoRetrain:
                 )
 
             # 9. Gate alineación PPO↔LLM (regla pura).
-            pairs = [(o.direction, "BULLISH" if o.pnl > 0 else "BEARISH")
-                     for o in trade_outcomes[-100:]]
+            # direction: "LONG"→"BUY", "SHORT"→"SELL" (contrato de polarity).
+            pairs = [
+                ("BUY" if o.direction == "LONG" else "SELL",
+                 "BULLISH" if o.pnl > 0 else "BEARISH")
+                for o in trade_outcomes[-100:]
+            ]
             alignment = alignment_gate(pairs)
 
             if not alignment.ok and not getattr(gate_decision, "drastic", False):
@@ -256,11 +265,16 @@ class RunAutoRetrain:
             })
             self._repo.promote(model_id)
 
-            # 11. Reiniciar estado del ciclo.
-            state.retrain_in_progress = False
-            state.last_retrain_time = self._clock.now().timestamp() if hasattr(self._clock.now(), "timestamp") else float(self._clock.now())
-            state.filled_count = 0
-            state.outcomes = ()
+            # 11. Reiniciar estado del ciclo (RetrainState es frozen → replace).
+            now = self._clock.now()
+            now_ts = now.timestamp() if hasattr(now, "timestamp") else float(now)
+            state = replace(
+                state,
+                retrain_in_progress=False,
+                last_retrain_time=now_ts,
+                filled_count=0,
+                outcomes=(),
+            )
             self._trade_repo.save_state(symbol, state)
 
             # 12. Auditar promoción.
@@ -294,7 +308,7 @@ class RunAutoRetrain:
             # Cualquier error → failed, no crashea.
             self._record_failure()
             try:
-                state.retrain_in_progress = False
+                state = replace(state, retrain_in_progress=False)
                 self._trade_repo.save_state(symbol, state)
             except Exception:
                 pass  # no romper el flujo si el state no se puede guardar
