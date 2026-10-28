@@ -23,3 +23,8 @@ class ThresholdViolationError(DomainError):
         super().__init__(
             f"Threshold violation: {threshold_name} expected >= {expected}, got {actual}"
         )
+
+
+class UnknownSymbol(DomainError):
+    """Símbolo no listado en PAIRS (sin pipeline de retrain)."""
+    pass
