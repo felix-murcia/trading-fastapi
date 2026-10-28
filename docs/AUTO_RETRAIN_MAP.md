@@ -260,3 +260,15 @@ El job de retrain corre cada hora en `main.py:216` (`_retrain_schedule_loop`). A
 4. Dry-run en staging con datos reales: el job se ejecuta sin promover modelos basura
 
 **El flag NO se activa hasta que se cumplan las 4 condiciones anteriores.**
+
+---
+
+## Circuit breaker para `RunAutoRetrain`
+
+Si el job con `flag=true` falla, el flag NO se pone en false automáticamente tras una sola caída (podría ser transitorio: red, timeout de MT5). Si fallan **2 ejecuciones consecutivas**, el flag se pone en `false` automáticamente y se envía alerta vía `Notifier`. El operador debe revisar el audit log (`run_auto_retrain_new` con `result=failed`) antes de volver a poner el flag en `true`.
+
+**Implementación (8c o 8d):**
+- Si el circuit breaker es lógica de negocio (2 fallos consecutivos → no ejecutar), va en el caso de uso `RunAutoRetrain` y se testa con fakes.
+- Si el circuit breaker es infraestructura (el scheduler en `main.py` decide no lanzar el job), va en `main.py` y se documenta para 8d.
+
+**Recomendación:** implementar en el caso de uso (testeable con fakes, paridad contra legacy).
