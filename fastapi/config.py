@@ -74,6 +74,9 @@ class Settings(BaseSettings):
     # Sesión 5: flag del caso de uso ExecuteTrade migrado a src/domain.
     # Default false = camino legacy byte-idéntico (el EA coloca órdenes).
     USE_NEW_EXECUTE_TRADE: bool = False
+    # Sesión 5-bis: flag del caso de uso RecordTradeFill migrado a src/domain.
+    # Default false = camino legacy byte-idéntico.
+    USE_NEW_RECORD_TRADE_FILL: bool = False
     news_filter_enabled: bool = True
     news_blackout_minutes: int = 15
 

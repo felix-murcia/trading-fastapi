@@ -2403,7 +2403,37 @@ async def trade_filled_webhook(req: TradeFilledRequest, _: None = Depends(verify
     agrupe por día o las compare con velas debe convertirlas primero
     (`services.timebase.broker_stamp_to_utc` / `to_utc`).
     """
-    from services.auto_retrain import _parse_timestamp
+    if settings.USE_NEW_RECORD_TRADE_FILL:
+        # Camino nuevo: caso de uso aislado en src/application/ (paridad byte a byte con legacy)
+        from decimal import Decimal
+        from src.application.use_cases.record_trade_fill import RecordTradeFill, RecordTradeFillInput
+        from src.domain.value_objects.thresholds import TradingThresholds
+        uc = RecordTradeFill(
+            repo=None, clock=None, audit=None,
+            thresholds=TradingThresholds(
+                min_win_eur=Decimal("3.0"),
+                safe_lock_eur=Decimal(str(settings.min_lock_eur)),
+                cost_buffer_pips=2,
+            ),
+        )
+        _result = uc.execute(RecordTradeFillInput(
+            cycle_id=req.cycle_id,
+            symbol=req.symbol,
+            direction=req.direction,
+            entry_price=float(req.entry_price) if req.entry_price not in (None, "") else None,
+            exit_price=float(req.exit_price) if req.exit_price not in (None, "") else None,
+            pnl=float(req.pnl) if isinstance(req.pnl, str) else req.pnl,
+            pnl_pct=float(req.pnl_pct) if isinstance(req.pnl_pct, str) else req.pnl_pct,
+            deal_ticket=int(req.deal_ticket) if req.deal_ticket not in (None, "") else None,
+            position_id=int(req.position_id) if req.position_id not in (None, "") else None,
+            entry_time=req.entry_time,
+            exit_time=req.exit_time,
+            mt5_order_id=int(req.opening_order_ticket) if req.opening_order_ticket not in (None, "") else None,
+        ))
+        return {"status": "recorded" if _result.persisted else "error"}
+    else:
+        # Camino legacy (byte-idéntico al comportamiento previo)
+        from services.auto_retrain import _parse_timestamp
     entry_ts = _parse_timestamp(req.entry_time)
     exit_ts = _parse_timestamp(req.exit_time)
 

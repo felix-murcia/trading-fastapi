@@ -15,8 +15,9 @@ legacy en CMD4 = fuga, PARA y reporta.
 | 3 | ValidateVetoChain | `fastapi/routers/ai.py` | Punto de inyección del flag en `apply_mechanical_vetoes()` |
 | 4 | EvaluateSignal | `fastapi/config.py` | Añade `USE_NEW_EVALUATE_SIGNAL: bool = False` |
 | 4 | EvaluateSignal | `fastapi/routers/ai.py` | Punto de inyección del flag en `predict_direction()` |
-| 5 | ExecuteTrade | `fastapi/config.py` | Añade `USE_NEW_EXECUTE_TRADE: bool = False` |
-| 5 | ExecuteTrade | `fastapi/routers/ai.py` | Punto de inyección del flag (pendiente de identificar) |
+| 5 | ExecuteTrade | `fastapi/config.py` | Añade `USE_NEW_EXECUTE_TRADE: bool = False` (revertido: no se mergeó; no hay punto de inyección en legacy) |
+| 5-bis | RecordTradeFill | `fastapi/config.py` | Añade `USE_NEW_RECORD_TRADE_FILL: bool = False` |
+| 5-bis | RecordTradeFill | `fastapi/routers/ai.py` | Punto de inyección del flag en `trade_filled_webhook()` |
 
 ## Regla
 
@@ -26,3 +27,11 @@ Cada sesión añade:
 
 El camino `else` debe ser byte-idéntico al comportamiento previo. Si CMD4
 detecta un archivo legacy que no está en esta tabla, es una fuga.
+
+## Nota sobre BrokerGateway
+
+`BrokerGateway` existe en `src/domain/ports/` como puerto reservado para el futuro,
+pero **no tiene implementación en esta fase** porque el backend legacy no ejecuta
+órdenes al broker (el EA coloca órdenes directamente en MT5). No se crea ningún
+adaptador real hasta que exista un punto de inyección en el legacy con paridad
+verificada.
