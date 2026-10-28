@@ -7,6 +7,23 @@ No se mejora; paridad exacta con legacy (production_sl / production_tp).
 
 SPREAD_BUFFER_PIPS = 2.0
 MIN_LEVEL_PIPS = 5.0
+SL_MAX_ATR_MULT = 1.5
+
+
+def sl_cap_geom_pips(
+    atr_norm: float,
+    pip_size: float,
+    current_price: float | None,
+    cap_mult: float = SL_MAX_ATR_MULT,
+) -> float | None:
+    """Migrado de legacy/ml/trading_env_v2.py:812 -- tope del SL geometrico.
+
+    Sin precio devuelve None (sin ATR fisico medible el tope no aplica).
+    """
+    if current_price is None or current_price <= 0:
+        return None
+    atr_pips = (atr_norm * current_price) / pip_size
+    return max(10.0, cap_mult * atr_pips - SPREAD_BUFFER_PIPS)
 
 
 def production_stops(
@@ -42,6 +59,10 @@ def production_stops(
         sl_c = abs(float(current_price) - sl_px) / float(pip_size)
         if sl_c >= MIN_LEVEL_PIPS:
             sl_pips = max(10.0, min(50.0, sl_c))
+        # legacy lines 862-864: tope fisico del SL geometrico
+        cap = sl_cap_geom_pips(atr_norm, pip_size, current_price)
+        if cap is not None:
+            sl_pips = min(sl_pips, cap)
 
     # ---- production_tp (legacy lines 887-908) ----
     tp_pips = sl_pips * 2.0

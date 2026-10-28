@@ -72,6 +72,22 @@ def test_production_stops_max_bounds():
     assert tp == pytest.approx(100.0)
 
 
+def test_production_stops_sl_cap_geom():
+    # Legacy lines 862-864: el SL geometrico se topa a 1.5xATR fisico - buffer.
+    # atr_norm=0.0005, price=1.1 -> atr_pips_fisico=5.5 -> cap=max(10, 8.25-2)=10
+    # SL geometrico puro=12 pips -> capado a 10.
+    sl, tp = production_stops(
+        atr_norm=0.0005,
+        pip_size=0.0001,
+        direction=1,
+        floor_below=1.0990,
+        ceiling_above=1.1020,
+        current_price=1.1,
+    )
+    assert sl == pytest.approx(10.0)
+    assert tp == pytest.approx(20.0)
+
+
 def test_production_stops_min_level_pips():
     # Nivel demasiado cerca (< 5 pips) -> fallback ATR
     sl, tp = production_stops(
