@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from config import settings
 from db.connection import init_pool, close_pool
 from routers import orders, smc, journal
+from api.routers import signals
 from services.performance_metrics import get_metrics, reset_metrics
 from services.broker_clock_store import restore_broker_offset
 from services.risk_state_store import init_risk_state
@@ -246,6 +247,19 @@ async def lifespan(app: FastAPI):
     # expectancy, que es la vara de admisión. Sólo lectura.
     from services.llm_replay import _llm_replay_loop
     _bg_tasks.add(asyncio.create_task(_llm_replay_loop()))
+
+    # Carga de artefactos de inferencia por par (antes era on_startup en routers/ai.py).
+    from api.routers.signals import load_inference_artifacts
+    from api.routers._shared import _get_registry
+    for _ctx in _get_registry().enabled():
+        if _ctx.config.decision_source != "ppo":
+            logger.info(
+                "[AI-STARTUP] %s: decisor por REGLA (%s) — sin bundle PPO",
+                _ctx.config.symbol, _ctx.config.decision_source,
+            )
+            continue
+        load_inference_artifacts(_ctx.config.symbol)
+
     yield
     for _task in _bg_tasks:
         _task.cancel()
@@ -335,20 +349,16 @@ async def reset_metrics_endpoint():
     return {"status": "reset"}
 
 
-from routers import ai
 from api.routers import health
 from api.routers import model
 from api.routers import sessions
-from api.routers import retrain
-
-from api.routers import retrain
+from api.routers import signals
 from api.routers import trades
 
-app.include_router(ai.router, prefix="/api/v1/ai", tags=["ai"])
+app.include_router(signals.router, prefix="/api/v1/ai", tags=["ai"])
 app.include_router(health.router, prefix="/api/v1/ai", tags=["ai"])
 app.include_router(model.router, prefix="/api/v1/ai", tags=["ai"])
 app.include_router(sessions.router, prefix="/api/v1/ai", tags=["ai"])
-app.include_router(retrain.router, prefix="/api/v1/ai", tags=["ai"])
 app.include_router(trades.router, prefix="/api/v1/ai", tags=["ai"])
 app.include_router(journal.router)
 app.include_router(smc.router)

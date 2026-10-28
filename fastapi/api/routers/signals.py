@@ -81,7 +81,7 @@ from services.strategist import (
     fetch_bars_since_close,
     fetch_last_exit,
 )
-from .deps import verify_token
+from routers.deps import verify_token
 from services.error_taxonomy import DB_ERRORS, HTTP_ERRORS, LOOP_ERRORS, PARSE_ERRORS
 
 
@@ -543,20 +543,6 @@ def reload_inference_artifacts(symbol: str) -> dict:
     return dict(brain.bundle)
 
 
-@router.on_event("startup")
-async def on_startup():
-    # P3-1b: cada par habilitado en PAIRS carga SU brain (mundo autónomo).
-    # G3/E4 (2026-10-20): un par con `decision_source="momentum24"` decide
-    # con la REGLA medida y NO tiene bundle ⇒ no se le exige un manifest
-    # inexistente (el arranque fallaría con RuntimeError al buscarlo).
-    for ctx in _get_registry().enabled():
-        if ctx.config.decision_source != "ppo":
-            logger.info(
-                "[AI-STARTUP] %s: decisor por REGLA (%s) — sin bundle PPO",
-                ctx.config.symbol, ctx.config.decision_source,
-            )
-            continue
-        load_inference_artifacts(ctx.config.symbol)
 
 
 def _sma200_context(raw_sorted: pd.DataFrame) -> tuple[Optional[float], Optional[float]]:
