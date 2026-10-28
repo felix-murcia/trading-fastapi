@@ -337,9 +337,11 @@ async def reset_metrics_endpoint():
 
 from routers import ai
 from api.routers import health
+from api.routers import model
 
 app.include_router(ai.router, prefix="/api/v1/ai", tags=["ai"])
 app.include_router(health.router, prefix="/api/v1/ai", tags=["ai"])
+app.include_router(model.router, prefix="/api/v1/ai", tags=["ai"])
 app.include_router(journal.router)
 app.include_router(smc.router)
 app.include_router(orders.router)
