@@ -106,6 +106,57 @@ logger = logging.getLogger(__name__)
 # core.pair.default_model_path (fuente única); este router solo la consume.
 QWEN_URL = getattr(settings, "qwen_url", "http://100.90.16.33:8080/v1/chat/completions")
 
+
+def _qwen_query_sync(symbol: str, decision: str, ml_prob: float,
+                     context: dict) -> dict:
+    """Wrapper síncrono para query_qwen_unified (async).
+
+    Ejecuta la coroutine en un hilo aparte (ThreadPoolExecutor) para no
+    bloquear el event loop de FastAPI. Los parámetros que GenerateStrategyAdvice
+    no provee (rsi, atr, ...) reciben valores por defecto razonables; el
+    contexto del router se pasa vía `context` con fallback a defaults.
+    """
+    import asyncio
+    import concurrent.futures
+    import logging
+
+    logger = logging.getLogger("qwen.real_client")
+
+    def _run():
+        return asyncio.run(query_qwen_unified(
+            symbol=symbol,
+            decision=decision,
+            ml_prob=ml_prob,
+            rsi=context.get("rsi", 50.0),
+            atr=context.get("atr", 0.001),
+            atr_pct=context.get("atr_pct", 0.0),
+            macd_hist=context.get("macd_hist", 0.0),
+            bb_pos=context.get("bb_pos", 0.5),
+            range_pct=context.get("range_pct", 0.0),
+            last_ret=context.get("last_ret", 0.0),
+            hour=context.get("hour", 12),
+            news=context.get("news", ""),
+            candle_context=context.get("candle_context", ""),
+            cycle_id=context.get("cycle_id", ""),
+            logger=logger,
+            recent_insights=context.get("recent_insights"),
+            adx=context.get("adx"),
+            sma200_dist=context.get("sma200_dist"),
+            sma200_slope=context.get("sma200_slope"),
+            regime=context.get("regime"),
+            support_level=context.get("support_level"),
+            resistance_level=context.get("resistance_level"),
+            reentry=context.get("reentry"),
+            calendar_events=context.get("calendar_events"),
+            higher_tf_context=context.get("higher_tf_context"),
+            memories=context.get("memories"),
+        ))
+
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        future = executor.submit(_run)
+        return future.result()
+
+
 QUALITY_THRESHOLD = 5.0
 
 # 2026-10-21 (Opción B, Félix): los vetos de CALIDAD y RÉGIMEN de Qwen se
@@ -1476,13 +1527,22 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             GenerateStrategyAdvice, GenerateStrategyAdviceInput,
         )
         from src.domain.value_objects.thresholds import TradingThresholds
+        from src.infrastructure.adapters.real_audit_logger import RealAuditLogger
+        from src.infrastructure.adapters.real_clock import RealClock
+        from src.infrastructure.adapters.real_evaluate_signal import RealEvaluateSignal
+        from src.infrastructure.adapters.real_llm_client import RealLLMClient
+        from src.infrastructure.adapters.real_thresholds import RealThresholds
+        from src.infrastructure.adapters.real_trade_repository import RealTradeRepository
         uc = GenerateStrategyAdvice(
-            llm=None, evaluate=None, clock=None,
-            thresholds=TradingThresholds(
-                min_win_eur=Decimal("3.0"),
-                safe_lock_eur=Decimal(str(settings.min_lock_eur)),
-                cost_buffer_pips=2,
+            llm=RealLLMClient(query_fn=_qwen_query_sync),
+            evaluate=RealEvaluateSignal(
+                repo=RealTradeRepository(),
+                clock=RealClock(),
+                thresholds=RealThresholds.from_settings(settings),
             ),
+            clock=RealClock(),
+            audit=RealAuditLogger(),
+            thresholds=RealThresholds.from_settings(settings),
         )
         _result = uc.execute(GenerateStrategyAdviceInput(
             cycle_id=cycle_id,
