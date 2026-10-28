@@ -34,7 +34,7 @@ from services.walk_forward import (
     evaluate_walk_forward,
     gate_walk_forward,
 )
-from services.error_taxonomy import LOOP_ERRORS
+from services.error_taxonomy import DB_ERRORS, LOOP_ERRORS, PARSE_ERRORS
 
 logger = logging.getLogger(__name__)
 
@@ -965,7 +965,7 @@ async def _do_retrain(trigger: str = "manual", symbol: str = TRAINING_SYMBOL) ->
             await experiment_tracker.finish_experiment(
                 exp_id, "failed", error=f"{type(exc).__name__}: {exc}"
             )
-        except BaseException:
+        except (DB_ERRORS + PARSE_ERRORS):
             # Preserva la excepción original del pipeline; el fallo de cierre
             # queda logueado (la fila 'running' hinchada también es visible).
             logger.exception("[EXPERIMENT] #%s: fallo al cerrar como failed", exp_id)

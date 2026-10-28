@@ -905,3 +905,20 @@ class TestExperimentLifecycle:
             await ar._do_retrain()
 
         ar.experiment_tracker.finish_experiment.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_close_bug_is_not_downgraded_to_a_log(self, tmp_path, monkeypatch):
+        """Un bug del tracker no es una caída de BD: se propaga, no se traga."""
+        ar, *_ = TestDoRetrainPromotion._patch_common(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            ar, "_load_or_create_model",
+            MagicMock(side_effect=RuntimeError("boom-train")),
+        )
+        ar.experiment_tracker.finish_experiment = AsyncMock(
+            side_effect=AttributeError("bug-en-cierre")
+        )
+
+        with pytest.raises(AttributeError, match="bug-en-cierre"):
+            await ar._do_retrain()
+
+        ar.experiment_tracker.finish_experiment.assert_awaited_once()
