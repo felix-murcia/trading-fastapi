@@ -37,3 +37,17 @@ pero **no tiene implementación en esta fase** porque el backend legacy no ejecu
 órdenes al broker (el EA coloca órdenes directamente en MT5). No se crea ningún
 adaptador real hasta que exista un punto de inyección en el legacy con paridad
 verificada.
+
+## Nota sobre LLMClient.query() (clarificación de scope)
+
+El puerto `LLMClient.query()` se añadió en `src/domain/ports/__init__.py`
+(commit `75f6a95`, "feat(domain): extend LLMClient with query() port").
+
+- **¿Está en `v15.3-sesion5`? NO.** (`git merge-base --is-ancestor 75f6a95 v15.3-sesion5` → false)
+- **¿Está en `v15.3-sesion6`? SÍ.** (`git merge-base --is-ancestor 75f6a95 v15.3-sesion6` → true)
+
+No hay fuga de scope entre sesiones: `LLMClient.query()` pertenece a Sesión 6
+(desarrollo del caso de uso `GenerateStrategyAdvice`), no a Sesión 5-bis. El reporte
+intermedio que lo atribuía a 5-bis fue un error de atribución; el código está
+correctamente en Sesión 6.
+
