@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     # Lee de env var USE_NEW_COMPUTE_POSITION_SIZE; reversible en caliente
     # sin tocar código.
     USE_NEW_COMPUTE_POSITION_SIZE: bool = False
+    # Sesión 3: flag del caso de uso ValidateVetoChain migrado a src/domain.
+    # Default false = camino legacy byte-idéntico.
+    USE_NEW_VALIDATE_VETO_CHAIN: bool = False
     news_filter_enabled: bool = True
     news_blackout_minutes: int = 15
 

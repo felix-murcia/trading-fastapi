@@ -1482,8 +1482,22 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             memories=memories,
         )
 
-    mech = apply_mechanical_vetoes(
-        MechanicalInputs(
+    if settings.USE_NEW_VALIDATE_VETO_CHAIN:
+        # Camino nuevo: caso de uso aislado en src/application/ (paridad byte a byte con legacy)
+        from decimal import Decimal
+        from src.application.use_cases.validate_veto_chain import (
+            ValidateVetoChain, ValidateVetoChainInput,
+        )
+        from src.domain.value_objects.thresholds import TradingThresholds
+        uc = ValidateVetoChain(
+            repo=None, clock=None,
+            thresholds=TradingThresholds(
+                min_win_eur=Decimal("3.0"),
+                safe_lock_eur=Decimal(str(settings.min_lock_eur)),
+                cost_buffer_pips=2,
+            ),
+        )
+        _result = uc.execute(ValidateVetoChainInput(
             cycle_id=cycle_id,
             symbol=req.symbol,
             decision=decision,
@@ -1491,7 +1505,18 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             position_raw=req.position,
             steps_h1=steps_h1,
             time_stop_bars=TIME_STOP_BARS,
-            contract=contract,
+            contract_ok=contract.ok,
+            contract_reason=contract.reason,
+            contract_lots=contract.lots,
+            contract_sl_pips=contract.sl_pips,
+            contract_tp_pips=contract.tp_pips,
+            contract_ppl_eur=contract.ppl_eur,
+            contract_risk_eur=contract.risk_eur,
+            contract_reward_gross_eur=contract.reward_gross_eur,
+            contract_cost_eur=contract.cost_eur,
+            contract_reward_net_eur=contract.reward_net_eur,
+            contract_lock_eur=contract.lock_eur,
+            contract_cap_eur=contract.cap_eur,
             lots=final_lots,
             tp_pips=tp_pips_final,
             min_lock_eur=settings.min_lock_eur,
@@ -1502,9 +1527,35 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             qwen_reentry_ok=qwen.get("reentry_ok"),
             min_entry_confidence=settings.min_entry_confidence,
             effective_prob=qwen["effective_prob"],
-            open_positions=req.foreign_positions, qwen=qwen,
+            open_positions=req.foreign_positions,
+            qwen=qwen,
+        ))
+        mech = _result
+    else:
+        # Camino legacy (byte-idéntico al comportamiento previo)
+        mech = apply_mechanical_vetoes(
+            MechanicalInputs(
+                cycle_id=cycle_id,
+                symbol=req.symbol,
+                decision=decision,
+                env_position=env_position,
+                position_raw=req.position,
+                steps_h1=steps_h1,
+                time_stop_bars=TIME_STOP_BARS,
+                contract=contract,
+                lots=final_lots,
+                tp_pips=tp_pips_final,
+                min_lock_eur=settings.min_lock_eur,
+                reentry_window=reentry_window,
+                bars_since_close=bars_since_close,
+                churn_bars=CHURN_BARS,
+                qwen_ok=bool(qwen.get("ok", True)),
+                qwen_reentry_ok=qwen.get("reentry_ok"),
+                min_entry_confidence=settings.min_entry_confidence,
+                effective_prob=qwen["effective_prob"],
+                open_positions=req.foreign_positions, qwen=qwen,
+            )
         )
-    )
     final_decision = mech.decision
     time_stop = mech.time_stop
     reentry_ok = mech.reentry_ok
