@@ -142,3 +142,41 @@ fastapi, sqlalchemy, httpx, MetaTrader5, qwen. `src/domain/` y
 `src/application/` siguen aislados (CMD2 CLEAN). Los adaptadores reciben las
 dependencias del legacy desde la composición raíz (main.py), no las importan.
 
+## Notas pendientes de 7c-1-bis (documentadas antes del tag)
+
+### Nota 1: CMD9 = 0 — no hay tests unitarios de infraestructura
+
+CMD1 mide solo `src/domain` + `src/application` (92.83% cobertura). Los 6
+adaptadores reales en `src/infrastructure/adapters/` no tienen tests unitarios
+propios; se verifican indirectamente vía
+`tests/integration/test_flags_inject_real_adapters.py` (6 tests,
+flag=true → 200, flag=false → 200).
+
+**No es bloqueante para el tag.** Candidato a Sesión 8-bis o posterior:
+añadir tests unitarios por adaptador (RealTradeRepository con SQLite temporal,
+RealAuditLogger con archivo temporal, RealLLMClient con query_fn mockeado).
+
+### Nota 2: métrica de cobertura incompleta
+
+CMD1 usa `--cov=src/domain --cov=src/application`, no `--cov=src/infrastructure`.
+La cobertura real de `src/infrastructure/adapters/` (97 + 46 + 34 + 35 + 34 + 16 líneas)
+no se mide. Para Sesión 8, considerar añadir `--cov=src/infrastructure` con
+umbral menor (ej: 70%).
+
+### Nota 3: riesgo de producción — conexión no compartida
+
+Los routers crean `RealTradeRepository()` y `RealAuditLogger()` **por request**.
+- **Single worker:** funciona (archivo SQLite compartido, conexiones nuevas).
+- **Multi worker:** riesgo de "database is locked" en SQLite, o agotamiento
+  de pool en PostgreSQL si se migra a asyncpg.
+
+**Bloqueante para 7c-2:** antes de poner los flags de `trades.py`/`signals.py`
+en `true` en producción, `main.py` (composition root) debe crear instancias
+compartidas (singleton) de `RealTradeRepository` y `RealAuditLogger` e
+inyectarlas vía `Depends()` a los routers. Sin eso, la validación de
+14 días / ≥100 ejecuciones se contamina con errores de conexión, no del caso
+de uso.
+
+Esto es 7c-2-bis o parte de Sesión 8. **No poner flags en true sin resolverlo.**
+
+
