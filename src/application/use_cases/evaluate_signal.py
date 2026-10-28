@@ -99,6 +99,11 @@ class EvaluateSignal:
         direction_decision = decode_direction(inp.direction, inp.env_position)
         initial_decision = direction_decision.decision
 
+        # ORDER: decode first (can return HOLD/FLAT before vetoes), then veto
+        # chain. Legacy behavior: env=1 (position open) → decode returns HOLD,
+        # veto chain NOT evaluated. Case 3 of characterization test pins this.
+        # TODO(sesion6): consider whether decode-before-veto is intentional
+        #                and document it in the EA mirror contract.
         # Paso 2: veto chain (composición, no duplicación)
         veto_input = ValidateVetoChainInput(
             cycle_id=inp.cycle_id,
