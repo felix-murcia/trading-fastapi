@@ -20,6 +20,8 @@ legacy en CMD4 = fuga, PARA y reporta.
 | 5-bis | RecordTradeFill | `fastapi/routers/ai.py` | Punto de inyección del flag en `trade_filled_webhook()` |
 | 6 | GenerateStrategyAdvice | `fastapi/config.py` | Añade `USE_NEW_GENERATE_STRATEGY_ADVICE: bool = False` |
 | 6 | GenerateStrategyAdvice | `fastapi/routers/ai.py` | Punto de inyección del flag en `predict_direction()` (antes de `USE_NEW_EVALUATE_SIGNAL`) |
+| 7c-1 | RecordEADecision | `fastapi/config.py` | Añade `USE_NEW_RECORD_EA_DECISION: bool = False` |
+| 7c-1 | RecordEADecision | `fastapi/api/routers/sessions.py` | Punto de inyección del flag en `ea_decision_webhook()` |
 
 ## Regla
 
@@ -29,6 +31,19 @@ Cada sesión añade:
 
 El camino `else` debe ser byte-idéntico al comportamiento previo. Si CMD4
 detecta un archivo legacy que no está en esta tabla, es una fuga.
+
+## Nota sobre trades.py y signals.py (pendientes de validación en producción)
+
+`fastapi/api/routers/trades.py` tiene `USE_NEW_RECORD_TRADE_FILL` (Sesión 5-bis).
+`fastapi/api/routers/signals.py` tiene `USE_NEW_GENERATE_STRATEGY_ADVICE` (Sesión 6).
+**No se tocan en 7c-1**: sus flags necesitan validación en producción antes de
+eliminar el camino `else` y graduarse. Se revisarán en 7c-2.
+
+## Nota sobre retrain.py
+
+`fastapi/api/routers/retrain.py` usa `services/` directamente (no tiene caso de uso
+en `src/application/`). No se migra en 7c-1. Es observabilidad/operación, no lógica
+de negocio con dinero real. Se decide en sesión posterior si se migra.
 
 ## Nota sobre BrokerGateway
 

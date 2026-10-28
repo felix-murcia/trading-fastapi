@@ -80,6 +80,9 @@ class Settings(BaseSettings):
     # Sesión 6: flag del caso de uso GenerateStrategyAdvice migrado a src/domain.
     # Default false = camino legacy byte-idéntico.
     USE_NEW_GENERATE_STRATEGY_ADVICE: bool = False
+    # Sesión 7c-1: flag del caso de uso RecordEADecision migrado a src/application.
+    # Default false = camino legacy byte-idéntico.
+    USE_NEW_RECORD_EA_DECISION: bool = False
     news_filter_enabled: bool = True
     news_blackout_minutes: int = 15
 

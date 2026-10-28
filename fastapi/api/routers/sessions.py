@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from services.structured_logging import log_to_audit
 
+from config import settings
 from ._shared import _TRAINING_SYMBOL
 from routers.deps import verify_token
 
@@ -36,6 +37,32 @@ class EADecisionRequest(BaseModel):
 
 @router.post("/ea/decision")
 async def ea_decision_webhook(req: EADecisionRequest, _: None = Depends(verify_token)):
+    if settings.USE_NEW_RECORD_EA_DECISION:
+        # Camino nuevo: caso de uso aislado en src/application/ (paridad byte a byte con legacy)
+        from src.application.use_cases.record_ea_decision import (
+            RecordEADecision, RecordEADecisionInput,
+        )
+        uc = RecordEADecision(
+            audit=None, clock=None,
+        )
+        _result = uc.execute(RecordEADecisionInput(
+            cycle_id=req.cycle_id,
+            symbol=req.symbol,
+            received_decision=req.received_decision,
+            action=req.action,
+            order_ticket=req.order_ticket,
+            volume=req.volume,
+            sl=req.sl,
+            tp=req.tp,
+            reason=req.reason,
+            latency_ms=req.latency_ms,
+            raw_response=req.raw_response,
+            mt5_time=req.mt5_time,
+        ))
+        return {"status": "recorded" if _result.audited else "error"}
+    else:
+        # Camino legacy (byte-idéntico al comportamiento previo)
+        pass
     mt5_ts = req.mt5_time if req.mt5_time is not None else time.time()
     await log_to_audit(
         "ea_decision",
