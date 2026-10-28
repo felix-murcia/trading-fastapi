@@ -897,7 +897,7 @@ async def _do_retrain(trigger: str = "manual", symbol: str = TRAINING_SYMBOL) ->
        por corrida: disparador + snapshot + symbol)
     3. Ejecuta _do_retrain_core (entreno → gate walk-forward → promoción),
        que cierra la fila en sus puntos de decisión (promoted/rejected)
-    4. Ante cualquier excepción del pipeline cierra la fila como failed
+    4. Ante excepción (`LOOP_ERRORS`) o cancelación cierra la fila como failed
        (UPDATE condicional sobre status='running': no pisa un cierre ya hecho)
 
     Un fallo ANTES del snapshot (fetch MT5, escritura) no abre fila — no hay
@@ -960,7 +960,7 @@ async def _do_retrain(trigger: str = "manual", symbol: str = TRAINING_SYMBOL) ->
 
     try:
         await _do_retrain_core(df, exp_id, symbol)
-    except BaseException as exc:
+    except (LOOP_ERRORS + (asyncio.CancelledError,)) as exc:
         try:
             await experiment_tracker.finish_experiment(
                 exp_id, "failed", error=f"{type(exc).__name__}: {exc}"

@@ -855,3 +855,53 @@ class TestExperimentLifecycle:
         assert finish.await_args.args == (42, "failed")
         assert "boom-train" in finish.await_args.kwargs["error"]
         ar.experiment_tracker.start_experiment.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_pipeline_still_closes_experiment(self, tmp_path, monkeypatch):
+        """Una cancelación también terminaliza la fila (no queda 'running')."""
+        import asyncio
+
+        ar, *_ = TestDoRetrainPromotion._patch_common(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            ar, "_load_or_create_model",
+            MagicMock(side_effect=asyncio.CancelledError()),
+        )
+
+        with pytest.raises(asyncio.CancelledError):
+            await ar._do_retrain()
+
+        finish = ar.experiment_tracker.finish_experiment
+        finish.assert_awaited_once()
+        assert finish.await_args.args == (42, "failed")
+        assert "CancelledError" in finish.await_args.kwargs["error"]
+
+    @pytest.mark.asyncio
+    async def test_keyboard_interrupt_is_not_swallowed(self, tmp_path, monkeypatch):
+        """Ctrl-C no es un fallo del pipeline: no se convierte en fila 'failed'."""
+        ar, *_ = TestDoRetrainPromotion._patch_common(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            ar, "_load_or_create_model",
+            MagicMock(side_effect=KeyboardInterrupt()),
+        )
+
+        with pytest.raises(KeyboardInterrupt):
+            await ar._do_retrain()
+
+        ar.experiment_tracker.finish_experiment.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_close_failure_does_not_mask_original_error(self, tmp_path, monkeypatch):
+        """Si el cierre de la fila falla, se loguea y la causa original gana."""
+        ar, *_ = TestDoRetrainPromotion._patch_common(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            ar, "_load_or_create_model",
+            MagicMock(side_effect=RuntimeError("boom-train")),
+        )
+        ar.experiment_tracker.finish_experiment = AsyncMock(
+            side_effect=RuntimeError("db caída")
+        )
+
+        with pytest.raises(RuntimeError, match="boom-train"):
+            await ar._do_retrain()
+
+        ar.experiment_tracker.finish_experiment.assert_awaited_once()
