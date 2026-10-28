@@ -20,7 +20,7 @@ from services.auto_retrain import get_state as _get_retrain_state
 from services.error_taxonomy import LOOP_ERRORS
 from services.qwen_client import get_qwen_state
 
-from .._shared import _get_registry, _TRAINING_SYMBOL
+from ._shared import _get_registry, _TRAINING_SYMBOL
 from db.connection import get_pool
 
 router = APIRouter()

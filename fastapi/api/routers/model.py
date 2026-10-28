@@ -13,9 +13,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from services.drift_monitor import run_drift_check
 from services.model_registry import load_manifest
 
-from .._shared import _BRAINS, _get_registry, _sole_enabled_symbol
+from ._shared import _BRAINS, _get_registry, _sole_enabled_symbol
 from core.pair import default_model_path
-from .deps import verify_token
+from routers.deps import verify_token
 
 router = APIRouter()
 

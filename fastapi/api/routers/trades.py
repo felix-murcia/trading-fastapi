@@ -31,8 +31,8 @@ from src.application.use_cases.record_trade_fill import (
 from src.domain.value_objects.thresholds import TradingThresholds
 
 from config import settings
-from .._shared import _QUOTE_CACHE, DIRECTION_CANONICAL, VALID_EXIT_REASONS
-from .deps import verify_token
+from ._shared import _QUOTE_CACHE, DIRECTION_CANONICAL, VALID_EXIT_REASONS
+from routers.deps import verify_token
 
 router = APIRouter()
 

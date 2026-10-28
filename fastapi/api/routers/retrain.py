@@ -21,8 +21,8 @@ from services.auto_retrain import (
 from services.candidate_promotion import CandidatePromotionError, promote_measured_candidate
 from services.structured_logging import log_to_audit
 
-from .._shared import _TRAINING_SYMBOL, _sole_enabled_symbol
-from .deps import verify_token
+from ._shared import _TRAINING_SYMBOL, _sole_enabled_symbol
+from routers.deps import verify_token
 
 router = APIRouter()
 

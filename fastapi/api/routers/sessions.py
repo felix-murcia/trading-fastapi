@@ -13,8 +13,8 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from services.structured_logging import log_to_audit
 
-from .._shared import _TRAINING_SYMBOL
-from .deps import verify_token
+from ._shared import _TRAINING_SYMBOL
+from routers.deps import verify_token
 
 router = APIRouter()
 
