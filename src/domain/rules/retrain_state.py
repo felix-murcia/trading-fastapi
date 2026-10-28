@@ -16,3 +16,4 @@ class RetrainState:
     retrain_in_progress: bool = False
     scheduled_due: bool = False
     schedule_anchor: float = 0.0
+    consecutive_failures: int = 0

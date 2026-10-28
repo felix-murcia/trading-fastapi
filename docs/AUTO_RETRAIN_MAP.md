@@ -261,14 +261,55 @@ El job de retrain corre cada hora en `main.py:216` (`_retrain_schedule_loop`). A
 
 **El flag NO se activa hasta que se cumplan las 4 condiciones anteriores.**
 
+## Dry-run en staging (8d-3)
+
+Antes de poner `USE_NEW_RUN_AUTO_RETRAIN=true` en producción, se ejecuta un
+dry-run en staging con el siguiente protocolo:
+
+- **Dataset**: últimos N trades de staging, con N >= 50 (para que PPO tenga
+  datos suficientes). Si staging no tiene 50 trades, usar dataset sintético
+  o de producción anonimizado.
+- **Ejecución**: flag=true, trigger=manual (no esperar al cron). 3 ejecuciones
+  manuales separadas.
+- **Criterio de éxito (todas las 3 ejecuciones)**:
+  a. `RunAutoRetrain.execute` devuelve `RetrainResult(status="promoted")` o
+     `("rejected")`, nunca `("failed")`.
+  b. El modelo se guarda en `ModelRepository` (archivo/manifest verificable).
+  c. El `audit_log` tiene evento `"run_auto_retrain_new"` con el resultado.
+  d. El `retrain_state` se actualiza (`last_run`, `status`,
+     `consecutive_failures`).
+  e. No hay excepciones en el log del scheduler.
+- **Criterio de fallo**: cualquiera de los anteriores falla → flag=false +
+  alerta crítica; revisar antes de reintentar.
+
+**El flag NO se pone en true en producción hasta completar las 3 ejecuciones
+de dry-run con criterio de éxito.**
+
 ---
 
 ## Circuit breaker para `RunAutoRetrain`
 
-Si el job con `flag=true` falla, el flag NO se pone en false automáticamente tras una sola caída (podría ser transitorio: red, timeout de MT5). Si fallan **2 ejecuciones consecutivas**, el flag se pone en `false` automáticamente y se envía alerta vía `Notifier`. El operador debe revisar el audit log (`run_auto_retrain_new` con `result=failed`) antes de volver a poner el flag en `true`.
+Si el job con `flag=true` falla, el flag NO se pone en false automáticamente
+tras una sola caída (podría ser transitorio: red, timeout de MT5).
 
-**Implementación (8c o 8d):**
-- Si el circuit breaker es lógica de negocio (2 fallos consecutivos → no ejecutar), va en el caso de uso `RunAutoRetrain` y se testa con fakes.
-- Si el circuit breaker es infraestructura (el scheduler en `main.py` decide no lanzar el job), va en `main.py` y se documenta para 8d.
+**Circuit breaker del caso de uso (8c, en memoria):** 2 fallos consecutivos
+→ `RunAutoRetrain` devuelve `RetrainResult(skipped, circuit_breaker=True)` y
+notifica. Se resetea en el próximo éxito.
 
-**Recomendación:** implementar en el caso de uso (testeable con fakes, paridad contra legacy).
+**Circuit breaker del scheduler (8d-3, persistente en DB):** 3 fallos
+consecutivos con `flag=true` → el scheduler deja de ejecutar el job (skip) +
+alerta crítica vía `Notifier`. El contador de fallos (`consecutive_failures`)
+se persiste en `retrain_state` (DB), no en memoria: un reinicio del proceso
+no lo resetea. Un éxito resetea el contador a 0.
+
+**Nota:** `USE_NEW_RUN_AUTO_RETRAIN` es una env var estática (Pydantic
+Settings). El scheduler NO puede ponerla en false automáticamente. Al llegar
+a 3 fallos consecutivos, el scheduler pausa el job y notifica al operador,
+que debe cambiar el flag manualmente tras investigar el audit log.
+
+**Implementación (8d-3):**
+- Circuito breaker de negocio (2 fallos) → caso de uso `RunAutoRetrain`,
+  testeable con fakes.
+- Circuito breaker de infraestructura (3 fallos, persistente) → `main.py`
+  (`_retrain_schedule_run_once`), testeado en
+  `tests/integration/test_retrain_scheduler.py`.

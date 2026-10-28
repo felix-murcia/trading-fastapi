@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from dataclasses import replace
 from contextlib import asynccontextmanager
 
 import httpx
@@ -44,6 +45,123 @@ async def _persist_validated_broker_offset() -> None:
         )
     except DB_ERRORS + (RuntimeError,):
         logger.exception("[TIMEBASE] No se pudo persistir el offset validado")
+
+
+async def _retrain_schedule_loop_new(
+    run_auto_retrain,
+    settings,
+) -> None:
+    """Calendario de retrain con RunAutoRetrain (flag=true).
+
+    Circuit breaker persistente en retrain_state (DB, campo consecutive_failures),
+    no en memoria: un reinicio del proceso no resetea el contador.
+    - 3 fallos consecutivos con flag=true → job pausado (skip) + alerta crítica.
+    - Éxito (cualquier resultado que no sea failed) → contador reseteado a 0.
+    El flag es env var estático: el scheduler NO puede ponerlo en false
+    automáticamente; deja de ejecutar el job y el operador lo cambia manualmente.
+    """
+    await asyncio.sleep(3600)  # warmup: dejar arrancar el sistema (misma cadencia que legacy)
+    while True:
+        _retrain_schedule_run_once(run_auto_retrain)
+        await asyncio.sleep(3600)
+
+
+def _retrain_schedule_run_once(run_auto_retrain) -> None:
+    """Una iteración del scheduler de retrain (flag=true).
+
+    Circuit breaker persistente en retrain_state (DB, consecutive_failures).
+    - 3 fallos consecutivos → job pausado (skip) + alerta crítica.
+    - Éxito (resultado != failed) → contador reseteado a 0.
+    RunAutoRetrain.execute() es síncrono; esta función también lo es.
+    """
+    from src.domain.rules.retrain_config import RetrainConfig
+    from src.domain.rules.retrain_state import RetrainState
+
+    symbol = "EURUSD"  # TRAINING_SYMBOL
+    trade_repo = run_auto_retrain._trade_repo
+    notifier = run_auto_retrain._notifier
+    try:
+        state = trade_repo.load_state(symbol)
+        if state is None:
+            state = RetrainState()
+        consecutive = getattr(state, "consecutive_failures", 0)
+        if consecutive >= 3:
+            notifier.notify(
+                f"auto_retrain circuit breaker: {consecutive} fallos "
+                "consecutivos, job pausado",
+                severity="critical",
+            )
+            return
+        config = RetrainConfig()
+        result = run_auto_retrain.execute(
+            config=config, trigger="scheduled", symbol=symbol
+        )
+        if result.status == "failed":
+            new_failures = consecutive + 1
+            state = replace(
+                state,
+                consecutive_failures=new_failures,
+                retrain_in_progress=False,
+            )
+            trade_repo.save_state(symbol, state)
+            if new_failures >= 3:
+                notifier.notify(
+                    f"auto_retrain: {new_failures} fallos consecutivos, "
+                    "circuit breaker activado",
+                    severity="critical",
+                )
+        elif consecutive > 0:
+            state = replace(
+                state,
+                consecutive_failures=0,
+                retrain_in_progress=False,
+            )
+            trade_repo.save_state(symbol, state)
+    except Exception as exc:
+        notifier.notify(
+            f"auto_retrain scheduler error: {type(exc).__name__}: {exc}",
+            severity="error",
+        )
+
+
+def _build_retrain_loop(settings):
+    """Selecciona el loop de retrain según USE_NEW_RUN_AUTO_RETRAIN.
+
+    main.py es el único sitio que lee este flag. Retorna
+    (use_new: bool, loop_callable, kwargs) para que el lifespan cree la tarea
+    de fondo sin ramificaciones inline.
+    """
+    if settings.USE_NEW_RUN_AUTO_RETRAIN:
+        # Camino nuevo: caso de uso RunAutoRetrain con adaptadores reales.
+        from src.application.use_cases.run_auto_retrain import RunAutoRetrain
+        from src.domain.rules.retrain_config import RetrainConfig
+        from src.domain.rules.retrain_state import RetrainState
+        from src.infrastructure.adapters.real_audit_logger import RealAuditLogger
+        from src.infrastructure.adapters.real_clock import RealClock
+        from src.infrastructure.adapters.real_data_fetcher import RealDataFetcher
+        from src.infrastructure.adapters.real_model_repository import RealModelRepository
+        from src.infrastructure.adapters.real_model_trainer import RealModelTrainer
+        from src.infrastructure.adapters.real_notifier import RealNotifier
+        from src.infrastructure.adapters.real_trade_repository import RealTradeRepository
+        run_auto_retrain = RunAutoRetrain(
+            model_trainer=RealModelTrainer(seed=42),
+            model_repo=RealModelRepository(),
+            data_fetcher=RealDataFetcher(mt5_http_url=settings.mt5_http_url),
+            trade_repo=RealTradeRepository(),
+            audit=RealAuditLogger(),
+            clock=RealClock(),
+            notifier=RealNotifier(),
+            listed_symbols={
+                p["symbol"] for p in settings.pairs if p.get("enabled")
+            },
+        )
+        return True, _retrain_schedule_loop_new, {
+            "run_auto_retrain": run_auto_retrain,
+            "settings": settings,
+        }
+    # Camino legacy byte-idéntico (auto_retrain.py no se toca).
+    from services.auto_retrain import _retrain_schedule_loop
+    return False, _retrain_schedule_loop, {}
 
 
 async def _recover_broker_clock_and_risk(data: dict, market_port) -> None:
@@ -213,8 +331,8 @@ async def lifespan(app: FastAPI):
     from services.drift_monitor import _drift_monitor_loop
     _bg_tasks.add(asyncio.create_task(_drift_monitor_loop()))
     # P3-2d: calendario de retrain programado (revisión horaria).
-    from services.auto_retrain import _retrain_schedule_loop
-    _bg_tasks.add(asyncio.create_task(_retrain_schedule_loop()))
+    use_new, loop_fn, kwargs = _build_retrain_loop(settings)
+    _bg_tasks.add(asyncio.create_task(loop_fn(**kwargs)))
     # P2-H14: watchdog de silencio de ai_predict_cycle (cada 5 min).
     from services.predict_silence import _predict_silence_loop
     _bg_tasks.add(asyncio.create_task(_predict_silence_loop()))
