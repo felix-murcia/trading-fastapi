@@ -13,6 +13,13 @@ class Trade:
     pnl: Decimal | None
     opened_at: datetime
     closed_at: datetime | None
+    deal_ticket: int | None = None
+    position_id: int | None = None
+    mt5_order_id: int | None = None
+    order_db_id: int | None = None
+    commission: Decimal | None = None
+    fee: Decimal | None = None
+    slippage_pips: Decimal | None = None
 
     def is_closed(self) -> bool:
         return self.closed_at is not None
