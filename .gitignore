@@ -51,4 +51,4 @@ fastapi/ml/*/retrain_artifacts/
 audits/
 # AGENTS.md: SÍ se versiona (auditado el 2026-10-20: sin IPs, secretos,
 # emails ni URLs externas — sólo rutas de ficheros de claves, que siguen ignorados).
-backups/
+backups/fastapi/ops/daily_ledger.jsonl
