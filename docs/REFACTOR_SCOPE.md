@@ -217,4 +217,28 @@ Deuda: los tests de `RealDataFetcher` usan monkeypatch de `db.connection.get_poo
 Pendiente para 8d-2: `RealModelTrainer` (stable_baselines3 PPO + gymnasium).
 Pendiente para 8d-3: inyección del flag en `main.py`, test de integración flag=true/false, dry-run en staging, circuit breaker en el scheduler.
 
+### Nota 6: Sesión 8d-2 — RealModelTrainer (PPO wrapper, test con mock)
+
+Se implementó `RealModelTrainer` en `src/infrastructure/adapters/real_model_trainer.py`,
+wrapper fino sobre PPO (stable_baselines3) + ForexTradingEnvV2 (gymnasium).
+Implementa `ModelTrainer.train(dataset, config) -> object` y
+`evaluate(model, dataset) -> dict`.
+
+**Regla de test:** el test de `RealModelTrainer` mockea `stable_baselines3.PPO`
+(``patch("stable_baselines3.PPO")``) y `ml.trading_env_v2.ForexTradingEnvV2`.
+NO se entrena PPO real en unit test. El test tarda <5s (medido: ~2.4s).
+El entrenamiento real se valida en staging (8d-3), no en CI.
+
+src/domain/ y src/application/ siguen CLEAN: no importan gymnasium,
+stable_baselines3, torch, pandas (CMD2 = CLEAN).
+
+**`main.py` NO tocado todavía** (8d-3: inyección del flag
+`USE_NEW_RUN_AUTO_RETRAIN` en `_retrain_schedule_loop`).
+
+Límite de tiempo: test <5s, config n_steps=64, batch_size=16, n_epochs=1,
+seed=42, dataset 10-20 trades sintéticos.
+
+Pendiente para 8d-3: inyección del flag en `main.py`, test de integración
+flag=true/false, dry-run en staging, circuit breaker en el scheduler.
+
 
