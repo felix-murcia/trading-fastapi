@@ -178,9 +178,9 @@ def test_trade_filled_flag_true_injects_real_adapters():
         settings.USE_NEW_RECORD_TRADE_FILL = True
         try:
             uc = RecordTradeFill(
-                repo=RealTradeRepository(),
+                repo=RealTradeRepository(db_path=":memory:"),
                 clock=RealClock(),
-                audit=RealAuditLogger(),
+                audit=RealAuditLogger(db_path=":memory:"),
                 thresholds=RealThresholds.from_settings(settings),
             )
             assert captured["repo"] is not None, "repo es None con flag=true"
@@ -270,12 +270,12 @@ def test_predict_flag_true_injects_real_adapters():
             uc = GenerateStrategyAdvice(
                 llm=RealLLMClient(query_fn=_qwen_query_sync),
                 evaluate=RealEvaluateSignal(
-                    repo=RealTradeRepository(),
+                    repo=RealTradeRepository(db_path=":memory:"),
                     clock=RealClock(),
                     thresholds=RealThresholds.from_settings(settings),
                 ),
                 clock=RealClock(),
-                audit=RealAuditLogger(),
+                audit=RealAuditLogger(db_path=":memory:"),
                 thresholds=RealThresholds.from_settings(settings),
             )
             assert captured["llm"] is not None, "llm es None con flag=true"

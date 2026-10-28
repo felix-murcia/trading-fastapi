@@ -19,7 +19,7 @@ from src.domain.ports import TradeRepository
 
 
 class RealTradeRepository(TradeRepository):
-    def __init__(self, db_path: str = ":memory:"):
+    def __init__(self, db_path: str = "trade_repo.db"):
         self._db_path = db_path
         self._conn = sqlite3.connect(db_path)
         self._conn.execute(
