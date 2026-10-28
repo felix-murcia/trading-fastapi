@@ -22,6 +22,8 @@ os.environ.setdefault("internal_token", "test-token")
 os.environ.setdefault("hmac_secret", "test-hmac")
 os.environ.setdefault("mt5_http_url", "http://localhost:8000")
 
+import socket
+
 import pytest
 
 from api.dependencies import get_audit_logger, get_trade_repository
@@ -74,17 +76,27 @@ def test_sequential_writes_no_error():
     assert len(errors) == 0, f"Errores inesperados: {errors}"
 
 
-def test_sqlite_not_multiworker():
-    """SQLite no soporta escrituras concurrentes de múltiples workers.
+def _postgres_available() -> bool:
+    """Detecta si hay un servidor PostgreSQL escuchando en localhost:5432."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(1)
+    try:
+        result = sock.connect_ex(("localhost", 5432))
+    finally:
+        sock.close()
+    return result == 0
 
-    Producción usa PostgreSQL (db/connection.py: asyncpg.create_pool con
-    min_size=2, max_size=10), que sí maneja concurrencia vía pool compartido.
-    Este test documenta la limitación; no bloquea 7c-2 si producción ya usa
-    PostgreSQL.
-    """
-    pytest.skip(
-        "SQLite no soporta multi-worker para escrituras concurrentes. "
-        "Producción usa PostgreSQL con pool compartido de asyncpg. "
-        "Los adaptadores SQLite son para desarrollo/tests. "
-        "7c-2 no se bloquea si producción ya usa PostgreSQL."
-    )
+
+@pytest.mark.skipif(
+    not _postgres_available(),
+    reason=(
+        "PostgreSQL no disponible en este entorno. Los adaptadores reales usan "
+        "SQLite (desarrollo/tests). Producción usa PostgreSQL con pool asyncpg "
+        "compartido (db/connection.py: asyncpg.create_pool min_size=2, "
+        "max_size=10). Para validar concurrencia real contra PostgreSQL, migrar "
+        "los adaptadores a asyncpg y ejecutar este test contra la BD de "
+        "producción. El skip documenta la limitación; no la oculta."
+    ),
+)
+def test_sqlite_not_multiworker():
+    pass

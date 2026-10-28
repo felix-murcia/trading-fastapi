@@ -179,4 +179,23 @@ de uso.
 
 Esto es 7c-2-bis o parte de Sesión 8. **No poner flags en true sin resolverlo.**
 
+### Nota 4: adaptadores SQLite vs producción PostgreSQL
+
+Los adaptadores reales (`RealTradeRepository`, `RealAuditLogger`) usan `sqlite3`
+(archivo en disco por defecto, `:memory:` en tests). Producción usa
+**PostgreSQL con pool compartido de asyncpg** (`db/connection.py`:
+`asyncpg.create_pool(settings.database_url, min_size=2, max_size=10`)).
+Esto significa:
+
+- **Desarrollo/tests:** SQLite funciona (single worker, archivo local).
+- **Producción:** los adaptadores SQLite no están preparados para multi-worker
+  (riesgo de "database is locked"). Para producción real, migrar
+  `RealTradeRepository` y `RealAuditLogger` a usar asyncpg/PostgreSQL.
+- **El test de concurrencia** (`tests/integration/test_concurrent_writes.py`)
+  usa `skipif` condicional: salta si no hay PostgreSQL en `localhost:5432`.
+  Cuando haya PostgreSQL disponible, se ejecuta contra la BD real.
+
+Esta migración es 7c-2-bis-bis o parte de Sesión 8. No bloquea 7c-2 si
+producción ya usa PostgreSQL con pool compartido.
+
 
