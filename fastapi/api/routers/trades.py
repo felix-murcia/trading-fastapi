@@ -185,20 +185,22 @@ async def trade_filled_webhook(req: TradeFilledRequest, _: None = Depends(verify
         from decimal import Decimal
         from src.application.use_cases.record_trade_fill import RecordTradeFill, RecordTradeFillInput
         from src.domain.value_objects.thresholds import TradingThresholds
+        from src.infrastructure.adapters.real_audit_logger import RealAuditLogger
+        from src.infrastructure.adapters.real_clock import RealClock
+        from src.infrastructure.adapters.real_thresholds import RealThresholds
+        from src.infrastructure.adapters.real_trade_repository import RealTradeRepository
         uc = RecordTradeFill(
-            repo=None, clock=None, audit=None,
-            thresholds=TradingThresholds(
-                min_win_eur=Decimal("3.0"),
-                safe_lock_eur=Decimal(str(settings.min_lock_eur)),
-                cost_buffer_pips=2,
-            ),
+            repo=RealTradeRepository(),
+            clock=RealClock(),
+            audit=RealAuditLogger(),
+            thresholds=RealThresholds.from_settings(settings),
         )
         _result = uc.execute(RecordTradeFillInput(
             cycle_id=req.cycle_id,
             symbol=req.symbol,
             direction=req.direction,
             entry_price=float(req.entry_price) if req.entry_price not in (None, "") else None,
-            exit_price=float(req.exit_price) if req.exit_price not in (None, "") else None,
+            exit_price=float(getattr(req, "exit_price", None)) if getattr(req, "exit_price", None) not in (None, "") else None,
             pnl=float(req.pnl) if isinstance(req.pnl, str) else req.pnl,
             pnl_pct=float(req.pnl_pct) if isinstance(req.pnl_pct, str) else req.pnl_pct,
             deal_ticket=int(req.deal_ticket) if req.deal_ticket not in (None, "") else None,
