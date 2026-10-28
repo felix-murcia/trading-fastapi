@@ -1312,6 +1312,14 @@ Ahora, si las Bandas de Bollinger son inválidas o el ratio es insuficiente, el 
 
 **Contrato EA:** compatible sin cambios. El EA envía `position`/`entry_price`/`sl_price`/`tp_price`/`steps_in_trade` y recibe `volume`/`sl_pips`/`tp_pips`. El servidor computa `current_price`, `current_atr`, `balance` e `initial_balance` internamente. No requiere bump de versión MQL5.
 
+## Sesión 0: contención y baseline (2026-10-28)
+
+- **3 silent exceptions eliminados** (`fastapi/routers/ai.py:2392`, `fastapi/services/auto_retrain.py:963/968`) — `grep` de `except Exception` vacío en runtime.
+- **6 tests nuevos** (`test_auto_retrain.py`, `test_trade_filled_webhook.py`) — cubren camino esperado y camino de error.
+- **Baseline documentado:** `docs/baseline_pytest.txt` (1450 passed, 5 preexistentes, 2 xfailed) → `docs/BUSINESS_RULES.md` (15+ archivos, 5 archivos, espejos EA) → `docs/FREEZE.md`.
+- **Master congelado:** tag `v15.3-sesion0`; 5 ramas fusionadas (`b9da900` → `f6cf0ed` → `8059973` → `1b83358` → `5b24da5`); `daily_ledger.jsonl` ignorado (`.gitignore`); README actualizado.
+- **Legacy NO tocado para lógica nueva:** solo los 3 `except Exception`, cero cambios de umbrales, cero mejoras. El dominio nuevo arranca en `feature/sesion1-domain` sobre `master` limpio.
+
 ## Troubleshooting — Sesión 2026-09-14
 
 ### N. Cálculo dinámico de lotes + spread + registro de trades
