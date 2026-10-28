@@ -123,7 +123,9 @@ class RecordTradeFill:
                 error=f"persist_error: {exc}",
             )
 
-        # Auditar
+        # Auditar ejecución del caso de uso nuevo (evento distinto del legacy
+        # para poder contar ejecuciones reales en producción antes de graduar
+        # el flag USE_NEW_RECORD_TRADE_FILL en 7c-2).
         try:
             self._audit.log("trade_filled", {
                 "cycle_id": inp.cycle_id,
@@ -142,6 +144,17 @@ class RecordTradeFill:
             audited = True
         except Exception as exc:
             audited = False
+
+        try:
+            self._audit.log("record_trade_fill_new", {
+                "cycle_id": inp.cycle_id,
+                "symbol": inp.symbol,
+                "persisted": persisted,
+                "audited": audited,
+            })
+        except Exception:
+            # No romper el flujo si el segundo audit falla.
+            pass
 
         return RecordTradeFillOutput(
             order_db_id=trade.order_db_id,

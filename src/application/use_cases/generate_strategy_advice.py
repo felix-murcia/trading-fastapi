@@ -17,7 +17,7 @@ No lee os.environ. No toca infraestructura.
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
-from src.domain.ports import Clock, LLMClient  # noqa: F401
+from src.domain.ports import AuditLogger, Clock, LLMClient  # noqa: F401
 from src.domain.value_objects.thresholds import TradingThresholds  # noqa: F401
 from src.application.use_cases.evaluate_signal import (
     EvaluateSignal, EvaluateSignalInput, EvaluateSignalOutput,
@@ -94,11 +94,13 @@ class GenerateStrategyAdvice:
         llm: Optional[LLMClient] = None,
         evaluate: Optional[EvaluateSignal] = None,
         clock: Optional[Clock] = None,
+        audit: Optional[AuditLogger] = None,
         thresholds: Optional[TradingThresholds] = None,
     ):
         self._llm = llm
         self._evaluate = evaluate
         self._clock = clock
+        self._audit = audit
         self._thresholds = thresholds or TradingThresholds()
 
     def execute(self, inp: GenerateStrategyAdviceInput) -> GenerateStrategyAdviceOutput:
@@ -209,6 +211,23 @@ class GenerateStrategyAdvice:
         if final_decision in ("BUY", "SELL") and inp.quorum_lateral and not inp.quorum_consensus:
             final_decision = "HOLD"
             quorum_rejected = True
+
+        # Auditar ejecución del caso de uso nuevo (evento distinto del legacy
+        # para poder contar ejecuciones reales en producción antes de graduar
+        # el flag USE_NEW_GENERATE_STRATEGY_ADVICE en 7c-2).
+        if self._audit is not None:
+            try:
+                self._audit.log("generate_strategy_advice_new", {
+                    "cycle_id": inp.cycle_id,
+                    "symbol": inp.symbol,
+                    "decision": final_decision,
+                    "qwen_ok": qwen_ok,
+                    "bias_veto_fired": bias_veto_fired,
+                    "quorum_rejected": quorum_rejected,
+                })
+            except Exception:
+                # No romper el flujo si el audit falla.
+                pass
 
         return GenerateStrategyAdviceOutput(
             decision=final_decision,

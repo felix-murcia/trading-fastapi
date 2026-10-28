@@ -39,11 +39,55 @@ detecta un archivo legacy que no está en esta tabla, es una fuga.
 **No se tocan en 7c-1**: sus flags necesitan validación en producción antes de
 eliminar el camino `else` y graduarse. Se revisarán en 7c-2.
 
-## Nota sobre retrain.py
+## Criterio de validación para 7c-2 (graduación de flags)
 
-`fastapi/api/routers/retrain.py` usa `services/` directamente (no tiene caso de uso
-en `src/application/`). No se migra en 7c-1. Es observabilidad/operación, no lógica
-de negocio con dinero real. Se decide en sesión posterior si se migra.
+Un flag puede graduarse (eliminar camino `else` + eliminar flag) solo cuando se
+cumplen TODOS los criterios siguientes:
+
+1. **Tiempo**: el flag ha estado `true` en producción durante ≥14 días
+   consecutivos. Fecha de inicio = deploy que puso el flag en `true`.
+2. **Volumen**: el caso de uso nuevo ha procesado ≥N ejecuciones reales sin
+   error:
+   - `USE_NEW_RECORD_TRADE_FILL` (trades.py): ≥100 ejecuciones
+   - `USE_NEW_GENERATE_STRATEGY_ADVICE` (signals.py): ≥200 ejecuciones
+3. **Sin incidentes**: ningún incidente atribuible al caso de uso nuevo en el
+   periodo de validación.
+4. **Evidencia de uso**: el log de audit muestra entradas del evento distintivo
+   del caso de uso nuevo (no solo que el flag estaba `true`):
+   - `RecordTradeFill` → evento `"record_trade_fill_new"` (contar entradas)
+   - `GenerateStrategyAdvice` → evento `"generate_strategy_advice_new"` (contar entradas)
+5. **Confirmación del equipo**: sin quejas ni anomalías reportadas.
+
+Si no se cumple alguno, el flag sigue en `false` y 7c-2 espera. Sin criterio
+objetivo, 7c-2 nunca empieza ni se hace demasiado pronto.
+
+## Nota sobre retrain.py (decisión documentada)
+
+**Opción A: fuera de scope de Sesión 7.**
+
+`fastapi/api/routers/retrain.py` usa `services/auto_retrain.py` (1701 líneas)
+directamente. No tiene caso de uso en `src/application/`. Es operación /
+entrenamiento de modelos, no lógica de negocio con dinero real detrás (no ejecuta
+órdenes). No se migra en 7c-2.
+
+La migración de `auto_retrain.py` a caso de uso (`RunAutoRetrain`) queda como
+**Sesión 8 pendiente** (estimación: 1-2 semanas, riesgo medio: entrena modelos
+pero no ejecuta órdenes). Puede ejecutarse en paralelo a 7c-2 porque toca
+`retrain.py` y `services/auto_retrain.py`, no los flags de `trades.py` /
+`signals.py`.
+
+## Nota sobre health.py y model.py (verificación de umbrales escondidos)
+
+Verificado con grep para `MIN_WIN_EUR`, `safe_lock`, `threshold`, `3.0`, `4.0`,
+`min_win`, `lock_eur`, `cost_buffer`: **sin coincidencias** en ninguno de los dos
+archivos. Son observabilidad pura:
+
+- `health.py`: health check de DB, MT5, archivo PPO, estado de retrain, estado
+  de Qwen. Sin lógica de negocio con umbrales de trading.
+- `model.py`: compara SHA256 de bundle en memoria vs disco (`in_sync`) y ejecuta
+  `run_drift_check()` (PSI + decay de métricas). Sin umbrales de negocio.
+
+No se migran en 7c-2. No hay deuda de lógica de negocio escondida.
 
 ## Nota sobre BrokerGateway
 
