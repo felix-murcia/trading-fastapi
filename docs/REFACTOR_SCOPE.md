@@ -15,6 +15,8 @@ legacy en CMD4 = fuga, PARA y reporta.
 | 3 | ValidateVetoChain | `fastapi/routers/ai.py` | Punto de inyección del flag en `apply_mechanical_vetoes()` |
 | 4 | EvaluateSignal | `fastapi/config.py` | Añade `USE_NEW_EVALUATE_SIGNAL: bool = False` |
 | 4 | EvaluateSignal | `fastapi/routers/ai.py` | Punto de inyección del flag en `predict_direction()` |
+| 5 | ExecuteTrade | `fastapi/config.py` | Añade `USE_NEW_EXECUTE_TRADE: bool = False` |
+| 5 | ExecuteTrade | `fastapi/routers/ai.py` | Punto de inyección del flag (pendiente de identificar) |
 
 ## Regla
 

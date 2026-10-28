@@ -71,6 +71,9 @@ class Settings(BaseSettings):
     # Sesión 4: flag del caso de uso EvaluateSignal migrado a src/domain.
     # Default false = camino legacy byte-idéntico.
     USE_NEW_EVALUATE_SIGNAL: bool = False
+    # Sesión 5: flag del caso de uso ExecuteTrade migrado a src/domain.
+    # Default false = camino legacy byte-idéntico (el EA coloca órdenes).
+    USE_NEW_EXECUTE_TRADE: bool = False
     news_filter_enabled: bool = True
     news_blackout_minutes: int = 15
 
