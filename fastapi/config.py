@@ -83,6 +83,13 @@ class Settings(BaseSettings):
     # Sesión 7c-1: flag del caso de uso RecordEADecision migrado a src/application.
     # Default false = camino legacy byte-idéntico.
     USE_NEW_RECORD_EA_DECISION: bool = False
+    # Sesión 8c: flag del caso de uso RunAutoRetrain migrado a src/application.
+    # Default false = camino legacy byte-idéntico (job en background cada hora).
+    # Cambiar a true solo tras 8c+8d cerradas, test de integración con flag=true
+    # pasando, y dry-run en staging con datos reales. Reversible en caliente
+    # sin tocar código. Validación: ≥5 ejecuciones consecutivas sin error,
+    # ≥7 días, audit log "run_auto_retrain_new", rollback inmediato si falla.
+    USE_NEW_RUN_AUTO_RETRAIN: bool = False
     news_filter_enabled: bool = True
     news_blackout_minutes: int = 15
 
