@@ -110,3 +110,35 @@ No hay fuga de scope entre sesiones: `LLMClient.query()` pertenece a Sesión 6
 intermedio que lo atribuía a 5-bis fue un error de atribución; el código está
 correctamente en Sesión 6.
 
+## Nota sobre 7c-1-bis (inyección de adaptadores reales)
+
+**7c-1-bis cerrado antes de 7c-2.** Los puntos de inyección en
+`sessions.py:45`, `trades.py:188`, `signals.py:479` pasaban `None` a las
+dependencias de los casos de uso. Al poner un flag en `true`, el caso de uso
+recibía `None` y fallaba con `AttributeError` (500 en el endpoint). Esto hacía
+imposible la validación en producción requerida por 7c-2.
+
+Se implementaron los primeros adaptadores reales de `src/domain/ports/` en
+`src/infrastructure/adapters/`:
+
+- `RealClock` → `Clock`
+- `RealAuditLogger` → `AuditLogger`
+- `RealTradeRepository` → `TradeRepository`
+- `RealThresholds` → `TradingThresholds` (helper, no puerto)
+- `RealLLMClient` → `LLMClient`
+- `RealEvaluateSignal` → wrapper de `EvaluateSignal` con adaptadores reales
+
+Se inyectaron en los 3 puntos:
+- `sessions.py`: `RecordEADecision(audit=RealAuditLogger(), clock=RealClock())`
+- `trades.py`: `RecordTradeFill(repo=RealTradeRepository(), clock=RealClock(), audit=RealAuditLogger(), thresholds=RealThresholds.from_settings(settings))`
+- `signals.py`: `GenerateStrategyAdvice(llm=RealLLMClient(...), evaluate=RealEvaluateSignal(...), clock=RealClock(), audit=RealAuditLogger(), thresholds=RealThresholds.from_settings(settings))`
+
+Se añadieron tests de integración en `tests/integration/test_flags_inject_real_adapters.py`
+que verifican: flag=true → caso de uso recibe adaptadores reales (no None);
+flag=false → caso de uso no se instancia.
+
+Regla absoluta: `src/infrastructure/` es la única capa que puede importar de
+fastapi, sqlalchemy, httpx, MetaTrader5, qwen. `src/domain/` y
+`src/application/` siguen aislados (CMD2 CLEAN). Los adaptadores reciben las
+dependencias del legacy desde la composición raíz (main.py), no las importan.
+
