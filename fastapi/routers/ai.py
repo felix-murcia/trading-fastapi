@@ -1482,7 +1482,50 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
             memories=memories,
         )
 
-    if settings.USE_NEW_EVALUATE_SIGNAL:
+    if settings.USE_NEW_GENERATE_STRATEGY_ADVICE:
+        # Camino nuevo: caso de uso aislado en src/application/ (paridad byte a byte con legacy)
+        # Genera el consejo de estrategia componiendo EvaluateSignal + LLMClient + bias_veto + quórum.
+        from decimal import Decimal
+        from src.application.use_cases.generate_strategy_advice import (
+            GenerateStrategyAdvice, GenerateStrategyAdviceInput,
+        )
+        from src.domain.value_objects.thresholds import TradingThresholds
+        uc = GenerateStrategyAdvice(
+            llm=None, evaluate=None, clock=None,
+            thresholds=TradingThresholds(
+                min_win_eur=Decimal("3.0"),
+                safe_lock_eur=Decimal(str(settings.min_lock_eur)),
+                cost_buffer_pips=2,
+            ),
+        )
+        _result = uc.execute(GenerateStrategyAdviceInput(
+            cycle_id=cycle_id,
+            symbol=req.symbol,
+            direction=float(decision == "BUY") - float(decision == "SELL"),
+            env_position=env_position,
+            steps_h1=steps_h1,
+            time_stop_bars=TIME_STOP_BARS,
+            volume_norm=final_lots,
+            sl_pips=sl_pips_final,
+            equity=equity_val if "equity_val" in dir() else 10000.0,
+            risk_pct=settings.ppo_risk_pct,
+            min_lot=settings.min_volume,
+            max_lot=settings.max_volume,
+            min_lock_eur=settings.min_lock_eur,
+            reentry_window=reentry_window,
+            bars_since_close=bars_since_close,
+            churn_bars=CHURN_BARS,
+            min_entry_confidence=settings.min_entry_confidence,
+            effective_prob=qwen["effective_prob"],
+            open_positions=req.foreign_positions,
+            eurusd_price=_eurusd_px,
+            bias_authorized=False,
+            quorum_lateral=False,
+            quorum_consensus=True,
+            qwen=qwen,
+        ))
+        mech = _result
+    elif settings.USE_NEW_EVALUATE_SIGNAL:
         # Camino nuevo: caso de uso aislado en src/application/ (paridad byte a byte con legacy)
         from decimal import Decimal
         from src.application.use_cases.evaluate_signal import EvaluateSignal, EvaluateSignalInput
