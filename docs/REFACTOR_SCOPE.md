@@ -18,6 +18,8 @@ legacy en CMD4 = fuga, PARA y reporta.
 | 5 | ExecuteTrade | `fastapi/config.py` | Añade `USE_NEW_EXECUTE_TRADE: bool = False` (revertido: no se mergeó; no hay punto de inyección en legacy) |
 | 5-bis | RecordTradeFill | `fastapi/config.py` | Añade `USE_NEW_RECORD_TRADE_FILL: bool = False` |
 | 5-bis | RecordTradeFill | `fastapi/routers/ai.py` | Punto de inyección del flag en `trade_filled_webhook()` |
+| 6 | GenerateStrategyAdvice | `fastapi/config.py` | Añade `USE_NEW_GENERATE_STRATEGY_ADVICE: bool = False` |
+| 6 | GenerateStrategyAdvice | `fastapi/routers/ai.py` | Punto de inyección del flag en `predict_direction()` (antes de `USE_NEW_EVALUATE_SIGNAL`) |
 
 ## Regla
 
