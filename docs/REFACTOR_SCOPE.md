@@ -198,4 +198,23 @@ Esto significa:
 Esta migración es 7c-2-bis-bis o parte de Sesión 8. No bloquea 7c-2 si
 producción ya usa PostgreSQL con pool compartido.
 
+### Nota 5: Sesión 8d-1 — adaptadores de I/O para RunAutoRetrain
+
+Se implementaron 3 adaptadores de I/O en `src/infrastructure/adapters/`:
+
+| Adaptador | Puerto | Backend | Test |
+|-----------|--------|---------|------|
+| `RealModelRepository` | `ModelRepository` | filesystem (pickle + manifest vía model_registry) | tmp_path, sin tocar repo real |
+| `RealNotifier` | `Notifier` | `services.alerting.send_alert` (capture=True en tests, no red) | captura en lista |
+| `RealDataFetcher` | `DataFetcher` | asyncpg (trade_outcomes) + httpx → MT5 MCP | monkeypatch de get_pool y AsyncClient |
+
+**`RealModelTrainer` NO implementado todavía** (8d-2: PPO real, riesgo alto, lento, no determinista).
+
+**`main.py` NO tocado todavía** (8d-3: inyección del flag `USE_NEW_RUN_AUTO_RETRAIN` en `_retrain_schedule_loop`).
+
+Deuda: los tests de `RealDataFetcher` usan monkeypatch de `db.connection.get_pool` y `httpx.AsyncClient`. Si se necesita testear contra una BD real, documentar como deuda y skip.
+
+Pendiente para 8d-2: `RealModelTrainer` (stable_baselines3 PPO + gymnasium).
+Pendiente para 8d-3: inyección del flag en `main.py`, test de integración flag=true/false, dry-run en staging, circuit breaker en el scheduler.
+
 
