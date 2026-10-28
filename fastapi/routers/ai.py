@@ -2140,44 +2140,6 @@ class TradeFilledRequest(BaseModel):
         return value
 
 
-class EADecisionRequest(BaseModel):
-    cycle_id: str
-    symbol: str
-    received_decision: str
-    action: str
-    order_ticket: str | None = None
-    volume: float | None = None
-    sl: float | None = None
-    tp: float | None = None
-    reason: str | None = None
-    latency_ms: float | None = None
-    raw_response: str | None = None
-    mt5_time: float | None = None  # epoch desde MT5; si falta, se usa time.time() como fallback
-
-
-@router.post("/ea/decision")
-async def ea_decision_webhook(req: EADecisionRequest, _: None = Depends(verify_token)):
-    mt5_ts = req.mt5_time if req.mt5_time is not None else time.time()
-    await log_to_audit(
-        "ea_decision",
-        {
-            "symbol": req.symbol,
-            "received_decision": req.received_decision,
-            "action": req.action,
-            "order_ticket": req.order_ticket,
-            "volume": req.volume,
-            "sl": req.sl,
-            "tp": req.tp,
-            "reason": req.reason,
-            "latency_ms": req.latency_ms,
-            "raw_response": req.raw_response,
-            "mt5_time": mt5_ts,
-        },
-        cycle_id=req.cycle_id,
-    )
-    return {"status": "recorded"}
-
-
 async def _mark_trade_order_filled(
     req: TradeFilledRequest,
     direction: str,
