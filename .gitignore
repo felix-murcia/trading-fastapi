@@ -59,3 +59,10 @@ backups/
 fastapi/ops/daily_ledger.jsonl
 
 .coverage
+
+# Bases de datos SQLite locales (no versionar)
+*.db
+*.sqlite
+*.sqlite3
+trade_repo.db
+audit_log.db

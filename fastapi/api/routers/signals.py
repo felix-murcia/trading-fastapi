@@ -15,9 +15,11 @@ from pydantic_core import PydanticCustomError
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
+from api.dependencies import get_audit_logger, get_trade_repository
 from config import settings
 from core.container import build_registry_from_settings
 from core.pair import PairRegistry, default_model_path
+from src.domain.ports import AuditLogger, TradeRepository
 from db.connection import get_pool
 from ml.trading_env_v2 import (
     CHURN_BARS,
@@ -852,7 +854,12 @@ class PredictResponse(BaseModel):
 
 
 @router.post("/predict", response_model=PredictResponse)
-async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)):
+async def predict_direction(
+    req: PredictRequest,
+    _: None = Depends(verify_token),
+    repo: TradeRepository = Depends(get_trade_repository),
+    audit: AuditLogger = Depends(get_audit_logger),
+):
     t_start = time.time()
     mt5_ts = req.mt5_time if req.mt5_time is not None else t_start
     cycle_id = f"{req.symbol}_{int(mt5_ts * 1000)}"
@@ -1522,26 +1529,23 @@ async def predict_direction(req: PredictRequest, _: None = Depends(verify_token)
     if settings.USE_NEW_GENERATE_STRATEGY_ADVICE:
         # Camino nuevo: caso de uso aislado en src/application/ (paridad byte a byte con legacy)
         # Genera el consejo de estrategia componiendo EvaluateSignal + LLMClient + bias_veto + quórum.
-        from decimal import Decimal
         from src.application.use_cases.generate_strategy_advice import (
             GenerateStrategyAdvice, GenerateStrategyAdviceInput,
         )
         from src.domain.value_objects.thresholds import TradingThresholds
-        from src.infrastructure.adapters.real_audit_logger import RealAuditLogger
         from src.infrastructure.adapters.real_clock import RealClock
         from src.infrastructure.adapters.real_evaluate_signal import RealEvaluateSignal
         from src.infrastructure.adapters.real_llm_client import RealLLMClient
         from src.infrastructure.adapters.real_thresholds import RealThresholds
-        from src.infrastructure.adapters.real_trade_repository import RealTradeRepository
         uc = GenerateStrategyAdvice(
             llm=RealLLMClient(query_fn=_qwen_query_sync),
             evaluate=RealEvaluateSignal(
-                repo=RealTradeRepository(),
+                repo=repo,
                 clock=RealClock(),
                 thresholds=RealThresholds.from_settings(settings),
             ),
             clock=RealClock(),
-            audit=RealAuditLogger(),
+            audit=audit,
             thresholds=RealThresholds.from_settings(settings),
         )
         _result = uc.execute(GenerateStrategyAdviceInput(

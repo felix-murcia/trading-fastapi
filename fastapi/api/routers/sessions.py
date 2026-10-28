@@ -13,9 +13,11 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from services.structured_logging import log_to_audit
 
+from api.dependencies import get_audit_logger
 from config import settings
 from ._shared import _TRAINING_SYMBOL
 from routers.deps import verify_token
+from src.domain.ports import AuditLogger
 
 router = APIRouter()
 
@@ -36,16 +38,19 @@ class EADecisionRequest(BaseModel):
 
 
 @router.post("/ea/decision")
-async def ea_decision_webhook(req: EADecisionRequest, _: None = Depends(verify_token)):
+async def ea_decision_webhook(
+    req: EADecisionRequest,
+    _: None = Depends(verify_token),
+    audit: AuditLogger = Depends(get_audit_logger),
+):
     if settings.USE_NEW_RECORD_EA_DECISION:
         # Camino nuevo: caso de uso aislado en src/application/ (paridad byte a byte con legacy)
         from src.application.use_cases.record_ea_decision import (
             RecordEADecision, RecordEADecisionInput,
         )
-        from src.infrastructure.adapters.real_audit_logger import RealAuditLogger
         from src.infrastructure.adapters.real_clock import RealClock
         uc = RecordEADecision(
-            audit=RealAuditLogger(), clock=RealClock(),
+            audit=audit, clock=RealClock(),
         )
         _result = uc.execute(RecordEADecisionInput(
             cycle_id=req.cycle_id,

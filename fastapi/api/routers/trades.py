@@ -15,6 +15,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, field_validator
 from pydantic_core import PydanticCustomError
+from api.dependencies import get_audit_logger, get_trade_repository
 from services.auto_retrain import (
     TradeOutcomeLinkConflict,
     _parse_timestamp,
@@ -28,6 +29,7 @@ from src.application.use_cases.record_trade_fill import (
     RecordTradeFill,
     RecordTradeFillInput,
 )
+from src.domain.ports import AuditLogger, TradeRepository
 from src.domain.value_objects.thresholds import TradingThresholds
 
 from config import settings
@@ -168,7 +170,12 @@ async def _record_and_mark_trade_filled(
 
 
 @router.post("/trade/filled")
-async def trade_filled_webhook(req: TradeFilledRequest, _: None = Depends(verify_token)):
+async def trade_filled_webhook(
+    req: TradeFilledRequest,
+    _: None = Depends(verify_token),
+    repo: TradeRepository = Depends(get_trade_repository),
+    audit: AuditLogger = Depends(get_audit_logger),
+):
     """
     Webhook que el MT5 EA llama cuando una orden se cierra.
     Registra el trade y dispara auto-retrain si corresponde.
@@ -182,17 +189,14 @@ async def trade_filled_webhook(req: TradeFilledRequest, _: None = Depends(verify
     """
     if settings.USE_NEW_RECORD_TRADE_FILL:
         # Camino nuevo: caso de uso aislado en src/application/ (paridad byte a byte con legacy)
-        from decimal import Decimal
         from src.application.use_cases.record_trade_fill import RecordTradeFill, RecordTradeFillInput
         from src.domain.value_objects.thresholds import TradingThresholds
-        from src.infrastructure.adapters.real_audit_logger import RealAuditLogger
         from src.infrastructure.adapters.real_clock import RealClock
         from src.infrastructure.adapters.real_thresholds import RealThresholds
-        from src.infrastructure.adapters.real_trade_repository import RealTradeRepository
         uc = RecordTradeFill(
-            repo=RealTradeRepository(),
+            repo=repo,
             clock=RealClock(),
-            audit=RealAuditLogger(),
+            audit=audit,
             thresholds=RealThresholds.from_settings(settings),
         )
         _result = uc.execute(RecordTradeFillInput(
