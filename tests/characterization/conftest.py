@@ -2,6 +2,11 @@
 
 import os
 import sys
+from unittest.mock import MagicMock
+
+# Mock de pandas ANTES de insertar fastapi en el path, para evitar segfault
+# de pyarrow al importar módulos que lo usan (veto_chain, trade_setup, etc.)
+sys.modules['pandas'] = MagicMock()
 
 # Permitir importar desde fastapi/ (core.rules, services.position_sizing, etc.)
 FASTAPI_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "fastapi")
