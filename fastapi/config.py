@@ -90,6 +90,11 @@ class Settings(BaseSettings):
     # sin tocar código. Validación: ≥5 ejecuciones consecutivas sin error,
     # ≥7 días, audit log "run_auto_retrain_new", rollback inmediato si falla.
     USE_NEW_RUN_AUTO_RETRAIN: bool = False
+    # Sesión 9: flags de endpoints de retrain (riesgo bajo — operación,
+    # no negocio con dinero real). Default false: reversible en caliente.
+    USE_NEW_FORCE_RETRAIN: bool = False
+    USE_NEW_PROMOTE_CANDIDATE: bool = False
+    USE_NEW_APPROVE_RETRAIN: bool = False
     news_filter_enabled: bool = True
     news_blackout_minutes: int = 15
 

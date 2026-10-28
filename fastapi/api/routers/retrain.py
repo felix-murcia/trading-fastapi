@@ -23,6 +23,7 @@ from services.structured_logging import log_to_audit
 
 from ._shared import _TRAINING_SYMBOL, _sole_enabled_symbol
 from routers.deps import verify_token
+from config import settings
 
 router = APIRouter()
 
@@ -39,6 +40,24 @@ async def force_retrain_endpoint(
     por defecto TRAINING_SYMBOL — P3-3: pipeline por par).
     Útil para when market regime cambia (e.g., central bank intervention).
     """
+    if settings.USE_NEW_FORCE_RETRAIN:
+        from src.application.use_cases.force_retrain import (
+            ForceRetrain,
+            ForceRetrainRequest,
+        )
+        from src.infrastructure.adapters.real_audit_logger import RealAuditLogger
+        from src.infrastructure.adapters.real_model_trainer import RealModelTrainer
+        from src.infrastructure.adapters.real_trade_repository import RealTradeRepository
+
+        uc = ForceRetrain(
+            trade_repo=RealTradeRepository(),
+            model_trainer=RealModelTrainer(),
+            audit=RealAuditLogger(),
+        )
+        res = uc.execute(ForceRetrainRequest(symbol=symbol))
+        return {"status": res.status, "filled_count": res.filled_count, "in_progress": res.in_progress}
+
+    # --- legacy byte-idéntico ---
     sym = symbol or _TRAINING_SYMBOL
     state = _get_retrain_state(sym)
     result = await _force_retrain(symbol=symbol)
@@ -73,6 +92,29 @@ async def promote_candidate_endpoint(
     promueve si la regla lo concede. Devuelve el detalle de cada criterio
     para que la decisión sea auditable.
     """
+    if settings.USE_NEW_PROMOTE_CANDIDATE:
+        from src.application.use_cases.promote_candidate import (
+            PromoteCandidate,
+            PromoteCandidateRequest,
+        )
+        from src.infrastructure.adapters.real_audit_logger import RealAuditLogger
+        from src.infrastructure.adapters.real_model_repository import RealModelRepository
+
+        uc = PromoteCandidate(
+            model_repo=RealModelRepository(),
+            audit=RealAuditLogger(),
+        )
+        res = uc.execute(
+            PromoteCandidateRequest(symbol=symbol or _TRAINING_SYMBOL, exp_id=exp_id)
+        )
+        return {
+            "promoted": res.promoted,
+            "exp_id": res.exp_id,
+            "reason": res.reason,
+            "model_sha256": res.model_sha256,
+        }
+
+    # --- legacy byte-idéntico ---
     from services.candidate_promotion import CandidatePromotionError, promote_measured_candidate
 
     sym = (symbol or _TRAINING_SYMBOL).upper()
@@ -107,6 +149,39 @@ async def approve_retrain_endpoint(
 
     No salta el gate de promoción: ese se aplica dentro de _do_retrain.
     """
+    if settings.USE_NEW_APPROVE_RETRAIN:
+        from src.application.use_cases.approve_retrain import (
+            ApproveRetrain,
+            ApproveRetrainRequest,
+        )
+        from src.infrastructure.adapters.real_audit_logger import RealAuditLogger
+        from src.infrastructure.adapters.real_model_trainer import RealModelTrainer
+        from src.infrastructure.adapters.real_trade_repository import RealTradeRepository
+
+        # ConfigProvider inline que lee de settings (no hay adaptador real
+        # dedicado; settings expone los mismos valores como atributos).
+        class _SettingsConfigProvider:
+            def __init__(self, s):
+                self._s = s
+
+            def get(self, key, default=None):
+                return getattr(self._s, key, default)
+
+        uc = ApproveRetrain(
+            trade_repo=RealTradeRepository(),
+            model_trainer=RealModelTrainer(),
+            audit=RealAuditLogger(),
+            config=_SettingsConfigProvider(settings),
+        )
+        res = uc.execute(ApproveRetrainRequest(symbol=symbol))
+        return {
+            "status": res.status,
+            "filled_count": res.filled_count,
+            "scheduled_due": res.scheduled_due,
+            "min_trades_for_retrain": res.min_trades_for_retrain,
+        }
+
+    # --- legacy byte-idéntico ---
     result = await _approve_retrain(symbol=symbol)
     await log_to_audit(
         "retrain_approved",

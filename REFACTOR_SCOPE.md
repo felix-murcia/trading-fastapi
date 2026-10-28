@@ -1,28 +1,26 @@
-# REFACTOR_SCOPE.md — Alcance pendiente post 8d-3
+# REFACTOR_SCOPE.md — Alcance post Sesión 9
 
-## Estado actual (8d-3 cerrado)
+## Estado actual (Sesión 9 cerrado)
 
 - `auto_retrain` completamente migrado: caso de uso (8c) + adaptadores reales (8d-1/8d-2) + inyección del flag en `main.py` (8d-3) + circuit breaker persistente en `retrain_state.consecutive_failures` + 4 tests de integración + dry-run en staging documentado.
+- `retrain.py` endpoints migrados: `ForceRetrain`, `PromoteCandidate`, `ApproveRetrain` con feature flags (default false). `retrain_status` (GET, solo lectura) queda legacy — over-engineering migrarlo.
 - `auto_retrain.py` intacto (0 líneas tocadas): ruta legacy byte-idéntica, reversibilidad preservada.
-- 322 tests passed, 93.20% cobertura. Tag `v15.3-sesion8d-3` creado en `master`.
+- 347 tests passed, 93.70% cobertura. Tag `v15.3-sesion9` creado.
 - `src/application/` aislado (sin imports de fastapi/sqlalchemy/httpx/legacy/routers/ml/pandas/gymnasium/qwen/openai/anthropic).
 - `src/domain/` aislado (sin imports de infraestructura; valores inyectados, no lee `os.environ`).
 
 ---
 
-## Pendiente 1 — Sesión 9: migrar endpoints de `retrain.py`
+## Completado — Sesión 9: endpoints de `retrain.py` migrados
 
-**Riesgo:** bajo. Son endpoints de operación HTTP (`force_retrain`, `approve_retrain`, `check_scheduled_retrain`), no de negocio con dinero real. No bloquean 7c-2.
-
-**Qué falta:** `retrain.py` sigue llamando a `auto_retrain.py` directamente. Migrar esos endpoints a casos de uso (`ForceRetrain`, `ApproveRetrain`, `CheckScheduledRetrain`) con feature flags, como en sesiones 2-6.
-
-**Reglas de oro de Sesión 9:**
-- `retrain.py` es el único sitio donde se inyecta el flag para sus endpoints.
-- `auto_retrain.py` NO se toca (ruta legacy byte-idéntica en el `else`).
-- Tests con fakes, sin PPO real, sin MT5 real, <5s.
-- `src/domain/` y `src/application/` NO se tocan.
-
-**Registro:** "Sesión 9: migrar endpoints de retrain.py a casos de uso. Riesgo bajo. No bloquea 7c-2."
+- 3 casos de uso: `ForceRetrain`, `PromoteCandidate`, `ApproveRetrain` en `src/application/use_cases/`
+- 3 flags en `config.py`: `USE_NEW_FORCE_RETRAIN`, `USE_NEW_PROMOTE_CANDIDATE`, `USE_NEW_APPROVE_RETRAIN` (default false)
+- 3 inyecciones en `retrain.py`: dentro de `if settings.USE_NEW_<X>:`, ruta legacy byte-idéntica en `else`
+- 12 tests de caracterización (`tests/characterization/test_retrain_endpoints.py`)
+- 13 tests de unidad (`tests/unit/application/test_*.py`)
+- `retrain_status` NO tocado (GET, solo lectura)
+- `auto_retrain.py` NO tocado (0 líneas)
+- flags de `trades.py`/`signals.py` NO tocados (7c-2 espera producción)
 
 ---
 
