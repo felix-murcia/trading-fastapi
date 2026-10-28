@@ -1,0 +1,171 @@
+...........................FF........................................... [  4%]
+........................................................................ [  9%]
+........................................................................ [ 14%]
+..................................F.......F............................. [ 19%]
+........................................................................ [ 24%]
+..F..............F...................................................... [ 29%]
+........................................................................ [ 34%]
+........................................................................ [ 39%]
+........................................................................ [ 44%]
+........................................................................ [ 49%]
+........................................................................ [ 54%]
+........................................................................ [ 59%]
+........................................................................ [ 64%]
+........................................................................ [ 69%]
+........................................................................ [ 74%]
+........................xx.............................................. [ 79%]
+........................................................................ [ 84%]
+........................................................................ [ 89%]
+........................................................................ [ 94%]
+........................................................................ [ 99%]
+...........                                                              [100%]
+=================================== FAILURES ===================================
+__________________________ test_complejidad_no_crece ___________________________
+
+    def test_complejidad_no_crece():
+        """Ninguna función nueva de 80+ líneas y ninguna existente se alarga."""
+        observadas: dict[str, int] = {}
+        for p in _runtime_files():
+            rel = _rel(p)
+            tree = ast.parse(p.read_text(encoding="utf-8", errors="replace"))
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    lineas = node.end_lineno - node.lineno + 1
+                    if lineas >= 80:
+                        observadas[f"{rel}::{node.name}"] = lineas
+        nuevas = {k: v for k, v in observadas.items() if k not in BIG_FUNCS}
+>       assert not nuevas, f"funciones NUEVAS de 80+ líneas (divídelas): {nuevas}"
+E       AssertionError: funciones NUEVAS de 80+ líneas (divídelas): {'services/order_manager.py::mark_order_filled': 85}
+E       assert not {'services/order_manager.py::mark_order_filled': 85}
+
+tests/test_architecture_rules.py:166: AssertionError
+________________________ test_except_exception_no_crece ________________________
+
+    def test_except_exception_no_crece():
+        """AGENTS.md: 'No silent failures' — la deuda de capturas genéricas no crece."""
+        observadas: dict[str, int] = {}
+        for p in _runtime_files():
+            rel = _rel(p)
+            cuenta = p.read_text(encoding="utf-8", errors="replace").count("except Exception")
+            if cuenta:
+                observadas[rel] = cuenta
+        nuevos = {k: v for k, v in observadas.items() if k not in EXCEPT_EXCEPTION}
+>       assert not nuevos, f"ficheros NUEVOS con `except Exception`: {nuevos}"
+E       AssertionError: ficheros NUEVOS con `except Exception`: {'routers/ai.py': 1}
+E       assert not {'routers/ai.py': 1}
+
+tests/test_architecture_rules.py:182: AssertionError
+________________ TestCloseOutbox.test_ea_version_bumped_to_14_3 ________________
+
+self = <tests.test_ea_close_outbox.TestCloseOutbox object at 0x7f5cf00b0140>
+
+    def test_ea_version_bumped_to_14_3(self):
+        src = _ea_source()
+        # v13.5: Safe-4 (Félix 2026-10-15) — lock +SL_LockSafetyNetEur
+        # (4€) antes de 1R; breakeven deja de moverse a la entrada tal cual.
+        # v13.6: se elimina un ``` suelto (artefacto markdown) que rompía la
+        # compilación MQL5 — A2 (cierre de ficheros pendientes, 2026-10-17).
+        # v13.7: G2-2 — input PollOffsetSeconds (escalonado de sondeo por
+        # instancia; EURUSD :00/:05 vs GBPUSD :02/:07).
+        # v13.9: rename genérico AI_Quant_Terminal.mq5 (el mismo EA sirve
+        # todos los pares — Symbol() en todo; orden Félix 2026-10-18).
+        # v14.0: guard de CLOSE 0,03 → 0,01 + diagnóstico de magic
+        # (posición USDCHF 58986641010 con magic 90002, 2026-10-21).
+        # v14.2: el order_db_id del gate queda en el comentario de apertura y
+        # se propaga al cierre para enlazar el outcome con la orden exacta.
+        # v14.3: conflictos permanentes HTTP 409 se apartan del outbox activo.
+>       assert re.search(r'#property\s+version\s+"14\.3"', src), "Falta bump a 14.3"
+E       AssertionError: Falta bump a 14.3
+E       assert None
+E        +  where None = <function search at 0x7f5d3183d580>('#property\\s+version\\s+"14\\.3"', '/*\nAI_Quant_Terminal_v3.mq5 (Refactorizado)\n========================================\nTerminal de Ejecución y Telem...    g_atrHandle = INVALID_HANDLE;\n     }\n  }\n//+------------------------------------------------------------------+')
+E        +    where <function search at 0x7f5d3183d580> = re.search
+
+tests/test_ea_close_outbox.py:87: AssertionError
+___________ TestVersionBump.test_version_14_3_in_property_and_define ___________
+
+self = <tests.test_ea_poll_offset.TestVersionBump object at 0x7f5cf008f350>
+
+    def test_version_14_3_in_property_and_define(self):
+        """Bump obligatorio en cada cambio MQL5."""
+        src = _ea_source()
+>       assert re.search(r'#property\s+version\s+"14\.3"', src)
+E       assert None
+E        +  where None = <function search at 0x7f5d3183d580>('#property\\s+version\\s+"14\\.3"', '/*\nAI_Quant_Terminal_v3.mq5 (Refactorizado)\n========================================\nTerminal de Ejecución y Telem...    g_atrHandle = INVALID_HANDLE;\n     }\n  }\n//+------------------------------------------------------------------+')
+E        +    where <function search at 0x7f5d3183d580> = re.search
+
+tests/test_ea_poll_offset.py:83: AssertionError
+______________ TestEaPositionCounting.test_ea_version_was_bumped _______________
+
+self = <tests.test_g3_one_position_per_pair.TestEaPositionCounting object at 0x7f5d11415580>
+
+    def test_ea_version_was_bumped(self):
+        src = MQL5.read_text(encoding="utf-8")
+>       assert '#property version   "14.3"' in src
+E       assert '#property version   "14.3"' in '/*\nAI_Quant_Terminal_v3.mq5 (Refactorizado)\n========================================\nTerminal de Ejecución y Telem...    g_atrHandle = INVALID_HANDLE;\n     }\n  }\n//+------------------------------------------------------------------+'
+
+tests/test_g3_one_position_per_pair.py:103: AssertionError
+__________________ TestSwapIsReported.test_ea_sends_the_swap ___________________
+
+self = <tests.test_g3_swap_and_geometry_audit.TestSwapIsReported object at 0x7f5d11433890>
+
+    def test_ea_sends_the_swap(self):
+        src = EA.read_text(encoding="utf-8")
+        assert "DEAL_SWAP" in src, "el EA debe leer el swap del deal"
+        assert '\\"swap\\"' in src, "el webhook debe enviar el swap"
+>       assert re.search(r'#property\s+version\s+"14\.3"', src), "bump a 14.3"
+E       AssertionError: bump a 14.3
+E       assert None
+E        +  where None = <function search at 0x7f5d3183d580>('#property\\s+version\\s+"14\\.3"', '/*\nAI_Quant_Terminal_v3.mq5 (Refactorizado)\n========================================\nTerminal de Ejecución y Telem...    g_atrHandle = INVALID_HANDLE;\n     }\n  }\n//+------------------------------------------------------------------+')
+E        +    where <function search at 0x7f5d3183d580> = re.search
+
+tests/test_g3_swap_and_geometry_audit.py:34: AssertionError
+=============================== warnings summary ===============================
+../.venv312/lib/python3.12/site-packages/starlette/testclient.py:40
+  /home/felix/Public/n8n/.venv312/lib/python3.12/site-packages/starlette/testclient.py:40: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
+    _PortalFactoryType = typing.Callable[[], typing.ContextManager[anyio.abc.BlockingPortal]]
+
+../.venv312/lib/python3.12/site-packages/pydantic/_internal/_config.py:295: 1 warning
+tests/test_config.py: 9 warnings
+  /home/felix/Public/n8n/.venv312/lib/python3.12/site-packages/pydantic/_internal/_config.py:295: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.10/migration/
+    warnings.warn(DEPRECATION_MESSAGE, DeprecationWarning)
+
+../.venv312/lib/python3.12/site-packages/pydantic/_internal/_fields.py:152: 1 warning
+tests/test_config.py: 9 warnings
+  /home/felix/Public/n8n/.venv312/lib/python3.12/site-packages/pydantic/_internal/_fields.py:152: UserWarning: Field "model_backup_enabled" in Settings has conflict with protected namespace "model_".
+  
+  You may be able to resolve this warning by setting `model_config['protected_namespaces'] = ('settings_',)`.
+    warnings.warn(
+
+../.venv312/lib/python3.12/site-packages/pydantic/_internal/_fields.py:152: 1 warning
+tests/test_config.py: 9 warnings
+  /home/felix/Public/n8n/.venv312/lib/python3.12/site-packages/pydantic/_internal/_fields.py:152: UserWarning: Field "model_backup_interval_hours" in Settings has conflict with protected namespace "model_".
+  
+  You may be able to resolve this warning by setting `model_config['protected_namespaces'] = ('settings_',)`.
+    warnings.warn(
+
+routers/ai.py:546
+  /home/felix/Public/n8n/fastapi/routers/ai.py:546: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @router.on_event("startup")
+
+tests/test_p21_unification.py::TestRetrainContractChange::test_load_or_create_model_fresh_on_legacy_obs_contract
+tests/test_p21_unification.py::TestRetrainContractChange::test_load_or_create_model_fresh_on_legacy_action_contract
+tests/test_p21_unification.py::TestRetrainContractChange::test_load_or_create_model_continues_when_contract_matches
+  /home/felix/Public/n8n/.venv312/lib/python3.12/site-packages/stable_baselines3/ppo/ppo.py:155: UserWarning: You have specified a mini-batch size of 64, but because the `RolloutBuffer` is of size `n_steps * n_envs = 8`, after every 0 untruncated mini-batches, there will be a truncated mini-batch of size 8
+  We recommend using a `batch_size` that is a factor of `n_steps * n_envs`.
+  Info: (n_steps=8 and n_envs=1)
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_architecture_rules.py::test_complejidad_no_crece - Assertio...
+FAILED tests/test_architecture_rules.py::test_except_exception_no_crece - Ass...
+FAILED tests/test_ea_close_outbox.py::TestCloseOutbox::test_ea_version_bumped_to_14_3
+FAILED tests/test_ea_poll_offset.py::TestVersionBump::test_version_14_3_in_property_and_define
+FAILED tests/test_g3_one_position_per_pair.py::TestEaPositionCounting::test_ea_version_was_bumped
+FAILED tests/test_g3_swap_and_geometry_audit.py::TestSwapIsReported::test_ea_sends_the_swap
+6 failed, 1443 passed, 2 xfailed, 35 warnings in 64.46s (0:01:04)

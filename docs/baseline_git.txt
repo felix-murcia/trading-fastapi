@@ -1,0 +1,20 @@
+a3cee7f chore: registro diario inmutable (22 líneas del ledger)
+612bdff registro diario inmutable: 339 línea(s) del ledger (append-only)
+f481cf0 fix: umbral pnl reducido a equity/5 (era equity/3)
+8543a47 fix: validar pnl contra equity/3 de la cuenta (no umbral fijo 50k)
+70cc1b9 fix: validar quote_time y pnl para prevenir OverflowError y datos corruptos
+a3d6694 docs: E-07.5 — README actualizado con evidencia de mejora del dashboard (E-07)
+b2f919a feat: E-07.4 — Frontend: rediseño de gráficos Chart.js más sutiles y funcionales
+5038f27 docs: BACKLOG — E-07.3 completado, E-07.4 pendiente
+091458d feat: E-07.3 — Frontend: controles de filtro para dashboard de rendimiento
+91db899 docs: BACKLOG — E-07.2 completado, E-07.3 pendiente
+c213e07 feat: E-07.2 — /v1/smc/analytics con filtros de rango de fechas y granularidad
+0c3694e docs: E-07.1 diseño dashboard completado
+b76fb4f docs: BACKLOG — añadir épica E-07 mejora del dashboard de rendimiento (pestaña Grafana)
+4f4b980 feat: añadir script monitor_p32_neff.py para seguimiento manual de P3.2
+8c4e341 docs: BACKLOG — estado P0.2c Fase 3b, EA v15.2 y tareas pendientes actualizadas
+c54b90c fix: EA v15.2 — fail-closed en /api/v1/ai/trade/filled sin deal_ticket válido
+89abca3 fix: P0.2c Fase 3b — ejecutar vinculación vía deals de MT5 y backfill exacto
+4100722 registro diario inmutable: 283 línea(s) del ledger (append-only)
+e4acc82 fix: EA v15.1 — eliminar IP hardcodeada de FastAPI_URL (sin valor default)
+e64d6fa docs: limpiar archivo borrado lineage-p13-20261026-160041Z.json
