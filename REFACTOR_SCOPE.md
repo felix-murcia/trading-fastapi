@@ -38,6 +38,37 @@
 
 ---
 
+## Pendiente 2a — Dry-run detectó 3 bugs críticos (fixeados y commiteados)
+
+El dry-run de `auto_retrain` (3 ejecuciones manuales con `USE_NEW_RUN_AUTO_RETRAIN=true`)
+pasó 3/3 con `status=rejected`, pero detectó 3 bugs que habrían roto producción
+en la primera hora:
+
+| Bug | Síntoma en dry-run | Impacto en producción | Fix |
+|-----|-------------------|----------------------|-----|
+| 1 | `load_state()` devolvía `None` | Circuit breaker nunca se disparaba (`consecutive_failures` siempre 0) | `RealTradeRepository.load_state/save_state` leen/escriben `retrain_state` de PostgreSQL vía asyncpg |
+| 2 | `fetch_trade_outcomes` era `async def` | `TypeError: 'coroutine' object is not iterable` al iterar outcomes | `RealDataFetcher.fetch_trade_outcomes`/`fetch_candles` son sincronos y devuelven `TradeOutcome` |
+| 3 | Rama `rejected` no reseteaba `retrain_in_progress` | Job bloqueado para siempre tras el primer `rejected`; `rejected` contaba como fallo del circuit breaker | `_record_success()` + `retrain_in_progress=False` en ambas ramas `rejected` |
+
+**Commits (rama `feature/sesion9-retrain-endpoints`, tag `v15.3-sesion9-dryrun-fixes`):**
+- `68afe2a` fix(infrastructure): RealTradeRepository.load_state/save_state read/write retrain_state
+- `d1a5ded` fix(infrastructure): RealDataFetcher sincrono y devuelve TradeOutcome
+- `ef7162c` fix(application): RunAutoRetrain rejected resetea retrain_in_progress y registra success
+
+**Tests de regresión añadidos:**
+- `tests/unit/infrastructure/test_real_trade_repository.py`: verifica persistencia de `consecutive_failures` y circuit breaker con 2 fallos reales.
+- `tests/unit/infrastructure/test_real_data_fetcher.py`: verifica `list[TradeOutcome]` sincrono (no coroutine).
+- `tests/unit/application/test_run_auto_retrain.py`: verifica `rejected` resetea `retrain_in_progress=False` y no incrementa `consecutive_failures`.
+
+**Verificación:** 354 tests passed, 93.63% cobertura, `src/application/` CLEAN (sin imports prohibidos), `git status` vacío.
+
+**¿Cuándo se detectaron los bugs?** Durante el dry-run (ejecución 1 → bug → fix → ejecución 2 → bug → fix → ejecución 3 → OK). El dry-run funcionó como debía: detectó los bugs, se fixearon y se re-ejecutó. Sin dry-run, los 3 bugs habrían roto producción en la primera hora con `USE_NEW_RUN_AUTO_RETRAIN=true`.
+
+**.env de producción NO tocado.** El operador lo hará después de verificar el tag.
+
+---
+
+
 ## Pendiente 3 — 7c-2: graduación de flags de `trades.py`/`signals.py`
 
 **Espera validación en producción. No se puede acelerar.**
