@@ -9,19 +9,25 @@ Implementa TradeRepository por typing estructural:
   - find_by_id(id) -> Trade | None
 """
 
+import asyncio
 import json
 import sqlite3
 from datetime import datetime
 from decimal import Decimal
 
+import asyncpg
+
+from config import settings
 from src.domain.entities import Trade
 from src.domain.ports import TradeRepository
+from src.domain.rules.retrain_state import RetrainState
 
 
 class RealTradeRepository(TradeRepository):
     def __init__(self, db_path: str = "trade_repo.db"):
         self._db_path = db_path
         self._conn = sqlite3.connect(db_path)
+        self._pool: asyncpg.Pool | None = None
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS trade_repo_store (
@@ -95,3 +101,84 @@ class RealTradeRepository(TradeRepository):
             mt5_order_id=row[10],
             order_db_id=row[11],
         )
+
+    # ── Persistencia de retrain_state en PostgreSQL ─────────────────────────
+
+    def _run_async(self, coro):
+        """Ejecuta una corrutina asyncpg dentro o fuera de un event loop.
+
+        Usa un loop persistente para que el pool asyncpg no se cierre entre
+        llamadas. Dentro de FastAPI (loop corriendo) usa un hilo aparte.
+        """
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(asyncio.run, coro)
+                    return future.result()
+        except RuntimeError:
+            pass
+        if not hasattr(self, "_loop") or self._loop.is_closed():
+            self._loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._loop)
+        return self._loop.run_until_complete(coro)
+
+    async def _get_pool(self) -> asyncpg.Pool:
+        if self._pool is None:
+            self._pool = await asyncpg.create_pool(
+                settings.database_url, min_size=1, max_size=5
+            )
+        return self._pool
+
+    async def _load_state_async(self, symbol: str) -> RetrainState | None:
+        pool = await self._get_pool()
+        rows = await pool.fetch(
+            "SELECT key, value FROM retrain_state WHERE key LIKE $1",
+            f"retrain_state.{symbol}.%",
+        )
+        if not rows:
+            return None
+        data = {}
+        for row in rows:
+            key = row["key"]
+            field = key.rsplit(".", 1)[-1]
+            data[field] = json.loads(row["value"])
+        return RetrainState(
+            filled_count=int(data.get("filled_count", 0)),
+            last_retrain_time=float(data.get("last_retrain_time", 0.0)),
+            outcomes=tuple(data.get("outcomes", [])),
+            retrain_in_progress=bool(data.get("retrain_in_progress", False)),
+            scheduled_due=bool(data.get("scheduled_due", False)),
+            schedule_anchor=float(data.get("schedule_anchor", 0.0)),
+            consecutive_failures=int(data.get("consecutive_failures", 0)),
+        )
+
+    async def _save_state_async(self, symbol: str, state: RetrainState) -> None:
+        pool = await self._get_pool()
+        fields = {
+            "filled_count": state.filled_count,
+            "last_retrain_time": state.last_retrain_time,
+            "outcomes": list(state.outcomes),
+            "retrain_in_progress": state.retrain_in_progress,
+            "scheduled_due": state.scheduled_due,
+            "schedule_anchor": state.schedule_anchor,
+            "consecutive_failures": state.consecutive_failures,
+        }
+        for field, value in fields.items():
+            key = f"retrain_state.{symbol}.{field}"
+            await pool.execute(
+                """
+                INSERT INTO retrain_state (key, value, updated_at)
+                VALUES ($1, $2, NOW())
+                ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()
+                """,
+                key,
+                json.dumps(value),
+            )
+
+    def load_state(self, symbol: str) -> RetrainState | None:
+        return self._run_async(self._load_state_async(symbol))
+
+    def save_state(self, symbol: str, state: RetrainState) -> None:
+        self._run_async(self._save_state_async(symbol, state))
