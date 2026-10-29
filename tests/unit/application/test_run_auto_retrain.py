@@ -266,3 +266,57 @@ def test_run_auto_retrain_return_type_is_retrain_result():
     result = uc.execute(config, trigger="manual", symbol="EURUSD")
     assert isinstance(result, RetrainResult)
     assert result.status in ("promoted", "rejected", "failed", "skipped")
+
+
+# ── Bug 3 (dry-run auto_retrain) ──────────────────────────────────────────
+
+def test_run_auto_retrain_rejected_resets_in_progress(monkeypatch):
+    """Bug 3: tras rejected (walk_forward), retrain_in_progress=False.
+
+    Antes del fix, rejected dejaba retrain_in_progress=True y el siguiente
+    intento devolvía skipped (already_running), bloqueando el job para siempre.
+    """
+    uc, repo, audit, trainer, model_repo, fetcher, notifier = _build_uc(
+        promoted=False  # walk_forward falla → rejected
+    )
+    config = RetrainConfig(min_trades_for_retrain=1)
+    repo.save_state("EURUSD", RetrainState(filled_count=5))
+
+    result = uc.execute(config, trigger="manual", symbol="EURUSD")
+    assert result.status == "rejected"
+
+    # El state guardado debe tener retrain_in_progress=False
+    state = repo.load_state("EURUSD")
+    assert state is not None
+    assert state.retrain_in_progress is False
+
+    # Una segunda ejecución no da already_running
+    result2 = uc.execute(config, trigger="manual", symbol="EURUSD")
+    assert result2.status != "skipped" or result2.reason != "already_running"
+
+
+def test_run_auto_retrain_rejected_no_incrementa_consecutive_failures():
+    """Bug 3: rejected no cuenta como fallo del circuit breaker.
+
+    Antes del fix, rejected llamaba _record_failure(), así que 2 rejected
+    consecutivos disparaban el circuit breaker (flag=false) aunque rejected
+    es un resultado válido, no un fallo.
+    """
+    uc, repo, audit, trainer, model_repo, fetcher, notifier = _build_uc(
+        promoted=False
+    )
+    config = RetrainConfig(min_trades_for_retrain=1)
+    repo.save_state("EURUSD", RetrainState(filled_count=5))
+
+    # 3 rejected seguidos no deben disparar circuit breaker
+    for _ in range(3):
+        result = uc.execute(config, trigger="manual", symbol="EURUSD")
+        assert result.status == "rejected"
+
+    # consecutive_failures debe seguir en 0 (rejected no es fallo)
+    assert uc._consecutive_failures == 0
+
+    # El job no está bloqueado: una cuarta ejecución sigue ejecutándose
+    result4 = uc.execute(config, trigger="manual", symbol="EURUSD")
+    assert result4.status == "rejected"
+    assert result4.circuit_breaker is False

@@ -202,7 +202,8 @@ class RunAutoRetrain:
             )
 
             if not gate_decision.ok:
-                self._record_failure()
+                self._record_success()
+                state = replace(state, retrain_in_progress=False)
                 self._trade_repo.save_state(symbol, state)
                 self._audit.log("retrain_rejected", {
                     "symbol": symbol,
@@ -228,7 +229,8 @@ class RunAutoRetrain:
             alignment = alignment_gate(pairs)
 
             if not alignment.ok and not getattr(gate_decision, "drastic", False):
-                self._record_failure()
+                self._record_success()
+                state = replace(state, retrain_in_progress=False)
                 self._trade_repo.save_state(symbol, state)
                 self._audit.log("retrain_rejected", {
                     "symbol": symbol,
