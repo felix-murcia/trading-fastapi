@@ -92,6 +92,22 @@ en la primera hora:
 
 ---
 
+## Bug 5 (detectado en producción 2026-10-29): `approve_retrain` legacy no resetea `retrain_in_progress`
+
+**Síntoma:** tras ejecutar `POST /api/v1/ai/retrain/approve?symbol=EURUSD` con `USE_NEW_APPROVE_RETRAIN=false` (legacy), el campo `retrain_in_progress` permanece en `true`. El nuevo scheduler (`_retrain_schedule_run_once`) ve `retrain_in_progress=true` y devuelve `skipped(reason="already_running")` en cada ciclo horario, sin ejecutar `RunAutoRetrain`, sin escribir `run_auto_retrain_new` en el audit log.
+
+**Workaround aplicado (manual, no es solución):**
+```
+UPDATE retrain_state SET value = 'false' WHERE key = 'retrain_state.EURUSD.retrain_in_progress';
+```
+Desbloquea el scheduler para el siguiente ciclo. **Funciona una vez.** El siguiente `approve_retrain` legacy volverá a dejar `retrain_in_progress=true`.
+
+**Por qué no se puede fixear en legacy:** regla de "legacy byte-idéntico" — `services/auto_retrain.py` y `fastapi/api/routers/retrain.py` (camino legacy) no se tocan.
+
+**Fix real: Sesión 10.** Migrar `approve_retrain` a caso de uso `ApproveRetrain` con `USE_NEW_APPROVE_RETRAIN=true`. El caso de uso `ApproveRetrain` (Sesión 9) sí resetea `retrain_in_progress`. **No activar `USE_NEW_APPROVE_RETRAIN=true` ahora** — validar primero `RunAutoRetrain` con un solo flag activo.
+
+**Mientras tanto (runbook de operación):** cada `approve_retrain` legacy requiere reseteo manual documentado de `retrain_in_progress=false` en PostgreSQL antes de que el scheduler nuevo pueda ejecutar `RunAutoRetrain`.
+
 ## Corrección de reporte CMD6
 
 `grep -n "USE_NEW_RUN_AUTO_RETRAIN" fastapi/main.py fastapi/config.py` → **3 sitios** (no 2):
