@@ -50,15 +50,19 @@ class RealDataFetcher(DataFetcher):
         return self._loop.run_until_complete(coro)
 
     async def _pool_conn(self):
-        from db.connection import get_pool, init_pool
+        import asyncpg
+
+        from config import settings
 
         if self._pool is not None:
             return self._pool
-        try:
-            return get_pool()
-        except RuntimeError:
-            await init_pool()
-            return get_pool()
+        # Crear pool propio en el loop actual (thread del executor).
+        # No usar get_pool() del thread principal: el pool asyncpg no es
+        # thread-safe y fallaría con ConnectionDoesNotExistError.
+        self._pool = await asyncpg.create_pool(
+            settings.database_url, min_size=1, max_size=3
+        )
+        return self._pool
 
     async def _fetch_trade_outcomes_async(
         self, symbol: str, since: float | None = None

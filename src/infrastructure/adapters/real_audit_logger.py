@@ -10,6 +10,7 @@ Implementa AuditLogger por typing estructural: log(event: str, details: dict) ->
 
 import json
 import sqlite3
+import threading
 from datetime import datetime
 
 from src.domain.ports import AuditLogger
@@ -18,7 +19,11 @@ from src.domain.ports import AuditLogger
 class RealAuditLogger(AuditLogger):
     def __init__(self, db_path: str = "audit_log.db"):
         self._db_path = db_path
-        self._conn = sqlite3.connect(db_path)
+        # check_same_thread=False permite usar la conexión desde hilos
+        # distintos (ej. run_in_executor del scheduler). El lock serializa
+        # los accesos para evitar corrupción por writes concurrentes.
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._lock = threading.Lock()
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS audit_log_store (
@@ -35,12 +40,13 @@ class RealAuditLogger(AuditLogger):
     def log(self, event: str, details: dict) -> None:
         cycle_id = details.get("cycle_id", "")
         data = json.dumps(details, default=str)
-        self._conn.execute(
-            "INSERT INTO audit_log_store (cycle_id, event, data, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            (cycle_id, event, data, datetime.utcnow().isoformat()),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO audit_log_store (cycle_id, event, data, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (cycle_id, event, data, datetime.utcnow().isoformat()),
+            )
+            self._conn.commit()
 
     def close(self) -> None:
         self._conn.close()
