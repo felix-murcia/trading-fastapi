@@ -62,9 +62,21 @@ en la primera hora:
 
 **Verificación:** 354 tests passed, 93.63% cobertura, `src/application/` CLEAN (sin imports prohibidos), `git status` vacío.
 
-**¿Cuándo se detectaron los bugs?** Durante el dry-run (ejecución 1 → bug → fix → ejecución 2 → bug → fix → ejecución 3 → OK). El dry-run funcionó como debía: detectó los bugs, se fixearon y se re-ejecutó. Sin dry-run, los 3 bugs habrían roto producción en la primera hora con `USE_NEW_RUN_AUTO_RETRAIN=true`.
+**¿Cuándo se detectaron los bugs 1-3?** Durante el dry-run (ejecución 1 → bug → fix → ejecución 2 → bug → fix → ejecución 3 → OK). El dry-run funcionó como debía: detectó los bugs, se fixearon y se re-ejecutó. Sin dry-run, los 3 bugs habrían roto producción en la primera hora con `USE_NEW_RUN_AUTO_RETRAIN=true`.
 
-**.env de producción NO tocado.** El operador lo hará después de verificar el tag.
+## Bug 4 (detectado en producción, no en dry-run): `PPO.learn` bloquea el event loop de FastAPI
+
+**Síntoma:** el scheduler llama a `RunAutoRetrain.execute()`, que ejecuta `RealModelTrainer.train()` → `PPO.learn(total_timesteps=100_000)` síncronamente dentro del event loop de FastAPI. El job se queda atascado >120s y **FastAPI deja de responder a TODOS los requests** (health check incluido). El EA se queda sin backend.
+
+**Por qué el dry-run no lo detectó:** el dry-run usa `FakeModelTrainer` (no entrena PPO real). El bug solo aparece con `RealModelTrainer` + `PPO.learn` real, que es lo que corre en producción. **Lección:** el dry-run con fakes valida el caso de uso, no los adaptadores reales. La monitorización en producción sí cubre los adaptadores reales.
+
+**Fix (`f0bad6d`):** `_retrain_schedule_run_once` se ejecuta vía `loop.run_in_executor(None, ...)`, así que `train()` corre en un hilo separado y el event loop de FastAPI sigue respondiendo. El health check debe responder en <1s durante la ejecución del job.
+
+**Consideraciones pendientes (no urgentes):**
+- `run_in_executor(None, ...)` usa el `ThreadPoolExecutor` por defecto (`max_workers = min(32, os.cpu_count() + 4)`). Si en el futuro hay jobs concurrentes (múltiples símbolos), crear un `ThreadPoolExecutor` dedicado con `max_workers` configurable.
+- `PPO.learn(100_000)` tarda >120s (~3.3% de la hora). Si `total_timesteps` o el dataset crecen, puede solaparse con el siguiente ciclo horario. `retrain_in_progress` (bug 3) debería prevenirlo: si el job tarda >3600s, el siguiente ciclo ve `retrain_in_progress=True` y no ejecuta. Verificar que funciona.
+
+**.env de producción NO tocado por el agente.** El operador lo activó tras verificar el tag.
 
 ---
 
