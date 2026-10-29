@@ -62,7 +62,8 @@ async def _retrain_schedule_loop_new(
     """
     await asyncio.sleep(3600)  # warmup: dejar arrancar el sistema (misma cadencia que legacy)
     while True:
-        _retrain_schedule_run_once(run_auto_retrain)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _retrain_schedule_run_once, run_auto_retrain)
         await asyncio.sleep(3600)
 
 
