@@ -79,14 +79,14 @@ def test_fetch_trade_outcomes_devuelve_lista(monkeypatch):
     monkeypatch.setattr(db_conn, "get_pool", _fake_get_pool)
 
     fetcher = RealDataFetcher(pool=pool)
-    outcomes = asyncio.run(fetcher.fetch_trade_outcomes("EURUSD"))
+    outcomes = fetcher.fetch_trade_outcomes("EURUSD")
 
     assert len(outcomes) == 2
-    assert outcomes[0]["symbol"] == "EURUSD"
-    assert outcomes[0]["direction"] == "LONG"
-    assert outcomes[0]["pnl"] == 5.0
-    assert outcomes[1]["direction"] == "SHORT"
-    assert outcomes[1]["pnl"] == -2.0
+    assert outcomes[0].symbol == "EURUSD"
+    assert outcomes[0].direction == "LONG"
+    assert outcomes[0].pnl == 5.0
+    assert outcomes[1].direction == "SHORT"
+    assert outcomes[1].pnl == -2.0
 
 
 def test_fetch_candles_usa_httpx(monkeypatch):
@@ -98,7 +98,7 @@ def test_fetch_candles_usa_httpx(monkeypatch):
     monkeypatch.setattr(httpx, "AsyncClient", lambda timeout=60.0: client)
 
     fetcher = RealDataFetcher(mt5_http_url="http://localhost:8000")
-    candles = asyncio.run(fetcher.fetch_candles("EURUSD", count=500, timeframe="H1"))
+    candles = fetcher.fetch_candles("EURUSD", count=500, timeframe="H1")
 
     assert len(candles) == 1
     assert candles[0]["time"] == 1700000000
@@ -107,3 +107,33 @@ def test_fetch_candles_usa_httpx(monkeypatch):
         "timeframe": "H1",
         "count": 500,
     }
+
+
+def test_fetch_trade_outcomes_devuelve_TradeOutcome_no_dict(monkeypatch):
+    """Bug 2: fetch_trade_outcomes devuelve list[TradeOutcome], no dicts ni coroutines."""
+    import asyncio
+
+    import db.connection as db_conn
+    from src.domain.rules.trade_outcome import TradeOutcome
+
+    rows = [
+        _FakeRow(symbol="EURUSD", entry_time=datetime(2026, 1, 1, 0, 0),
+                 exit_time=datetime(2026, 1, 1, 1, 0), pnl=5.0, pnl_pct=0.5,
+                 direction="LONG", sl_hit=False, tp_hit=True, exit_reason="tp"),
+    ]
+    pool = _FakePool(rows)
+
+    async def _fake_get_pool():
+        return pool
+
+    monkeypatch.setattr(db_conn, "get_pool", _fake_get_pool)
+
+    fetcher = RealDataFetcher(pool=pool)
+    outcomes = fetcher.fetch_trade_outcomes("EURUSD")
+
+    assert isinstance(outcomes, list)
+    assert all(isinstance(o, TradeOutcome) for o in outcomes)
+    # Es síncrono: no devuelve coroutine (antes: async def → TypeError al iterar)
+    assert not asyncio.iscoroutine(outcomes)
+    assert outcomes[0].symbol == "EURUSD"
+    assert outcomes[0].pnl == 5.0

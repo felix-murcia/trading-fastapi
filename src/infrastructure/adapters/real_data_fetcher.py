@@ -12,6 +12,7 @@ Implementa DataFetcher por typing estructural:
   - fetch_candles(symbol, count, timeframe="H1") -> list
 """
 
+import asyncio
 import httpx
 from datetime import datetime
 
@@ -26,20 +27,42 @@ class RealDataFetcher(DataFetcher):
         # `pool` se inyecta en tests para no depender de asyncpg real.
         self._pool = pool
 
+    # ── Helpers async→sync ────────────────────────────────────────────────
+
+    def _run_async(self, coro):
+        """Ejecuta una corrutina async dentro o fuera de un event loop.
+
+        Usa un loop persistente para que el pool asyncpg y httpx no se cierren
+        entre llamadas. Dentro de FastAPI (loop corriendo) usa un hilo aparte.
+        """
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(asyncio.run, coro)
+                    return future.result()
+        except RuntimeError:
+            pass
+        if not hasattr(self, "_loop") or self._loop.is_closed():
+            self._loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._loop)
+        return self._loop.run_until_complete(coro)
+
     async def _pool_conn(self):
-        from db.connection import get_pool
+        from db.connection import get_pool, init_pool
 
-        return self._pool or get_pool()
+        if self._pool is not None:
+            return self._pool
+        try:
+            return get_pool()
+        except RuntimeError:
+            await init_pool()
+            return get_pool()
 
-    # ── fetch_trade_outcomes ────────────────────────────────────────────
-
-    async def fetch_trade_outcomes(
+    async def _fetch_trade_outcomes_async(
         self, symbol: str, since: float | None = None
     ) -> list:
-        """Devuelve trade_outcomes para `symbol` como lista de dicts.
-
-        Cada dict tiene las claves de TradeOutcome para poder construirlo.
-        """
         pool = await self._pool_conn()
         query = """
             SELECT symbol, entry_time, exit_time, pnl, pnl_pct, direction,
@@ -57,26 +80,23 @@ class RealDataFetcher(DataFetcher):
 
         rows = await pool.fetch(query, *params)
         return [
-            {
-                "symbol": str(row["symbol"]),
-                "entry_time": row["entry_time"].timestamp(),
-                "exit_time": row["exit_time"].timestamp(),
-                "pnl": float(row["pnl"]),
-                "pnl_pct": float(row["pnl_pct"]),
-                "direction": str(row["direction"]).upper(),
-                "sl_hit": bool(row["sl_hit"]),
-                "tp_hit": bool(row["tp_hit"]),
-                "exit_reason": str(row["exit_reason"]),
-            }
+            TradeOutcome(
+                symbol=str(row["symbol"]),
+                entry_time=row["entry_time"].timestamp(),
+                exit_time=row["exit_time"].timestamp(),
+                pnl=float(row["pnl"]),
+                pnl_pct=float(row["pnl_pct"]),
+                direction=str(row["direction"]).upper(),
+                sl_hit=bool(row["sl_hit"]),
+                tp_hit=bool(row["tp_hit"]),
+                exit_reason=str(row["exit_reason"]),
+            )
             for row in rows
         ]
 
-    # ── fetch_candles ───────────────────────────────────────────────────
-
-    async def fetch_candles(
+    async def _fetch_candles_async(
         self, symbol: str, count: int, timeframe: str = "H1"
     ) -> list:
-        """Obtiene velas históricas de MT5 MCP (async via httpx)."""
         async with httpx.AsyncClient(timeout=60.0) as client:
             res = await client.get(
                 f"{self._mt5_http_url}/api/v1/market/candles/latest",
@@ -90,3 +110,21 @@ class RealDataFetcher(DataFetcher):
             data = res.json()
         candles = data if isinstance(data, list) else data.get("candles", [])
         return sorted(candles, key=lambda c: c.get("time", 0))
+
+    # ── fetch_trade_outcomes ────────────────────────────────────────────
+    # Síncrono según el puerto DataFetcher. Delegada en _fetch_trade_outcomes_async.
+
+    def fetch_trade_outcomes(
+        self, symbol: str, since: float | None = None
+    ) -> list:
+        """Devuelve trade_outcomes para `symbol` como lista de dicts.
+
+        Cada dict tiene las claves de TradeOutcome para poder construirlo.
+        """
+        return self._run_async(self._fetch_trade_outcomes_async(symbol, since))
+
+    # ── fetch_candles ───────────────────────────────────────────────────
+
+    def fetch_candles(self, symbol: str, count: int, timeframe: str = "H1") -> list:
+        """Obtiene velas históricas de MT5 MCP."""
+        return self._run_async(self._fetch_candles_async(symbol, count, timeframe))
